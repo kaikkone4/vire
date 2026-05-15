@@ -1,7 +1,7 @@
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::{Path, PathBuf}, sync::Mutex};
+use std::{fs, path::{Path, PathBuf}, sync::{Mutex, MutexGuard}};
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
@@ -9,6 +9,10 @@ use uuid::Uuid;
 struct AppState { db: Mutex<Connection> }
 
 type CmdResult<T> = Result<T, String>;
+
+fn db_conn(state: &State<AppState>) -> CmdResult<MutexGuard<'_, Connection>> {
+    state.db.lock().map_err(|_| "Database lock is unavailable after an internal error; please restart Vire".to_string())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project { pub id: String, pub name: String, pub notes: Option<String>, pub archived: bool, pub created_at: String, pub updated_at: String }
@@ -128,7 +132,8 @@ pub fn summary_repo(conn: &Connection, start: String, end: String, project_id: O
 }
 fn csv_formula_neutralized(v: &str) -> String {
     let trimmed = v.trim_start_matches(|c: char| c.is_whitespace());
-    if trimmed.starts_with(['=', '+', '-', '@']) || matches!(v.chars().next(), Some('\t' | '\r')) {
+    // Spreadsheet apps can interpret cells as formulas after leading whitespace/control characters.
+    if trimmed.starts_with(['=', '+', '-', '@']) || matches!(v.chars().next(), Some('\t' | '\r' | '\n')) {
         format!("'{v}")
     } else {
         v.to_string()
@@ -142,22 +147,23 @@ pub fn export_csv_repo(conn: &Connection, start: String, end: String, project_id
 }
 
 #[tauri::command] fn get_capture_status() -> CaptureStatus { CaptureStatus { mode: "Manual Mode / Capture deferred".into(), message: "Automatic activity capture is not active in v0.1. Vire stores only projects and manual time entries locally.".into() } }
-#[tauri::command] fn list_projects(state: State<AppState>, include_archived: bool) -> CmdResult<Vec<Project>> { list_projects_repo(&state.db.lock().unwrap(), include_archived) }
-#[tauri::command] fn create_project(state: State<AppState>, input: ProjectInput) -> CmdResult<Project> { create_project_repo(&state.db.lock().unwrap(), input) }
-#[tauri::command] fn update_project(state: State<AppState>, id: String, input: ProjectInput) -> CmdResult<Project> { update_project_repo(&state.db.lock().unwrap(), id, input) }
-#[tauri::command] fn archive_project(state: State<AppState>, id: String) -> CmdResult<Project> { archive_project_repo(&state.db.lock().unwrap(), id) }
-#[tauri::command] fn list_time_entries(state: State<AppState>, start_date: String, end_date: String, project_id: Option<String>) -> CmdResult<Vec<TimeEntry>> { list_entries_repo(&state.db.lock().unwrap(), start_date, end_date, project_id) }
-#[tauri::command] fn create_time_entry(state: State<AppState>, input: TimeEntryInput) -> CmdResult<TimeEntry> { create_entry_repo(&state.db.lock().unwrap(), input) }
-#[tauri::command] fn update_time_entry(state: State<AppState>, id: String, input: TimeEntryInput) -> CmdResult<TimeEntry> { update_entry_repo(&state.db.lock().unwrap(), id, input) }
-#[tauri::command] fn delete_time_entry(state: State<AppState>, id: String) -> CmdResult<()> { delete_entry_repo(&state.db.lock().unwrap(), id) }
-#[tauri::command] fn get_summary(state: State<AppState>, start_date: String, end_date: String, project_id: Option<String>) -> CmdResult<Vec<SummaryRow>> { summary_repo(&state.db.lock().unwrap(), start_date, end_date, project_id) }
+#[tauri::command] fn list_projects(state: State<AppState>, include_archived: bool) -> CmdResult<Vec<Project>> { let db = db_conn(&state)?; list_projects_repo(&db, include_archived) }
+#[tauri::command] fn create_project(state: State<AppState>, input: ProjectInput) -> CmdResult<Project> { let db = db_conn(&state)?; create_project_repo(&db, input) }
+#[tauri::command] fn update_project(state: State<AppState>, id: String, input: ProjectInput) -> CmdResult<Project> { let db = db_conn(&state)?; update_project_repo(&db, id, input) }
+#[tauri::command] fn archive_project(state: State<AppState>, id: String) -> CmdResult<Project> { let db = db_conn(&state)?; archive_project_repo(&db, id) }
+#[tauri::command] fn list_time_entries(state: State<AppState>, start_date: String, end_date: String, project_id: Option<String>) -> CmdResult<Vec<TimeEntry>> { let db = db_conn(&state)?; list_entries_repo(&db, start_date, end_date, project_id) }
+#[tauri::command] fn create_time_entry(state: State<AppState>, input: TimeEntryInput) -> CmdResult<TimeEntry> { let db = db_conn(&state)?; create_entry_repo(&db, input) }
+#[tauri::command] fn update_time_entry(state: State<AppState>, id: String, input: TimeEntryInput) -> CmdResult<TimeEntry> { let db = db_conn(&state)?; update_entry_repo(&db, id, input) }
+#[tauri::command] fn delete_time_entry(state: State<AppState>, id: String) -> CmdResult<()> { let db = db_conn(&state)?; delete_entry_repo(&db, id) }
+#[tauri::command] fn get_summary(state: State<AppState>, start_date: String, end_date: String, project_id: Option<String>) -> CmdResult<Vec<SummaryRow>> { let db = db_conn(&state)?; summary_repo(&db, start_date, end_date, project_id) }
 #[tauri::command] fn export_report_csv(app: tauri::AppHandle, state: State<AppState>, start_date: String, end_date: String, project_id: Option<String>) -> CmdResult<Option<usize>> {
     validate_date_range(&start_date, &end_date)?;
     let destination = app.dialog().file().add_filter("CSV", &["csv"]).set_file_name("vire-report.csv").blocking_save_file();
     let Some(destination) = destination else { return Ok(None); };
     let path = destination.into_path().map_err(|_| "CSV export destination must be a local file path".to_string())?;
     validate_csv_destination(&path)?;
-    export_csv_repo(&state.db.lock().unwrap(), start_date, end_date, project_id, &path).map(Some)
+    let db = db_conn(&state)?;
+    export_csv_repo(&db, start_date, end_date, project_id, &path).map(Some)
 }
 
 fn validate_csv_destination(path: &Path) -> Result<(), String> {
@@ -183,6 +189,6 @@ mod tests {
     #[test] fn rejects_overlong_text_fields() { let c=conn(); assert!(create_project_repo(&c,ProjectInput{name:"x".repeat(MAX_PROJECT_NAME_LEN+1),notes:None}).unwrap_err().contains("Project name")); assert!(create_project_repo(&c,ProjectInput{name:"P".into(),notes:Some("x".repeat(MAX_PROJECT_NOTES_LEN+1))}).unwrap_err().contains("Project notes")); let p=create_project_repo(&c,ProjectInput{name:"P".into(),notes:None}).unwrap(); assert!(create_entry_repo(&c,TimeEntryInput{project_id:p.id,date:"2026-01-01".into(),start_time:"09:00".into(),end_time:"10:00".into(),note:Some("x".repeat(MAX_ENTRY_NOTE_LEN+1))}).unwrap_err().contains("Entry note")); }
     #[test] fn new_entries_reject_archived_projects_but_existing_can_keep_same_project() { let c=conn(); let p=create_project_repo(&c,ProjectInput{name:"Archived".into(),notes:None}).unwrap(); let e=create_entry_repo(&c,TimeEntryInput{project_id:p.id.clone(),date:"2026-01-01".into(),start_time:"09:00".into(),end_time:"10:00".into(),note:None}).unwrap(); archive_project_repo(&c,p.id.clone()).unwrap(); assert!(create_entry_repo(&c,TimeEntryInput{project_id:p.id.clone(),date:"2026-01-02".into(),start_time:"09:00".into(),end_time:"10:00".into(),note:None}).is_err()); assert!(update_entry_repo(&c,e.id,TimeEntryInput{project_id:p.id,date:"2026-01-01".into(),start_time:"09:00".into(),end_time:"10:30".into(),note:None}).is_ok()); }
     #[test] fn delete_missing_entry_returns_error() { let c=conn(); assert!(delete_entry_repo(&c,"missing".into()).unwrap_err().contains("not found")); }
-    #[test] fn csv_cells_neutralize_formula_prefixes_and_escape_carriage_returns() { assert_eq!(csv_escape("=SUM(1,2)"), "\"'=SUM(1,2)\""); assert_eq!(csv_escape("  @cmd"), "'  @cmd"); assert_eq!(csv_escape("line\rbreak"), "\"line\rbreak\""); }
+    #[test] fn csv_cells_neutralize_formula_prefixes_and_escape_control_prefixes() { assert_eq!(csv_escape("=SUM(1,2)"), "\"'=SUM(1,2)\""); assert_eq!(csv_escape("  @cmd"), "'  @cmd"); assert_eq!(csv_escape("\nplain"), "\"'\nplain\""); assert_eq!(csv_escape("line\rbreak"), "\"line\rbreak\""); }
 }
 
