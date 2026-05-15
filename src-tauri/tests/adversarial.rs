@@ -125,7 +125,7 @@ fn csv_export_neutralizes_formula_like_project_names_and_notes() {
     let csv = std::fs::read_to_string(out.path()).unwrap();
 
     assert!(csv.contains("'="), "formula-like project name should be prefixed: {csv}");
-    assert!(csv.contains("\"'+SUM(1,2) with bare\rcarriage return\""), "formula-like note should be prefixed and bare CR should force CSV quoting: {csv}");
+    assert!(csv.contains("\"' +SUM(1,2) with bare\rcarriage return\""), "formula-like note should be prefixed, preserve leading whitespace, and bare CR should force CSV quoting: {csv}");
     assert!(!csv.contains(",=WEBSERVICE"), "project formula must not be emitted as an executable CSV cell: {csv}");
     assert!(!csv.contains(",+SUM"), "note formula must not be emitted as an executable CSV cell: {csv}");
 }
