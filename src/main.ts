@@ -1,13 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
 import './style.css';
 import { escapeHtml as esc } from './html';
+import { localDateInputValue } from './date';
 
 type View='Today'|'Projects'|'Manual Entry'|'Reports'|'Settings';
 type Project={id:string;name:string;notes?:string|null;archived:boolean};
 type Entry={id:string;project_id:string;project_name:string;date:string;start_time:string;end_time:string;duration_minutes:number;note?:string|null};
 type Summary={project_id:string;project_name:string;duration_minutes:number};
 const views:View[]=['Today','Projects','Manual Entry','Reports','Settings'];
-const today=()=>new Date().toISOString().slice(0,10);
+const today=()=>localDateInputValue();
 let current:View='Today', projects:Project[]=[], allProjects:Project[]=[], entries:Entry[]=[], summaries:Summary[]=[];
 let editingProject:Project|null=null, editingEntry:Entry|null=null;
 
