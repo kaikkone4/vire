@@ -108,7 +108,7 @@ pub fn update_entry_repo(conn: &Connection, id: String, input: TimeEntryInput) -
     let note = validate_entry_note(input.note)?;
     conn.execute("UPDATE time_entries SET project_id=?1,date=?2,start_time=?3,end_time=?4,duration_minutes=?5,note=?6,updated_at=?7 WHERE id=?8", params![input.project_id,input.date,input.start_time,input.end_time,duration,note,now(),id]).map_err(|e| e.to_string())?; get_entry(conn, &id)
 }
-pub fn delete_entry_repo(conn: &Connection, id: String) -> Result<(), String> { conn.execute("DELETE FROM time_entries WHERE id=?1", params![id]).map_err(|e| e.to_string())?; Ok(()) }
+pub fn delete_entry_repo(conn: &Connection, id: String) -> Result<(), String> { let affected = conn.execute("DELETE FROM time_entries WHERE id=?1", params![id]).map_err(|e| e.to_string())?; if affected == 0 { return Err("Time entry not found".into()); } Ok(()) }
 pub fn list_entries_repo(conn: &Connection, start: String, end: String, project_id: Option<String>) -> Result<Vec<TimeEntry>, String> {
     validate_date_range(&start, &end)?;
     let mut sql = "SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2".to_string();
@@ -126,7 +126,15 @@ pub fn summary_repo(conn: &Connection, start: String, end: String, project_id: O
     let rows = if let Some(pid)=project_id { stmt.query_map(params![start,end,pid], mapper).map_err(|e| e.to_string())?.collect() } else { stmt.query_map(params![start,end], mapper).map_err(|e| e.to_string())?.collect() };
     rows.map_err(|e| e.to_string())
 }
-fn csv_escape(v: &str) -> String { if v.contains([',','\n','"']) { format!("\"{}\"", v.replace('"', "\"\"")) } else { v.to_string() } }
+fn csv_formula_neutralized(v: &str) -> String {
+    let trimmed = v.trim_start_matches(|c: char| c.is_whitespace());
+    if trimmed.starts_with(['=', '+', '-', '@']) || matches!(v.chars().next(), Some('\t' | '\r')) {
+        format!("'{v}")
+    } else {
+        v.to_string()
+    }
+}
+fn csv_escape(v: &str) -> String { let safe = csv_formula_neutralized(v); if safe.contains([',','\n','\r','"']) { format!("\"{}\"", safe.replace('"', "\"\"")) } else { safe } }
 pub fn export_csv_repo(conn: &Connection, start: String, end: String, project_id: Option<String>, path: &Path) -> Result<usize, String> {
     let entries = list_entries_repo(conn, start, end, project_id)?; let mut out = String::from("date,project,start_time,end_time,duration_minutes,note,total_duration_hours\n");
     for e in &entries { out.push_str(&format!("{},{},{},{},{},{},{:.2}\n", e.date, csv_escape(&e.project_name), e.start_time, e.end_time, e.duration_minutes, csv_escape(e.note.as_deref().unwrap_or("")), e.duration_minutes as f64 / 60.0)); }
@@ -174,5 +182,7 @@ mod tests {
     #[test] fn persistence_across_reopen() { let f=NamedTempFile::new().unwrap(); { let c=Connection::open(f.path()).unwrap(); init_db(&c).unwrap(); create_project_repo(&c,ProjectInput{name:"Persist".into(),notes:None}).unwrap(); } let c=Connection::open(f.path()).unwrap(); init_db(&c).unwrap(); assert_eq!(list_projects_repo(&c,false).unwrap()[0].name,"Persist"); }
     #[test] fn rejects_overlong_text_fields() { let c=conn(); assert!(create_project_repo(&c,ProjectInput{name:"x".repeat(MAX_PROJECT_NAME_LEN+1),notes:None}).unwrap_err().contains("Project name")); assert!(create_project_repo(&c,ProjectInput{name:"P".into(),notes:Some("x".repeat(MAX_PROJECT_NOTES_LEN+1))}).unwrap_err().contains("Project notes")); let p=create_project_repo(&c,ProjectInput{name:"P".into(),notes:None}).unwrap(); assert!(create_entry_repo(&c,TimeEntryInput{project_id:p.id,date:"2026-01-01".into(),start_time:"09:00".into(),end_time:"10:00".into(),note:Some("x".repeat(MAX_ENTRY_NOTE_LEN+1))}).unwrap_err().contains("Entry note")); }
     #[test] fn new_entries_reject_archived_projects_but_existing_can_keep_same_project() { let c=conn(); let p=create_project_repo(&c,ProjectInput{name:"Archived".into(),notes:None}).unwrap(); let e=create_entry_repo(&c,TimeEntryInput{project_id:p.id.clone(),date:"2026-01-01".into(),start_time:"09:00".into(),end_time:"10:00".into(),note:None}).unwrap(); archive_project_repo(&c,p.id.clone()).unwrap(); assert!(create_entry_repo(&c,TimeEntryInput{project_id:p.id.clone(),date:"2026-01-02".into(),start_time:"09:00".into(),end_time:"10:00".into(),note:None}).is_err()); assert!(update_entry_repo(&c,e.id,TimeEntryInput{project_id:p.id,date:"2026-01-01".into(),start_time:"09:00".into(),end_time:"10:30".into(),note:None}).is_ok()); }
+    #[test] fn delete_missing_entry_returns_error() { let c=conn(); assert!(delete_entry_repo(&c,"missing".into()).unwrap_err().contains("not found")); }
+    #[test] fn csv_cells_neutralize_formula_prefixes_and_escape_carriage_returns() { assert_eq!(csv_escape("=SUM(1,2)"), "\"'=SUM(1,2)\""); assert_eq!(csv_escape("  @cmd"), "'  @cmd"); assert_eq!(csv_escape("line\rbreak"), "\"line\rbreak\""); }
 }
 
