@@ -22,9 +22,10 @@ npm run tauri:build
 
 ```sh
 npm test
+npm run test:frontend
 ```
 
-The test suite covers project create/update/archive persistence and active filtering, manual entry create/update/delete and validation, summary totals, CSV filtering/escaping, and SQLite persistence across reopen.
+The test suite covers project create/update/archive persistence and active filtering, manual entry create/update/delete and validation, summary totals, CSV filtering/escaping, text length validation, archived-project historical edits, inverted date-range rejection, SQLite persistence across reopen, and frontend HTML escaping for adversarial payloads.
 
 ## Manual verification
 
