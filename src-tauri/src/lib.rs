@@ -1,0 +1,148 @@
+use chrono::{Local, NaiveDate, NaiveDateTime};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use std::{fs, path::{Path, PathBuf}, sync::Mutex};
+use tauri::{Manager, State};
+use uuid::Uuid;
+
+struct AppState { db: Mutex<Connection> }
+
+type CmdResult<T> = Result<T, String>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project { pub id: String, pub name: String, pub notes: Option<String>, pub archived: bool, pub created_at: String, pub updated_at: String }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeEntry { pub id: String, pub project_id: String, pub project_name: String, pub date: String, pub start_time: String, pub end_time: String, pub duration_minutes: i64, pub note: Option<String>, pub created_at: String, pub updated_at: String }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectInput { pub name: String, pub notes: Option<String> }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeEntryInput { pub project_id: String, pub date: String, pub start_time: String, pub end_time: String, pub note: Option<String> }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummaryRow { pub project_id: String, pub project_name: String, pub duration_minutes: i64 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureStatus { pub mode: String, pub message: String }
+
+fn now() -> String { Local::now().naive_local().format("%Y-%m-%d %H:%M:%S").to_string() }
+
+pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = ON;
+        CREATE TABLE IF NOT EXISTS projects (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, notes TEXT, archived INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS time_entries (
+          id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), date TEXT NOT NULL,
+          start_time TEXT NOT NULL, end_time TEXT NOT NULL, duration_minutes INTEGER NOT NULL,
+          note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT OR IGNORE INTO settings(key, value) VALUES ('capture_status', 'manual_mode_deferred');
+        CREATE INDEX IF NOT EXISTS idx_entries_date_project ON time_entries(date, project_id);")
+}
+
+fn clean_opt(s: Option<String>) -> Option<String> { s.and_then(|v| { let t = v.trim().to_string(); if t.is_empty() { None } else { Some(t) } }) }
+fn parse_duration(date: &str, start: &str, end: &str) -> Result<i64, String> {
+    let s = NaiveDateTime::parse_from_str(&format!("{} {}", date, start), "%Y-%m-%d %H:%M").map_err(|_| "Start date/time must be valid".to_string())?;
+    let e = NaiveDateTime::parse_from_str(&format!("{} {}", date, end), "%Y-%m-%d %H:%M").map_err(|_| "End date/time must be valid".to_string())?;
+    let mins = (e - s).num_minutes();
+    if mins <= 0 { return Err("End time must be after start time".into()); }
+    Ok(mins)
+}
+fn validate_date(date: &str) -> Result<(), String> { NaiveDate::parse_from_str(date, "%Y-%m-%d").map(|_|()).map_err(|_| "Date must use YYYY-MM-DD".into()) }
+fn project_exists_active(conn: &Connection, id: &str) -> Result<bool, String> {
+    conn.query_row("SELECT archived FROM projects WHERE id=?1", params![id], |r| r.get::<_, i64>(0)).optional().map_err(|e| e.to_string()).map(|v| v == Some(0))
+}
+
+pub fn create_project_repo(conn: &Connection, input: ProjectInput) -> Result<Project, String> {
+    let name = input.name.trim(); if name.is_empty() { return Err("Project name cannot be empty".into()); }
+    let id = Uuid::new_v4().to_string(); let ts = now(); let notes = clean_opt(input.notes);
+    conn.execute("INSERT INTO projects(id,name,notes,archived,created_at,updated_at) VALUES (?1,?2,?3,0,?4,?4)", params![id, name, notes, ts]).map_err(|e| e.to_string())?;
+    get_project(conn, &id)
+}
+fn get_project(conn: &Connection, id: &str) -> Result<Project, String> {
+    conn.query_row("SELECT id,name,notes,archived,created_at,updated_at FROM projects WHERE id=?1", params![id], |r| Ok(Project { id:r.get(0)?, name:r.get(1)?, notes:r.get(2)?, archived:r.get::<_,i64>(3)? != 0, created_at:r.get(4)?, updated_at:r.get(5)? })).map_err(|e| e.to_string())
+}
+pub fn update_project_repo(conn: &Connection, id: String, input: ProjectInput) -> Result<Project, String> {
+    let name = input.name.trim(); if name.is_empty() { return Err("Project name cannot be empty".into()); }
+    conn.execute("UPDATE projects SET name=?1, notes=?2, updated_at=?3 WHERE id=?4", params![name, clean_opt(input.notes), now(), id]).map_err(|e| e.to_string())?;
+    get_project(conn, &id)
+}
+pub fn archive_project_repo(conn: &Connection, id: String) -> Result<Project, String> {
+    conn.execute("UPDATE projects SET archived=1, updated_at=?1 WHERE id=?2", params![now(), id]).map_err(|e| e.to_string())?; get_project(conn, &id)
+}
+pub fn list_projects_repo(conn: &Connection, include_archived: bool) -> Result<Vec<Project>, String> {
+    let sql = if include_archived { "SELECT id,name,notes,archived,created_at,updated_at FROM projects ORDER BY archived,name" } else { "SELECT id,name,notes,archived,created_at,updated_at FROM projects WHERE archived=0 ORDER BY name" };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    stmt.query_map([], |r| Ok(Project { id:r.get(0)?, name:r.get(1)?, notes:r.get(2)?, archived:r.get::<_,i64>(3)? != 0, created_at:r.get(4)?, updated_at:r.get(5)? }))
+        .map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())
+}
+
+pub fn create_entry_repo(conn: &Connection, input: TimeEntryInput) -> Result<TimeEntry, String> {
+    validate_date(&input.date)?; let duration = parse_duration(&input.date, &input.start_time, &input.end_time)?;
+    if !project_exists_active(conn, &input.project_id)? { return Err("Time entries must reference an active project".into()); }
+    let id = Uuid::new_v4().to_string(); let ts = now(); let note = clean_opt(input.note);
+    conn.execute("INSERT INTO time_entries(id,project_id,date,start_time,end_time,duration_minutes,note,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8)", params![id,input.project_id,input.date,input.start_time,input.end_time,duration,note,ts]).map_err(|e| e.to_string())?;
+    get_entry(conn, &id)
+}
+fn get_entry(conn: &Connection, id: &str) -> Result<TimeEntry, String> {
+    conn.query_row("SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.id=?1", params![id], row_to_entry).map_err(|e| e.to_string())
+}
+fn row_to_entry(r: &rusqlite::Row) -> rusqlite::Result<TimeEntry> { Ok(TimeEntry { id:r.get(0)?, project_id:r.get(1)?, project_name:r.get(2)?, date:r.get(3)?, start_time:r.get(4)?, end_time:r.get(5)?, duration_minutes:r.get(6)?, note:r.get(7)?, created_at:r.get(8)?, updated_at:r.get(9)? }) }
+pub fn update_entry_repo(conn: &Connection, id: String, input: TimeEntryInput) -> Result<TimeEntry, String> {
+    validate_date(&input.date)?; let duration = parse_duration(&input.date, &input.start_time, &input.end_time)?;
+    if !project_exists_active(conn, &input.project_id)? { return Err("Time entries must reference an active project".into()); }
+    conn.execute("UPDATE time_entries SET project_id=?1,date=?2,start_time=?3,end_time=?4,duration_minutes=?5,note=?6,updated_at=?7 WHERE id=?8", params![input.project_id,input.date,input.start_time,input.end_time,duration,clean_opt(input.note),now(),id]).map_err(|e| e.to_string())?; get_entry(conn, &id)
+}
+pub fn delete_entry_repo(conn: &Connection, id: String) -> Result<(), String> { conn.execute("DELETE FROM time_entries WHERE id=?1", params![id]).map_err(|e| e.to_string())?; Ok(()) }
+pub fn list_entries_repo(conn: &Connection, start: String, end: String, project_id: Option<String>) -> Result<Vec<TimeEntry>, String> {
+    validate_date(&start)?; validate_date(&end)?;
+    let mut sql = "SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2".to_string();
+    if project_id.is_some() { sql.push_str(" AND e.project_id=?3"); } sql.push_str(" ORDER BY e.date DESC,e.start_time DESC");
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = if let Some(pid)=project_id { stmt.query_map(params![start,end,pid], row_to_entry).map_err(|e| e.to_string())?.collect() } else { stmt.query_map(params![start,end], row_to_entry).map_err(|e| e.to_string())?.collect() };
+    rows.map_err(|e| e.to_string())
+}
+pub fn summary_repo(conn: &Connection, start: String, end: String, project_id: Option<String>) -> Result<Vec<SummaryRow>, String> {
+    validate_date(&start)?; validate_date(&end)?;
+    let mut sql = "SELECT p.id,p.name,COALESCE(SUM(e.duration_minutes),0) FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2".to_string();
+    if project_id.is_some() { sql.push_str(" AND e.project_id=?3"); } sql.push_str(" GROUP BY p.id,p.name ORDER BY p.name");
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mapper = |r: &rusqlite::Row| Ok(SummaryRow { project_id:r.get(0)?, project_name:r.get(1)?, duration_minutes:r.get(2)? });
+    let rows = if let Some(pid)=project_id { stmt.query_map(params![start,end,pid], mapper).map_err(|e| e.to_string())?.collect() } else { stmt.query_map(params![start,end], mapper).map_err(|e| e.to_string())?.collect() };
+    rows.map_err(|e| e.to_string())
+}
+fn csv_escape(v: &str) -> String { if v.contains([',','\n','"']) { format!("\"{}\"", v.replace('"', "\"\"")) } else { v.to_string() } }
+pub fn export_csv_repo(conn: &Connection, start: String, end: String, project_id: Option<String>, path: &Path) -> Result<usize, String> {
+    let entries = list_entries_repo(conn, start, end, project_id)?; let mut out = String::from("date,project,start_time,end_time,duration_minutes,note,total_duration_hours\n");
+    for e in &entries { out.push_str(&format!("{},{},{},{},{},{},{:.2}\n", e.date, csv_escape(&e.project_name), e.start_time, e.end_time, e.duration_minutes, csv_escape(e.note.as_deref().unwrap_or("")), e.duration_minutes as f64 / 60.0)); }
+    fs::write(path, out).map_err(|e| e.to_string())?; Ok(entries.len())
+}
+
+#[tauri::command] fn get_capture_status() -> CaptureStatus { CaptureStatus { mode: "Manual Mode / Capture deferred".into(), message: "Automatic activity capture is not active in v0.1. Vire stores only projects and manual time entries locally.".into() } }
+#[tauri::command] fn list_projects(state: State<AppState>, include_archived: bool) -> CmdResult<Vec<Project>> { list_projects_repo(&state.db.lock().unwrap(), include_archived) }
+#[tauri::command] fn create_project(state: State<AppState>, input: ProjectInput) -> CmdResult<Project> { create_project_repo(&state.db.lock().unwrap(), input) }
+#[tauri::command] fn update_project(state: State<AppState>, id: String, input: ProjectInput) -> CmdResult<Project> { update_project_repo(&state.db.lock().unwrap(), id, input) }
+#[tauri::command] fn archive_project(state: State<AppState>, id: String) -> CmdResult<Project> { archive_project_repo(&state.db.lock().unwrap(), id) }
+#[tauri::command] fn list_time_entries(state: State<AppState>, start_date: String, end_date: String, project_id: Option<String>) -> CmdResult<Vec<TimeEntry>> { list_entries_repo(&state.db.lock().unwrap(), start_date, end_date, project_id) }
+#[tauri::command] fn create_time_entry(state: State<AppState>, input: TimeEntryInput) -> CmdResult<TimeEntry> { create_entry_repo(&state.db.lock().unwrap(), input) }
+#[tauri::command] fn update_time_entry(state: State<AppState>, id: String, input: TimeEntryInput) -> CmdResult<TimeEntry> { update_entry_repo(&state.db.lock().unwrap(), id, input) }
+#[tauri::command] fn delete_time_entry(state: State<AppState>, id: String) -> CmdResult<()> { delete_entry_repo(&state.db.lock().unwrap(), id) }
+#[tauri::command] fn get_summary(state: State<AppState>, start_date: String, end_date: String, project_id: Option<String>) -> CmdResult<Vec<SummaryRow>> { summary_repo(&state.db.lock().unwrap(), start_date, end_date, project_id) }
+#[tauri::command] fn export_report_csv(state: State<AppState>, start_date: String, end_date: String, project_id: Option<String>, destination: String) -> CmdResult<usize> { export_csv_repo(&state.db.lock().unwrap(), start_date, end_date, project_id, Path::new(&destination)) }
+
+fn db_path(app: &tauri::App) -> PathBuf { let dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::current_dir().unwrap()); fs::create_dir_all(&dir).ok(); dir.join("vire.sqlite") }
+pub fn run() {
+    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).setup(|app| { let conn = Connection::open(db_path(app))?; init_db(&conn)?; app.manage(AppState { db: Mutex::new(conn) }); Ok(()) })
+        .invoke_handler(tauri::generate_handler![get_capture_status,list_projects,create_project,update_project,archive_project,list_time_entries,create_time_entry,update_time_entry,delete_time_entry,get_summary,export_report_csv])
+        .run(tauri::generate_context!()).expect("error while running Vire");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*; use tempfile::NamedTempFile;
+    fn conn() -> Connection { let c = Connection::open_in_memory().unwrap(); init_db(&c).unwrap(); c }
+    #[test] fn project_crud_archive_and_active_filter() { let c=conn(); let p=create_project_repo(&c, ProjectInput{name:" Alpha ".into(), notes:Some("n".into())}).unwrap(); let p=update_project_repo(&c,p.id.clone(),ProjectInput{name:"Beta".into(),notes:None}).unwrap(); assert_eq!(p.name,"Beta"); archive_project_repo(&c,p.id).unwrap(); assert_eq!(list_projects_repo(&c,false).unwrap().len(),0); assert_eq!(list_projects_repo(&c,true).unwrap().len(),1); }
+    #[test] fn manual_entry_crud_delete_and_validation() { let c=conn(); let p=create_project_repo(&c,ProjectInput{name:"P".into(),notes:None}).unwrap(); assert!(create_entry_repo(&c,TimeEntryInput{project_id:p.id.clone(),date:"2026-01-01".into(),start_time:"10:00".into(),end_time:"09:00".into(),note:None}).is_err()); let e=create_entry_repo(&c,TimeEntryInput{project_id:p.id.clone(),date:"2026-01-01".into(),start_time:"09:00".into(),end_time:"10:00".into(),note:None}).unwrap(); let e=update_entry_repo(&c,e.id.clone(),TimeEntryInput{project_id:p.id,date:"2026-01-01".into(),start_time:"09:00".into(),end_time:"10:30".into(),note:Some("done".into())}).unwrap(); assert_eq!(e.duration_minutes,90); delete_entry_repo(&c,e.id).unwrap(); assert!(list_entries_repo(&c,"2026-01-01".into(),"2026-01-01".into(),None).unwrap().is_empty()); }
+    #[test] fn summaries_and_csv_filtering_escape() { let c=conn(); let p1=create_project_repo(&c,ProjectInput{name:"A, Inc".into(),notes:None}).unwrap(); let p2=create_project_repo(&c,ProjectInput{name:"B".into(),notes:None}).unwrap(); create_entry_repo(&c,TimeEntryInput{project_id:p1.id.clone(),date:"2026-02-01".into(),start_time:"09:00".into(),end_time:"10:00".into(),note:Some("said \"hi\"".into())}).unwrap(); create_entry_repo(&c,TimeEntryInput{project_id:p2.id,date:"2026-02-01".into(),start_time:"10:00".into(),end_time:"12:00".into(),note:None}).unwrap(); let s=summary_repo(&c,"2026-02-01".into(),"2026-02-01".into(),Some(p1.id.clone())).unwrap(); assert_eq!(s[0].duration_minutes,60); let f=NamedTempFile::new().unwrap(); let n=export_csv_repo(&c,"2026-02-01".into(),"2026-02-01".into(),Some(p1.id),f.path()).unwrap(); let csv=std::fs::read_to_string(f.path()).unwrap(); assert_eq!(n,1); assert!(csv.contains("\"A, Inc\"")); assert!(csv.contains("\"said \"\"hi\"\"\"")); }
+    #[test] fn persistence_across_reopen() { let f=NamedTempFile::new().unwrap(); { let c=Connection::open(f.path()).unwrap(); init_db(&c).unwrap(); create_project_repo(&c,ProjectInput{name:"Persist".into(),notes:None}).unwrap(); } let c=Connection::open(f.path()).unwrap(); init_db(&c).unwrap(); assert_eq!(list_projects_repo(&c,false).unwrap()[0].name,"Persist"); }
+}
