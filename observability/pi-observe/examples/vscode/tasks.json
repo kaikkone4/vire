@@ -1,0 +1,17 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Observed frontend tests",
+      "type": "shell",
+      "command": "pi-observe run --tool vscode-task --role test --project vire -- npm run test:frontend",
+      "problemMatcher": []
+    },
+    {
+      "label": "Observed Tauri tests",
+      "type": "shell",
+      "command": "pi-observe run --tool vscode-task --role test --project vire -- npm test",
+      "problemMatcher": []
+    }
+  ]
+}
