@@ -109,3 +109,33 @@ test('project resolution uses env, project file, config map, then fallback with 
   assert.match(raw, /client/);
   assert.doesNotMatch(raw, /user@example\.com/);
 });
+
+test('path project mapping matches only real directory boundaries, not same-prefix siblings', () => {
+  const dirs = tempDirs();
+  const mapped = join(dirs.root, 'client');
+  const child = join(mapped, 'nested');
+  const sibling = join(dirs.root, 'client-other');
+  mkdirSync(child, { recursive: true });
+  mkdirSync(sibling, { recursive: true });
+  mkdirSync(dirs.config, { recursive: true });
+  writeFileSync(join(dirs.config, 'projects.json'), JSON.stringify({ projects: { vire: { paths: [mapped] } } }));
+
+  const baseEnv = { ...process.env, PI_OBSERVE_CONFIG_DIR: dirs.config, PI_OBSERVE_DOTENV: dirs.dotenv, LANGFUSE_PUBLIC_KEY: '', LANGFUSE_SECRET_KEY: '' };
+  const inside = spawnSync(process.execPath, [cli, 'run', '--tool', 'path-map', '--', process.execPath, '-e', ''], {
+    cwd: child,
+    encoding: 'utf8',
+    env: { ...baseEnv, PI_OBSERVE_STATE_DIR: join(dirs.root, 'inside-state') },
+  });
+  assert.equal(inside.status, 0, inside.stderr);
+  assert.match(readFileSync(join(dirs.root, 'inside-state/events.jsonl'), 'utf8'), /"project":"vire"/);
+
+  const outside = spawnSync(process.execPath, [cli, 'run', '--tool', 'path-map', '--', process.execPath, '-e', ''], {
+    cwd: sibling,
+    encoding: 'utf8',
+    env: { ...baseEnv, PI_OBSERVE_STATE_DIR: join(dirs.root, 'outside-state') },
+  });
+  assert.equal(outside.status, 0, outside.stderr);
+  const outsideRaw = readFileSync(join(dirs.root, 'outside-state/events.jsonl'), 'utf8');
+  assert.doesNotMatch(outsideRaw, /"project":"vire"/);
+  assert.match(outsideRaw, /"project":"client-other"/);
+});
