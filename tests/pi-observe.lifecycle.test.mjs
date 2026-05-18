@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const cli = new URL('../observability/pi-observe/bin/pi-observe.mjs', import.meta.url).pathname;
 const setup = new URL('../scripts/setup-local-observability.sh', import.meta.url).pathname;
+const langfuseUp = new URL('../scripts/langfuse-up.sh', import.meta.url).pathname;
+const langfuseSmoke = new URL('../scripts/langfuse-smoke-test.sh', import.meta.url).pathname;
 const exampleEnv = new URL('../observability/langfuse/.env.example', import.meta.url).pathname;
 
 function dirs(prefix = 'pi-observe-life-') {
@@ -64,4 +66,41 @@ test('setup first run creates chmod-600 env with generated secrets and does not 
   assert.equal(second.status, 0, second.stderr);
   assert.equal(readFileSync(envPath, 'utf8'), 'NEXTAUTH_SECRET=keep-me\n');
   assert.equal((statSync(envPath).mode & 0o777), 0o600);
+});
+
+test('helper scripts display sanitized Langfuse host values only', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-helper-host-'));
+  const lf = join(root, 'observability/langfuse');
+  const bin = join(root, 'fake-bin');
+  mkdirSync(lf, { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(lf, '.env'), 'LANGFUSE_HOST=https://user:password@example.com:8443/path?token=secret#frag\n');
+  writeFileSync(join(bin, 'docker'), '#!/usr/bin/env bash\nexit 0\n');
+  chmodSync(join(bin, 'docker'), 0o755);
+  const res = spawnSync('bash', [langfuseUp], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PATH: `${bin}:${process.env.PATH}` } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /https:\/\/example\.com:8443/);
+  assert.doesNotMatch(res.stdout + res.stderr, /user|password|token=secret|frag|\/path/);
+});
+
+test('smoke test sanitizes remote host display and skips curl without explicit opt-in', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-smoke-host-'));
+  const lf = join(root, 'observability/langfuse');
+  const piBin = join(root, 'observability/pi-observe/bin');
+  const fakeBin = join(root, 'fake-bin');
+  const curlMarker = join(root, 'curl-called');
+  mkdirSync(lf, { recursive: true });
+  mkdirSync(piBin, { recursive: true });
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(lf, '.env'), 'LANGFUSE_HOST=https://user:password@example.com:8443/path?token=secret#frag\n');
+  writeFileSync(join(piBin, 'pi-observe.mjs'), '#!/usr/bin/env bash\nif [[ "$1" == "run" ]]; then echo "stub run"; fi\nexit 0\n');
+  chmodSync(join(piBin, 'pi-observe.mjs'), 0o755);
+  writeFileSync(join(fakeBin, 'curl'), `#!/usr/bin/env bash\ntouch "${curlMarker}"\nexit 0\n`);
+  chmodSync(join(fakeBin, 'curl'), 0o755);
+  const res = spawnSync('bash', [langfuseSmoke], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PATH: `${fakeBin}:${process.env.PATH}` } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /https:\/\/example\.com:8443/);
+  assert.match(res.stdout, /Skipping health curl for non-loopback/);
+  assert.doesNotMatch(res.stdout + res.stderr, /user|password|token=secret|frag|\/path/);
+  assert.equal(existsSync(curlMarker), false, 'curl should not run for remote host without explicit opt-in');
 });

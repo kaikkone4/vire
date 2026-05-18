@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="${PI_OBSERVE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 ENV_FILE="$ROOT_DIR/observability/langfuse/.env"
 read_env_value() {
   local key="$1"
@@ -10,13 +10,30 @@ read_env_value() {
     $1 == k { sub(/^[^=]*=/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); gsub(/^\"|\"$/, ""); gsub(/^'"'"'|'"'"'$/, ""); print; exit }
   ' "$ENV_FILE"
 }
+sanitize_url_for_display() {
+  node -e '
+    try { const u = new URL(process.argv[1] || "http://localhost:3000"); console.log(`${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`); }
+    catch { console.log("invalid-host"); }
+  ' "$1" 2>/dev/null || printf '%s\n' 'invalid-host'
+}
+is_loopback_host() {
+  node -e '
+    try { const h = new URL(process.argv[1]).hostname.toLowerCase().replace(/^\[|\]$/g, ""); process.exit(["localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1"].includes(h) ? 0 : 1); }
+    catch { process.exit(1); }
+  ' "$1" 2>/dev/null
+}
 HOST="$(read_env_value LANGFUSE_HOST || true)"; HOST="${HOST:-http://localhost:3000}"
-printf 'Checking Langfuse health at %s ...\n' "$HOST"
+DISPLAY_HOST="$(sanitize_url_for_display "$HOST")"
+printf 'Checking Langfuse health at %s ...\n' "$DISPLAY_HOST"
 if command -v curl >/dev/null 2>&1; then
-  if curl -fsS "$HOST/api/public/health" >/dev/null; then
-    printf 'Health endpoint responded.\n'
+  if is_loopback_host "$HOST" || [[ "${PI_OBSERVE_ALLOW_REMOTE_LANGFUSE:-$(read_env_value PI_OBSERVE_ALLOW_REMOTE_LANGFUSE || true)}" == "true" ]]; then
+    if curl -fsS "$HOST/api/public/health" >/dev/null; then
+      printf 'Health endpoint responded.\n'
+    else
+      printf 'Health endpoint not ready yet or unavailable; continuing with fail-open wrapper test.\n'
+    fi
   else
-    printf 'Health endpoint not ready yet or unavailable; continuing with fail-open wrapper test.\n'
+    printf 'Skipping health curl for non-loopback Langfuse host %s; set PI_OBSERVE_ALLOW_REMOTE_LANGFUSE=true to opt in.\n' "$DISPLAY_HOST"
   fi
 fi
 STATE_DIR="$(mktemp -d)"
