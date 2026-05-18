@@ -23,7 +23,8 @@ The setup script checks Docker/Compose, Node/npm, and Rust/Cargo readiness. It a
 - `pi-observe` local state defaults to `~/.local/state/pi-observe/events.jsonl` and `runs.json`.
 - Defaults are metadata/summaries only. Full prompts, terminal streams, file contents, env dumps, and raw outputs are not captured.
 
-After first login, create Langfuse project API keys in the UI and paste only into local `.env`:
+After first login, create Langfuse project API keys in the UI and paste only into local `.env`. `./scripts/langfuse-smoke-test.sh` verifies local wrapper state and, when keys are present, checks that Langfuse's ingestion API accepts a smoke trace including response-body/per-event error checks. UI visibility is still called out separately because this local script does not depend on browser automation.
+
 
 ```sh
 LANGFUSE_PUBLIC_KEY=...

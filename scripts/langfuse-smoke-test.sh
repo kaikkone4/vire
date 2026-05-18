@@ -21,13 +21,14 @@ if command -v curl >/dev/null 2>&1; then
 fi
 STATE_DIR="$(mktemp -d)"
 PI_OBSERVE_STATE_DIR="$STATE_DIR" PI_OBSERVE_PROJECT=vire "$ROOT_DIR/observability/pi-observe/bin/pi-observe.mjs" run --tool smoke-test --role verification --summary "local smoke test" -- node -e "console.log('pi-observe smoke ok')"
+PI_OBSERVE_STATE_DIR="$STATE_DIR" PI_OBSERVE_PROJECT=vire PI_OBSERVE_IDLE_THRESHOLD_MS=0 "$ROOT_DIR/observability/pi-observe/bin/pi-observe.mjs" reconcile >/dev/null
 printf 'Local events written to %s/events.jsonl\n' "$STATE_DIR"
 PUBLIC_KEY="$(read_env_value LANGFUSE_PUBLIC_KEY || true)"
 SECRET_KEY="$(read_env_value LANGFUSE_SECRET_KEY || true)"
 if [[ -n "$PUBLIC_KEY" && -n "$SECRET_KEY" ]]; then
   printf 'Checking whether Langfuse ingestion accepts a smoke trace...\n'
   PI_OBSERVE_STATE_DIR="$STATE_DIR" PI_OBSERVE_PROJECT=vire "$ROOT_DIR/observability/pi-observe/bin/pi-observe.mjs" smoke-ingest --project vire
-  printf 'If accepted, check Langfuse UI for trace pi-observe.smoke-ingest.\n'
+  printf 'Ingestion API accepted the smoke trace including response-body checks; check Langfuse UI for trace pi-observe.smoke-ingest if you need visual confirmation.\n'
 else
   printf 'LANGFUSE_PUBLIC_KEY/SECRET_KEY are not configured; local event-store smoke test completed without remote trace.\n'
 fi

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
-const VERSION = '0.1.1';
+const VERSION = '0.1.2';
 const now = () => new Date().toISOString();
 const home = process.env.HOME || process.cwd();
 const scriptDir = dirname(realpathSync(fileURLToPath(import.meta.url)));
@@ -103,12 +103,13 @@ function resolveProject(explicit) {
     const cfgFile = JSON.parse(readFileSync(join(configDir, 'projects.json'), 'utf8'));
     const cwd = process.cwd(); const remote = safeGitRemoteHash();
     for (const [key, rule] of Object.entries(cfgFile.projects || {})) {
-      if (rule.paths?.some(p => cwd.startsWith(expand(p)))) return { key: safeToken(key), confidence: 'path-map' };
+      if (rule.paths?.some(p => pathContains(expand(p), cwd))) return { key: safeToken(key), confidence: 'path-map' };
       if (remote && rule.git_remote_hashes?.includes(remote)) return { key: safeToken(key), confidence: 'git-remote-hash' };
     }
   } catch {}
   return { key: safeToken(basename(process.cwd())), confidence: 'low' };
 }
+function pathContains(parent, child) { const rel = resolve(child).slice(resolve(parent).length); return resolve(child) === resolve(parent) || rel.startsWith('/'); }
 function safeGitBranchHash() { try { const b = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { encoding:'utf8', timeout: 500, stdio:['ignore','pipe','ignore'] }).trim(); return process.env.PI_OBSERVE_CAPTURE_GIT_BRANCH === 'true' ? safeToken(redact(b), 'branch') : hash(b); } catch { return undefined; } }
 function safeGitRemoteHash() { try { const r = execFileSync('git', ['config', '--get', 'remote.origin.url'], { encoding:'utf8', timeout: 500, stdio:['ignore','pipe','ignore'] }).trim(); return hash(r); } catch { return undefined; } }
 function appendEvent(e) { ensureDirs(); appendFileSync(eventsPath, JSON.stringify(sanitizeObject(e)) + '\n', { mode: 0o600 }); }
@@ -121,39 +122,93 @@ function withStateLock(fn) {
   }
   try { return fn(); } finally { try { rmdirSync(lock); } catch {} }
 }
+function initEntry(state, project) { state.active[project] ||= { count: 0, runs: [], run_started_at: {}, idle_countdown_started_at: null, idle_started_at: null }; state.active[project].runs ||= []; state.active[project].run_started_at ||= {}; return state.active[project]; }
 function addActive(project, runId) {
   return withStateLock(() => {
-    const state = readRuns(); state.active[project] ||= { count: 0, runs: [], idle_countdown_started_at: null };
-    const entry = state.active[project]; const prev = entry.runs.length;
+    const state = readRuns(); const entry = initEntry(state, project); const prev = entry.runs.length;
     if (!entry.runs.includes(runId)) entry.runs.push(runId);
+    entry.run_started_at[runId] ||= now();
     entry.count = entry.runs.length; const canceledIdle = prev === 0 && entry.idle_countdown_started_at;
-    entry.idle_countdown_started_at = null; entry.updated_at = now(); writeRuns(state);
+    entry.idle_countdown_started_at = null; entry.idle_started_at = null; entry.updated_at = now(); writeRuns(state);
     return { count: entry.count, previousCount: prev, canceledIdle };
   });
 }
 function removeActive(project, runId) {
   return withStateLock(() => {
-    const state = readRuns(); state.active[project] ||= { count: 0, runs: [], idle_countdown_started_at: null };
-    const entry = state.active[project]; const before = entry.runs.length;
-    if (runId) entry.runs = entry.runs.filter(r => r !== runId); else entry.runs = [];
+    const state = readRuns(); const entry = initEntry(state, project); const before = entry.runs.length;
+    if (runId) { entry.runs = entry.runs.filter(r => r !== runId); delete entry.run_started_at[runId]; } else { entry.runs = []; entry.run_started_at = {}; }
     entry.count = entry.runs.length; const removed = before !== entry.runs.length;
     if (entry.count === 0 && removed) entry.idle_countdown_started_at = now();
     entry.updated_at = now(); writeRuns(state); return { count: entry.count, removed, idleStartedAt: entry.idle_countdown_started_at };
   });
+}
+function reconcileState() {
+  const threshold = Number(process.env.PI_OBSERVE_IDLE_THRESHOLD_MS || 300000);
+  const orphanTimeout = Number(process.env.PI_OBSERVE_ORPHAN_TIMEOUT_MS || 21600000);
+  const ts = Date.now(); const generated = [];
+  const result = withStateLock(() => {
+    const state = readRuns();
+    for (const [project, entryRaw] of Object.entries(state.active || {})) {
+      const entry = initEntry(state, project);
+      const orphaned = [];
+      for (const runId of [...entry.runs]) {
+        const started = Date.parse(entry.run_started_at[runId] || entry.updated_at || now());
+        if (Number.isFinite(started) && ts - started >= orphanTimeout) orphaned.push(runId);
+      }
+      for (const runId of orphaned) {
+        entry.runs = entry.runs.filter(r => r !== runId); delete entry.run_started_at[runId];
+        generated.push({ event:'tool_orphaned', project, run_id: runId, timeout_ms: orphanTimeout, ts: now() });
+      }
+      const beforeCount = entry.count || 0; entry.count = entry.runs.length;
+      if (beforeCount > 0 && entry.count === 0 && orphaned.length) {
+        entry.idle_countdown_started_at = now(); entry.idle_started_at = null;
+        generated.push({ event:'idle_countdown_started', project, after_run_id: orphaned.at(-1), threshold_ms: threshold, ts: entry.idle_countdown_started_at });
+      }
+      if (entry.count === 0 && entry.idle_countdown_started_at && !entry.idle_started_at) {
+        const idleStart = Date.parse(entry.idle_countdown_started_at);
+        if (Number.isFinite(idleStart) && ts - idleStart >= threshold) {
+          entry.idle_started_at = now(); generated.push({ event:'idle_started', project, threshold_ms: threshold, ts: entry.idle_started_at });
+        }
+      }
+      entry.updated_at = now();
+    }
+    writeRuns(state); return state.active || {};
+  });
+  for (const event of generated) appendEvent(event);
+  return { active: result, events: generated };
+}
+function inspectIngestionBody(text) {
+  if (!text || !text.trim()) return { ok: true, body: null };
+  try {
+    const body = JSON.parse(text);
+    const haystack = JSON.stringify(body).toLowerCase();
+    const errorValue = body.errors ?? body.error ?? body.failures ?? body.failed ?? body.rejected ?? body.rejections;
+    const errorCountValue = body.errorCount ?? body.error_count ?? body.failureCount ?? body.failedCount ?? body.rejectedCount;
+    const errorCount = Array.isArray(errorValue) ? errorValue.length : (typeof errorValue === 'object' && errorValue ? Object.keys(errorValue).length : Number(errorValue ?? errorCountValue ?? 0));
+    const successValue = body.successes ?? body.successful ?? body.succeeded;
+    const successCount = Array.isArray(successValue) ? successValue.length : Number(successValue ?? body.successCount ?? body.success_count ?? NaN);
+    const hasExplicitErrorText = /\b(rejected|failed|invalid)\b/.test(haystack);
+    if ((Number.isFinite(errorCount) && errorCount > 0) || (Number.isFinite(successCount) && successCount === 0 && hasExplicitErrorText) || hasExplicitErrorText) return { ok: false, reason: 'body-errors', body };
+    return { ok: true, body };
+  } catch {
+    return { ok: true, body: null };
+  }
 }
 async function sendLangfuse(batch, { warn = true } = {}) {
   if (cfg('PI_OBSERVE_ENABLED') === 'false') return { attempted: false, ok: true };
   const host = cfg('LANGFUSE_HOST', 'http://localhost:3000');
   const pub = cfg('LANGFUSE_PUBLIC_KEY'), sec = cfg('LANGFUSE_SECRET_KEY');
   if (!pub || !sec) return { attempted: false, ok: false, reason: 'missing-keys' };
-  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), Number(cfg('PI_OBSERVE_LANGFUSE_TIMEOUT_MS', 1200)));
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), Number(cfg('PI_OBSERVE_LANGFUSE_TIMEOUT_MS', 400)));
   try {
     const res = await fetch(`${host.replace(/\/$/,'')}/api/public/ingestion`, { method:'POST', signal: ac.signal, headers:{ 'content-type':'application/json', authorization: `Basic ${Buffer.from(`${pub}:${sec}`).toString('base64')}` }, body: JSON.stringify({ batch }) });
-    if (!res.ok) {
-      if (warn) console.warn(`[pi-observe] telemetry rejected by Langfuse (${res.status}); command/result preserved locally`);
-      return { attempted: true, ok: false, status: res.status };
+    const text = await res.text();
+    const bodyCheck = inspectIngestionBody(text);
+    if (!res.ok || !bodyCheck.ok) {
+      if (warn) console.warn(`[pi-observe] telemetry rejected by Langfuse (${res.status}${bodyCheck.reason ? `/${bodyCheck.reason}` : ''}); command/result preserved locally`);
+      return { attempted: true, ok: false, status: res.status, reason: bodyCheck.reason || 'http-rejected' };
     }
-    return { attempted: true, ok: true, status: res.status };
+    return { attempted: true, ok: true, status: res.status, body: bodyCheck.body };
   } catch (e) {
     if (warn) console.warn(`[pi-observe] telemetry unavailable; command/result preserved locally (${redact(e.name || 'error')})`);
     return { attempted: true, ok: false, reason: e.name || 'error' };
@@ -183,8 +238,9 @@ function mark(active, argv) {
   if (active) { const added = addActive(project.key, runId); if (added.canceledIdle) appendEvent({ event:'idle_countdown_canceled', project: project.key, by_run_id: runId, ts: now() }); }
   else { const removed = removeActive(project.key, runId); if (removed.removed && removed.count === 0) appendEvent({ event:'idle_countdown_started', project: project.key, after_run_id: runId, threshold_ms:Number(process.env.PI_OBSERVE_IDLE_THRESHOLD_MS || 300000), ts: removed.idleStartedAt || now() }); }
 }
-function status() { console.log(JSON.stringify({ state_dir: stateDir, events_path: eventsPath, active: readRuns().active }, null, 2)); }
+function status() { const reconciled = reconcileState(); console.log(JSON.stringify({ state_dir: stateDir, events_path: eventsPath, active: reconciled.active, reconciled_events: reconciled.events.length }, null, 2)); }
+function reconcileCommand() { const reconciled = reconcileState(); console.log(JSON.stringify({ active: reconciled.active, events: reconciled.events }, null, 2)); }
 async function smokeIngest(argv) { const opts = parseArgs(argv); const project = resolveProject(opts.project); const id = randomUUID().replaceAll('-',''); const result = await sendLangfuse([{ id: randomUUID(), timestamp: now(), type:'trace-create', body:{ id, name:'pi-observe.smoke-ingest', userId: safeToken(cfg('PI_OBSERVE_USER_ID', 'local-janne')), tags:['local','smoke-test',project.key], metadata:{ wrapper_version: VERSION, project_key: project.key, smoke_test: true } } }], { warn: true }); if (!result.attempted) { console.error('[pi-observe] Langfuse API keys are not configured; ingestion smoke skipped'); process.exitCode = 2; } else if (!result.ok) { console.error('[pi-observe] Langfuse ingestion smoke was not accepted'); process.exitCode = 1; } else { console.log('[pi-observe] Langfuse ingestion accepted'); } }
-function help() { console.log(`pi-observe ${VERSION}\nUsage:\n  pi-observe run [--project key] [--tool name] [--role role] [--summary text] [--nonbillable] -- command [args...]\n  pi-observe mark-active [--project key] [--tool name] [--summary text]\n  pi-observe mark-inactive [--project key] [--tool name]\n  pi-observe smoke-ingest [--project key]\n  pi-observe status\n\nDefaults are metadata-only; raw prompts/output are not captured. Langfuse credentials are loaded from observability/langfuse/.env without shell sourcing and are not passed to child commands.`); }
+function help() { console.log(`pi-observe ${VERSION}\nUsage:\n  pi-observe run [--project key] [--tool name] [--role role] [--summary text] [--nonbillable] -- command [args...]\n  pi-observe mark-active [--project key] [--tool name] [--summary text]\n  pi-observe mark-inactive [--project key] [--tool name]\n  pi-observe smoke-ingest [--project key]\n  pi-observe reconcile\n  pi-observe status\n\nDefaults are metadata-only; raw prompts/output are not captured. Langfuse credentials are loaded from observability/langfuse/.env without shell sourcing and are not passed to child commands.`); }
 const [cmd, ...rest] = process.argv.slice(2);
-try { if (cmd === 'run') await run(rest); else if (cmd === 'mark-active') mark(true, rest); else if (cmd === 'mark-inactive') mark(false, rest); else if (cmd === 'smoke-ingest') await smokeIngest(rest); else if (cmd === 'status') status(); else help(); } catch (e) { console.error(`[pi-observe] ${redact(e.message)}`); process.exit(2); }
+try { if (cmd === 'run') await run(rest); else if (cmd === 'mark-active') mark(true, rest); else if (cmd === 'mark-inactive') mark(false, rest); else if (cmd === 'smoke-ingest') await smokeIngest(rest); else if (cmd === 'reconcile') reconcileCommand(); else if (cmd === 'status') status(); else help(); } catch (e) { console.error(`[pi-observe] ${redact(e.message)}`); process.exit(2); }

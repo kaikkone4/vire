@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="${PI_OBSERVE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 LF_DIR="$ROOT_DIR/observability/langfuse"
 ENV_FILE="$LF_DIR/.env"
 EXAMPLE_FILE="$LF_DIR/.env.example"
@@ -9,7 +9,21 @@ say(){ printf '\n==> %s\n' "$*"; }
 ask(){ printf '%s [y/N] ' "$*"; read -r ans || true; case "$ans" in y|Y|yes|YES) return 0;; *) return 1;; esac; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 open_url(){ if have open; then open "$1"; elif have xdg-open; then xdg-open "$1"; else printf 'Open manually: %s\n' "$1"; fi; }
-secret(){ LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-48}"; }
+secret(){
+  local len="${1:-48}"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex "$(( (len + 1) / 2 ))" | cut -c1-"$len"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$len" <<'PY'
+import secrets, string, sys
+alphabet = string.ascii_letters + string.digits
+print(''.join(secrets.choice(alphabet) for _ in range(int(sys.argv[1]))))
+PY
+  else
+    # Finite dd input avoids the tr|head SIGPIPE failure mode under pipefail.
+    LC_ALL=C dd if=/dev/urandom bs=256 count=4 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | awk -v n="$len" '{ out = out $0 } END { if (length(out) < n) exit 1; print substr(out, 1, n) }'
+  fi
+}
 replace_empty(){ local key="$1" value="$2"; perl -0pi -e "s/^$key=\s*\$/$key=$value/m" "$ENV_FILE"; }
 
 say "Local observability setup (Langfuse + pi-observe)"

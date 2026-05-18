@@ -11,6 +11,7 @@ pi-observe run --tool copilot-cli --role suggest --project vire -- gh copilot su
 pi-observe mark-active --tool cursor --project vire --summary "Cursor coding session"
 pi-observe mark-inactive --tool cursor --project vire
 pi-observe status
+pi-observe reconcile
 ```
 
 Project resolution order: `--project`, `PI_OBSERVE_PROJECT`, nearest `.pi-project`/`.vire-project`, `~/.config/pi-observe/projects.json`, then cwd basename (low confidence).
@@ -19,7 +20,7 @@ Project resolution order: `--project`, `PI_OBSERVE_PROJECT`, nearest `.pi-projec
 
 Each billable observed run increments a per-project active counter. Idle countdown starts only when the counter returns to zero. A new billable run cancels/resets any existing idle countdown for that project. Concurrent projects are tracked independently. Editor launch wrappers are nonbillable context signals by default; for GUI tools prefer manual active/inactive markers or observed tasks for billable work.
 
-Current limitations: phase 1 records `idle_countdown_started`/`idle_countdown_canceled` events but does not run a background timer to append `idle_started` after the threshold. Orphaned-run reconciliation is not automatic yet; inspect `pi-observe status` / `events.jsonl` if a wrapper process is killed before finish handling.
+Idle completion and orphan reconciliation are explicit maintenance operations in phase 1. `pi-observe status` runs reconciliation before printing state, and `pi-observe reconcile` can be called from a cron/LaunchAgent or smoke/setup flow. Reconciliation appends `idle_started` after `PI_OBSERVE_IDLE_THRESHOLD_MS` elapses and marks active runs older than `PI_OBSERVE_ORPHAN_TIMEOUT_MS` as `tool_orphaned`, then starts idle countdown if no active runs remain.
 
 ## Privacy defaults
 

@@ -69,6 +69,18 @@ test('safe dotenv parser loads only allowlisted Langfuse keys without shell exec
   assert.ok(requests >= 1, 'expected at least one Langfuse ingestion request using dotenv keys');
 });
 
+test('Langfuse 2xx body with ingestion errors warns and fails smoke-ingest', async () => {
+  const dirs = tempDirs();
+  const server = http.createServer((_req, res) => { res.writeHead(207, { 'content-type': 'application/json' }); res.end(JSON.stringify({ successes: 0, errors: [{ message: 'invalid event' }] })); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  writeFileSync(dirs.dotenv, `LANGFUSE_HOST=http://127.0.0.1:${server.address().port}\nLANGFUSE_PUBLIC_KEY=pk-local\nLANGFUSE_SECRET_KEY=sk-local\n`);
+  const res = await runAsync(['smoke-ingest', '--project', 'vire'], dirs);
+  server.close();
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /body-errors|not accepted|telemetry rejected/);
+  assert.doesNotMatch(res.stderr, /sk-local|pk-local/);
+});
+
 test('Langfuse HTTP rejection warns without blocking wrapped command', async () => {
   const dirs = tempDirs();
   const server = http.createServer((_req, res) => { res.writeHead(401); res.end('nope'); });
