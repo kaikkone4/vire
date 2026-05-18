@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmdirSync, realpathSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -16,7 +16,7 @@ const stateDir = expand(process.env.PI_OBSERVE_STATE_DIR || join(home, '.local/s
 const configDir = expand(process.env.PI_OBSERVE_CONFIG_DIR || join(home, '.config/pi-observe'));
 const eventsPath = join(stateDir, 'events.jsonl');
 const runsPath = join(stateDir, 'runs.json');
-const ALLOWED_DOTENV_KEYS = new Set(['LANGFUSE_HOST', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_PROJECT_ID', 'PI_OBSERVE_LANGFUSE_TIMEOUT_MS', 'PI_OBSERVE_USER_ID']);
+const ALLOWED_DOTENV_KEYS = new Set(['LANGFUSE_HOST', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_PROJECT_ID', 'PI_OBSERVE_LANGFUSE_TIMEOUT_MS', 'PI_OBSERVE_USER_ID', 'PI_OBSERVE_ALLOW_REMOTE_LANGFUSE']);
 const SCRUB_ENV_KEYS = new Set(['LANGFUSE_HOST', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_PROJECT_ID', 'NEXTAUTH_SECRET', 'SALT', 'ENCRYPTION_KEY', 'LANGFUSE_INIT_USER_PASSWORD', 'POSTGRES_PASSWORD', 'CLICKHOUSE_PASSWORD', 'REDIS_PASSWORD', 'MINIO_ROOT_PASSWORD', 'DATABASE_URL', 'DIRECT_URL', 'REDIS_CONNECTION_STRING']);
 
 function expand(p) { return p.replace(/^~(?=$|\/)/, home); }
@@ -27,6 +27,7 @@ function safeToken(value, fallback = 'unknown') {
   return raw || fallback;
 }
 function safeLabel(value) { return safeToken(basename(String(value || 'command')), 'command'); }
+function safeSessionId(value) { return value ? `session-${hash(redact(value), 24)}` : randomUUID(); }
 function redact(value) {
   if (value == null) return value;
   let s = String(value);
@@ -109,7 +110,13 @@ function resolveProject(explicit) {
   } catch {}
   return { key: safeToken(basename(process.cwd())), confidence: 'low' };
 }
-function pathContains(parent, child) { const rel = resolve(child).slice(resolve(parent).length); return resolve(child) === resolve(parent) || rel.startsWith('/'); }
+function canonicalPath(p) { try { return realpathSync(p); } catch { return resolve(p); } }
+function pathContains(parent, child) {
+  const base = canonicalPath(parent);
+  const target = canonicalPath(child);
+  const rel = relative(base, target);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !rel.startsWith('/') && !rel.startsWith('\\') && !resolve(rel).startsWith('/..'));
+}
 function safeGitBranchHash() { try { const b = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { encoding:'utf8', timeout: 500, stdio:['ignore','pipe','ignore'] }).trim(); return process.env.PI_OBSERVE_CAPTURE_GIT_BRANCH === 'true' ? safeToken(redact(b), 'branch') : hash(b); } catch { return undefined; } }
 function safeGitRemoteHash() { try { const r = execFileSync('git', ['config', '--get', 'remote.origin.url'], { encoding:'utf8', timeout: 500, stdio:['ignore','pipe','ignore'] }).trim(); return hash(r); } catch { return undefined; } }
 function appendEvent(e) { ensureDirs(); appendFileSync(eventsPath, JSON.stringify(sanitizeObject(e)) + '\n', { mode: 0o600 }); }
@@ -177,6 +184,14 @@ function reconcileState() {
   for (const event of generated) appendEvent(event);
   return { active: result, events: generated };
 }
+function isLoopbackLangfuseHost(host) {
+  try {
+    const u = new URL(host);
+    const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0:0:0:0:0:0:0:1';
+  } catch { return false; }
+}
+function safeHostLabel(host) { try { const u = new URL(host); return `${u.protocol}//${safeToken(u.hostname, 'host')}${u.port ? ':' + u.port : ''}`; } catch { return 'invalid-host'; } }
 function inspectIngestionBody(text) {
   if (!text || !text.trim()) return { ok: true, body: null };
   try {
@@ -199,6 +214,11 @@ async function sendLangfuse(batch, { warn = true } = {}) {
   const host = cfg('LANGFUSE_HOST', 'http://localhost:3000');
   const pub = cfg('LANGFUSE_PUBLIC_KEY'), sec = cfg('LANGFUSE_SECRET_KEY');
   if (!pub || !sec) return { attempted: false, ok: false, reason: 'missing-keys' };
+  if (!isLoopbackLangfuseHost(host) && cfg('PI_OBSERVE_ALLOW_REMOTE_LANGFUSE') !== 'true') {
+    if (warn) console.warn(`[pi-observe] remote Langfuse host ${safeHostLabel(host)} blocked by default; set PI_OBSERVE_ALLOW_REMOTE_LANGFUSE=true to opt in`);
+    return { attempted: false, ok: false, reason: 'remote-host-blocked' };
+  }
+  if (!isLoopbackLangfuseHost(host) && warn) console.warn(`[pi-observe] remote Langfuse telemetry explicitly enabled for ${safeHostLabel(host)}`);
   const ac = new AbortController(); const t = setTimeout(() => ac.abort(), Number(cfg('PI_OBSERVE_LANGFUSE_TIMEOUT_MS', 400)));
   try {
     const res = await fetch(`${host.replace(/\/$/,'')}/api/public/ingestion`, { method:'POST', signal: ac.signal, headers:{ 'content-type':'application/json', authorization: `Basic ${Buffer.from(`${pub}:${sec}`).toString('base64')}` }, body: JSON.stringify({ batch }) });
@@ -217,7 +237,7 @@ async function sendLangfuse(batch, { warn = true } = {}) {
 async function run(argv) {
   const opts = parseArgs(argv); if (!opts.command.length) throw new Error('Missing command after --');
   if (process.env.PI_OBSERVE_ENABLED === 'false') return spawnPassthrough(opts.command);
-  ensureDirs(); const project = resolveProject(opts.project); const runId = randomUUID(); const traceId = randomUUID().replaceAll('-',''); const sessionId = opts.session || process.env.PI_OBSERVE_SESSION || randomUUID(); const start = Date.now();
+  ensureDirs(); const project = resolveProject(opts.project); const runId = randomUUID(); const traceId = randomUUID().replaceAll('-',''); const sessionId = safeSessionId(opts.session || process.env.PI_OBSERVE_SESSION); const start = Date.now();
   const meta = { wrapper_version: VERSION, project_key: project.key, project_confidence: project.confidence, tool: safeToken(opts.tool || 'command'), role: opts.role ? safeToken(opts.role) : undefined, cwd_basename: safeToken(basename(process.cwd()), 'cwd'), git_branch: safeGitBranchHash(), git_remote_hash: safeGitRemoteHash(), command_label: safeLabel(opts.label || opts.command[0]), billable: opts.billable, summary: opts.summary ? redact(opts.summary) : undefined };
   appendEvent({ event:'tool_started', project:project.key, tool:meta.tool, role:meta.role, run_id:runId, session_id: sessionId, ts: now(), billable: opts.billable, metadata: meta });
   if (opts.billable) { const added = addActive(project.key, runId); if (added.canceledIdle) appendEvent({ event:'idle_countdown_canceled', project:project.key, by_run_id:runId, ts:now() }); }
@@ -231,7 +251,7 @@ async function run(argv) {
   process.exitCode = code;
 }
 function spawnPassthrough(cmd) { return new Promise(resolve => { const child = spawn(cmd[0], cmd.slice(1), { stdio:'inherit', env: scrubbedEnv() }); child.on('error', e => { console.error(`[pi-observe] failed to start command: ${redact(e.message)}`); resolve(127); }); child.on('close', (code, signal) => resolve(code ?? (signal === 'SIGINT' ? 130 : 1))); }); }
-function manualRunId(project, opts) { return opts.session || `manual:${project}:${safeToken(opts.tool || 'manual')}:${safeToken(opts.role || 'default')}`; }
+function manualRunId(project, opts) { return opts.session ? `manual:${project}:${safeSessionId(opts.session)}` : `manual:${project}:${safeToken(opts.tool || 'manual')}:${safeToken(opts.role || 'default')}`; }
 function mark(active, argv) {
   const opts = parseArgs(argv); const project = resolveProject(opts.project); const runId = manualRunId(project.key, opts); const tool = safeToken(opts.tool || 'manual'); const role = opts.role ? safeToken(opts.role) : undefined;
   appendEvent({ event: active ? 'manual_active' : 'manual_inactive', project: project.key, tool, role, run_id: runId, summary: opts.summary ? redact(opts.summary) : undefined, ts: now() });

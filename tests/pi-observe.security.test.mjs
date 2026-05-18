@@ -81,6 +81,30 @@ test('Langfuse 2xx body with ingestion errors warns and fails smoke-ingest', asy
   assert.doesNotMatch(res.stderr, /sk-local|pk-local/);
 });
 
+test('remote Langfuse host is blocked unless explicitly opted in', async () => {
+  const dirs = tempDirs();
+  let requests = 0;
+  const server = http.createServer((_req, res) => { requests += 1; res.writeHead(200); res.end('{}'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  writeFileSync(dirs.dotenv, `LANGFUSE_HOST=http://example.com:${server.address().port}\nLANGFUSE_PUBLIC_KEY=pk-local\nLANGFUSE_SECRET_KEY=sk-local\n`);
+  const res = await runAsync(['run', '--project', 'vire', '--tool', 'remote-block', '--', process.execPath, '-e', 'console.log("ran")'], dirs);
+  server.close();
+  assert.equal(res.status, 0);
+  assert.match(res.stdout, /ran/);
+  assert.match(res.stderr, /remote Langfuse host/);
+  assert.equal(requests, 0);
+  assert.doesNotMatch(res.stderr, /sk-local|pk-local/);
+});
+
+test('session ids are hashed before local storage', () => {
+  const dirs = tempDirs();
+  const res = run(['run', '--project', 'vire', '--session', 'client@example.com secret-session', '--', process.execPath, '-e', ''], dirs);
+  assert.equal(res.status, 0, res.stderr);
+  const raw = readFileSync(join(dirs.state, 'events.jsonl'), 'utf8');
+  assert.doesNotMatch(raw, /client@example\.com|secret-session/);
+  assert.match(raw, /session-[a-f0-9]{24}/);
+});
+
 test('Langfuse HTTP rejection warns without blocking wrapped command', async () => {
   const dirs = tempDirs();
   const server = http.createServer((_req, res) => { res.writeHead(401); res.end('nope'); });

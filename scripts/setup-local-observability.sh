@@ -73,8 +73,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
   chmod 600 "$ENV_FILE"
 else
   say ".env already exists; not overwriting."
+  chmod 600 "$ENV_FILE"
 fi
 
+say "Ensured $ENV_FILE permissions are 0600 before filling missing secrets."
 say "Generating missing local-only secrets in .env."
 for key in NEXTAUTH_SECRET SALT POSTGRES_PASSWORD CLICKHOUSE_PASSWORD REDIS_PASSWORD MINIO_ROOT_PASSWORD LANGFUSE_INIT_USER_PASSWORD; do
   if grep -q "^$key=\s*$" "$ENV_FILE"; then replace_empty "$key" "$(secret 48)"; fi

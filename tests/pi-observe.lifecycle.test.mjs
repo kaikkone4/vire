@@ -63,4 +63,5 @@ test('setup first run creates chmod-600 env with generated secrets and does not 
   const second = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, HOME: home, PATH: process.env.PATH } });
   assert.equal(second.status, 0, second.stderr);
   assert.equal(readFileSync(envPath, 'utf8'), 'NEXTAUTH_SECRET=keep-me\n');
+  assert.equal((statSync(envPath).mode & 0o777), 0o600);
 });
