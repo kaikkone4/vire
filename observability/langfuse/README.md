@@ -2,6 +2,8 @@
 
 This directory is for Janne's local Pi-Team/development observability. It is not part of the Vire Tauri runtime and does not containerize Vire.
 
+The Compose file is pinned to `langfuse/langfuse:3.63.0` and was structured from Langfuse self-hosting documentation for v3-era deployments (Postgres, Redis, ClickHouse, object storage). It remains intentionally local-only and should be rechecked against upstream docs before changing the Langfuse image tag.
+
 ## Quick start
 
 ```sh
@@ -57,7 +59,7 @@ Backups are not automated in phase 1. For important data, export from Langfuse a
 ```sh
 cd observability/langfuse
 docker compose --env-file .env ps
-docker compose --env-file .env logs langfuse --tail=100
+docker compose --env-file .env logs langfuse-web langfuse-worker --tail=100
 ```
 
 Avoid commands that print secrets. Do not share `.env` contents.

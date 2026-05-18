@@ -100,3 +100,38 @@ test('manual mark-active/mark-inactive without an explicit session clears active
   assert.deepEqual(state.runs, [], 'inactive manual marker should not leave stale active run ids');
   assert.equal(events(dirs.state).at(-1).event, 'idle_countdown_started');
 });
+
+test('manual inactive for another tool does not decrement a running delegate', async () => {
+  const dirs = tempState();
+  const env = { ...process.env, PI_OBSERVE_STATE_DIR: dirs.state, PI_OBSERVE_CONFIG_DIR: dirs.config, LANGFUSE_PUBLIC_KEY: '', LANGFUSE_SECRET_KEY: '' };
+  const long = spawn(process.execPath, [cli, 'run', '--project', 'vire', '--tool', 'delegate', '--', process.execPath, '-e', 'setTimeout(() => {}, 250)'], { env, stdio: 'ignore' });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const inactive = spawnSync(process.execPath, [cli, 'mark-inactive', '--project', 'vire', '--tool', 'cursor'], { env, encoding: 'utf8' });
+  assert.equal(inactive.status, 0, inactive.stderr);
+  assert.equal(activeState(dirs.state).vire.count, 1);
+  assert.equal(events(dirs.state).some(e => e.event === 'idle_countdown_started'), false);
+  await new Promise((resolve, reject) => {
+    long.on('exit', code => code === 0 ? resolve() : reject(new Error(`long run exited ${code}`)));
+    long.on('error', reject);
+  });
+  assert.equal(activeState(dirs.state).vire.count, 0);
+});
+
+test('concurrent runs for different projects keep independent state', async () => {
+  const dirs = tempState();
+  const env = { ...process.env, PI_OBSERVE_STATE_DIR: dirs.state, PI_OBSERVE_CONFIG_DIR: dirs.config, LANGFUSE_PUBLIC_KEY: '', LANGFUSE_SECRET_KEY: '' };
+  const a = spawn(process.execPath, [cli, 'run', '--project', 'vire', '--tool', 'slow', '--', process.execPath, '-e', 'setTimeout(() => {}, 250)'], { env, stdio: 'ignore' });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const b = spawnSync(process.execPath, [cli, 'run', '--project', 'other', '--tool', 'fast', '--', process.execPath, '-e', ''], { env, encoding: 'utf8' });
+  assert.equal(b.status, 0, b.stderr);
+  const mid = activeState(dirs.state);
+  assert.equal(mid.vire.count, 1);
+  assert.equal(mid.other.count, 0);
+  await new Promise((resolve, reject) => {
+    a.on('exit', code => code === 0 ? resolve() : reject(new Error(`project a exited ${code}`)));
+    a.on('error', reject);
+  });
+  const final = activeState(dirs.state);
+  assert.equal(final.vire.count, 0);
+  assert.equal(final.other.count, 0);
+});

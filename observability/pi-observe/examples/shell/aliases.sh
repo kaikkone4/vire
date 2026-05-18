@@ -2,9 +2,10 @@
 # These explicit aliases avoid replacing original tools unexpectedly.
 
 alias claude-observed='pi-observe run --tool claude-code --role coding-agent -- claude'
-alias cursor-observed='pi-observe run --tool cursor --role editor-session -- cursor .'
-alias code-observed='pi-observe run --tool vscode --role editor-session -- code .'
-alias antigravity-observed='pi-observe run --tool google-antigravity --role coding-agent -- antigravity .'
+# Editor launchers are nonbillable context by default; use manual markers or observed tasks for billable work.
+alias cursor-observed='pi-observe run --tool cursor --role editor-session --nonbillable -- cursor .'
+alias code-observed='pi-observe run --tool vscode --role editor-session --nonbillable -- code .'
+alias antigravity-observed='pi-observe run --tool google-antigravity --role coding-agent --nonbillable -- antigravity .'
 
 pi-arch() { pi-observe run --tool pi-team --role delegate-architect -- "$@"; }
 pi-dev()  { pi-observe run --tool pi-team --role delegate-developer -- "$@"; }

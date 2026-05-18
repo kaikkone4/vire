@@ -17,13 +17,17 @@ Project resolution order: `--project`, `PI_OBSERVE_PROJECT`, nearest `.pi-projec
 
 ## Time model
 
-Each billable observed run increments a per-project active counter. Idle countdown starts only when the counter returns to zero. Concurrent projects are tracked independently. Editor launch wrappers are context signals; for GUI tools prefer manual active/inactive markers unless a real task/agent process is wrapped.
+Each billable observed run increments a per-project active counter. Idle countdown starts only when the counter returns to zero. A new billable run cancels/resets any existing idle countdown for that project. Concurrent projects are tracked independently. Editor launch wrappers are nonbillable context signals by default; for GUI tools prefer manual active/inactive markers or observed tasks for billable work.
+
+Current limitations: phase 1 records `idle_countdown_started`/`idle_countdown_canceled` events but does not run a background timer to append `idle_started` after the threshold. Orphaned-run reconciliation is not automatic yet; inspect `pi-observe status` / `events.jsonl` if a wrapper process is killed before finish handling.
 
 ## Privacy defaults
 
 Captured: project key, tool/role, timing, exit status, cwd basename, safe git branch, git remote hash, command label, optional sanitized summary.
 
 Not captured by default: raw prompts, full command args, terminal streams, file contents, diffs, environment variables, screenshots, browser history, or hidden editor/CLI logs.
+
+`pi-observe` loads only the needed Langfuse API variables from `observability/langfuse/.env` using a data-only parser; do not source the full `.env`. Wrapped child commands receive a scrubbed environment with Langfuse/backing-service secrets removed.
 
 Disable wrapper telemetry while still running commands:
 
