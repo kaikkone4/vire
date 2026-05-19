@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmdirSync, realpathSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmdirSync, realpathSync, lstatSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
@@ -18,6 +18,7 @@ const eventsPath = join(stateDir, 'events.jsonl');
 const runsPath = join(stateDir, 'runs.json');
 const ALLOWED_DOTENV_KEYS = new Set(['LANGFUSE_HOST', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_PROJECT_ID', 'PI_OBSERVE_LANGFUSE_TIMEOUT_MS', 'PI_OBSERVE_USER_ID', 'PI_OBSERVE_ALLOW_REMOTE_LANGFUSE']);
 const SCRUB_ENV_KEYS = new Set(['LANGFUSE_HOST', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_PROJECT_ID', 'NEXTAUTH_SECRET', 'SALT', 'ENCRYPTION_KEY', 'LANGFUSE_INIT_USER_PASSWORD', 'POSTGRES_PASSWORD', 'CLICKHOUSE_PASSWORD', 'REDIS_PASSWORD', 'MINIO_ROOT_PASSWORD', 'DATABASE_URL', 'DIRECT_URL', 'REDIS_CONNECTION_STRING']);
+const PROJECT_MARKER_MAX_BYTES = 256;
 
 function expand(p) { return p.replace(/^~(?=$|\/)/, home); }
 function ensureDirs() { mkdirSync(stateDir, { recursive: true, mode: 0o700 }); mkdirSync(configDir, { recursive: true, mode: 0o700 }); }
@@ -90,6 +91,18 @@ function parseArgs(argv) {
   }
   return opts;
 }
+function readProjectMarker(path) {
+  try {
+    const linkInfo = lstatSync(path);
+    if (linkInfo.isSymbolicLink()) return null;
+    const info = statSync(path);
+    if (!info.isFile() || info.size > PROJECT_MARKER_MAX_BYTES) return null;
+    const raw = readFileSync(path, 'utf8').slice(0, PROJECT_MARKER_MAX_BYTES);
+    const firstLine = raw.split(/\r?\n/, 1)[0] || '';
+    const token = firstLine.trim().split(/\s+/, 1)[0];
+    return token ? safeToken(token) : null;
+  } catch { return null; }
+}
 function resolveProject(explicit) {
   if (explicit) return { key: safeToken(explicit), confidence: 'explicit' };
   if (process.env.PI_OBSERVE_PROJECT) return { key: safeToken(process.env.PI_OBSERVE_PROJECT), confidence: 'env' };
@@ -97,7 +110,7 @@ function resolveProject(explicit) {
     let dir = process.cwd();
     while (true) {
       const p = join(dir, name);
-      if (existsSync(p)) return { key: safeToken(readFileSync(p, 'utf8').trim().split(/\s+/)[0]), confidence: name };
+      if (existsSync(p)) { const marker = readProjectMarker(p); if (marker) return { key: marker, confidence: name }; }
       const parent = dirname(dir); if (parent === dir) break; dir = parent;
     }
   }
