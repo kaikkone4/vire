@@ -75,10 +75,21 @@ ensure_safe_env_file(){
     fi
     say ".env already exists; not overwriting."
   fi
-  case "$(cd "$LF_DIR" && pwd -P)/.env" in
-    "$(cd "$LF_DIR" && pwd -P)"/.env) ;;
-    *) say "Refusing to use .env outside observability/langfuse."; return 1 ;;
-  esac
+  local expected_dir actual_dir actual_name
+  expected_dir="$(cd "$LF_DIR" && pwd -P)"
+  actual_dir="$(cd "$(dirname "$ENV_FILE")" && pwd -P)"
+  actual_name="$(basename "$ENV_FILE")"
+  if [[ "$actual_dir" != "$expected_dir" || "$actual_name" != ".env" ]]; then
+    say "Refusing to use .env outside observability/langfuse."
+    printf 'Expected directory: %s\n' "$expected_dir"
+    printf 'Actual path: %s/%s\n' "$actual_dir" "$actual_name"
+    return 1
+  fi
+  if [[ -L "$ENV_FILE" || ! -f "$ENV_FILE" ]]; then
+    say "Refusing to chmod/edit .env because it is no longer a regular non-symlink file."
+    printf 'Inspect with: ls -l "%s"\n' "$ENV_FILE"
+    return 1
+  fi
   chmod 600 "$ENV_FILE"
 }
 
@@ -118,9 +129,8 @@ else
 fi
 if ! have cargo; then
   cargo_candidate=""
-  for candidate in "$HOME/.cargo/bin/cargo" "/var/pi-assistant/.cargo/bin/cargo"; do
-    if [[ -x "$candidate" ]]; then cargo_candidate="$candidate"; break; fi
-  done
+  candidate="$HOME/.cargo/bin/cargo"
+  if [[ -x "$candidate" ]]; then cargo_candidate="$candidate"; fi
   if [[ -n "$cargo_candidate" ]]; then
     say "Rust/Cargo appears to be installed at $cargo_candidate, but it is not in this shell's PATH."
     printf 'Cargo: %s\n' "$($cargo_candidate --version 2>/dev/null || printf 'installed, version check unavailable')"
