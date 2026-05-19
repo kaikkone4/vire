@@ -91,6 +91,7 @@ function parseArgs(argv) {
   }
   return opts;
 }
+function isSafeProjectKey(value) { return /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(value) && !/^redacted/i.test(value) && value.toLowerCase() !== 'unknown'; }
 function readProjectMarker(path) {
   try {
     const linkInfo = lstatSync(path);
@@ -100,7 +101,9 @@ function readProjectMarker(path) {
     const raw = readFileSync(path, 'utf8').slice(0, PROJECT_MARKER_MAX_BYTES);
     const firstLine = raw.split(/\r?\n/, 1)[0] || '';
     const token = firstLine.trim().split(/\s+/, 1)[0];
-    return token ? safeToken(token) : null;
+    if (!token || !isSafeProjectKey(token)) return null;
+    const safe = safeToken(token);
+    return isSafeProjectKey(safe) ? safe : null;
   } catch { return null; }
 }
 function resolveProject(explicit) {
