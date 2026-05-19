@@ -24,7 +24,20 @@ PY
     LC_ALL=C dd if=/dev/urandom bs=256 count=4 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | awk -v n="$len" '{ out = out $0 } END { if (length(out) < n) exit 1; print substr(out, 1, n) }'
   fi
 }
-replace_empty(){ local key="$1" value="$2"; perl -0pi -e "s/^$key=\s*\$/$key=$value/m" "$ENV_FILE"; }
+is_empty_key(){
+  local key="$1"
+  awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      val = $0; sub(/^[^=]*=/, "", val)
+      if (val ~ /^[[:space:]]*$/) found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$ENV_FILE"
+}
+replace_empty(){
+  local key="$1" value="$2"
+  KEY="$key" VALUE="$value" perl -0pi -e 'my $k = $ENV{KEY}; my $v = $ENV{VALUE}; s/^[[:space:]]*\Q$k\E[[:space:]]*=[[:space:]]*$/$k=$v/mg' "$ENV_FILE"
+}
 
 say "Local observability setup (Langfuse + pi-observe)"
 printf 'OS: %s / %s\n' "$(uname -s)" "$(uname -m)"
@@ -79,9 +92,9 @@ fi
 say "Ensured $ENV_FILE permissions are 0600 before filling missing secrets."
 say "Generating missing local-only secrets in .env."
 for key in NEXTAUTH_SECRET SALT POSTGRES_PASSWORD CLICKHOUSE_PASSWORD REDIS_PASSWORD MINIO_ROOT_PASSWORD LANGFUSE_INIT_USER_PASSWORD; do
-  if grep -q "^$key=\s*$" "$ENV_FILE"; then replace_empty "$key" "$(secret 48)"; fi
+  if is_empty_key "$key"; then replace_empty "$key" "$(secret 48)"; fi
 done
-if grep -q '^ENCRYPTION_KEY=\s*$' "$ENV_FILE"; then replace_empty ENCRYPTION_KEY "$(openssl rand -hex 32 2>/dev/null || secret 64)"; fi
+if is_empty_key ENCRYPTION_KEY; then replace_empty ENCRYPTION_KEY "$(openssl rand -hex 32 2>/dev/null || secret 64)"; fi
 
 PORT="$(grep -E '^LANGFUSE_PORT=' "$ENV_FILE" | tail -1 | cut -d= -f2 || true)"; PORT="${PORT:-3000}"
 if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then

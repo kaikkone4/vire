@@ -50,7 +50,8 @@ function sanitizeObject(obj) {
 function parseDotenvFile(path = process.env.PI_OBSERVE_DOTENV || defaultDotenvPath) {
   const out = {};
   if (!path || !existsSync(path)) return out;
-  const lines = readFileSync(path, 'utf8').split(/\r?\n/);
+  let lines;
+  try { lines = readFileSync(path, 'utf8').split(/\r?\n/); } catch { return out; }
   for (const line of lines) {
     if (!line.trim() || line.trimStart().startsWith('#')) continue;
     const m = line.match(/^([A-Z0-9_]+)=(.*)$/);

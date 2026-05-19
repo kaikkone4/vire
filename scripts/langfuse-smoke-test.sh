@@ -8,7 +8,7 @@ read_env_value() {
   awk -F= -v k="$key" '
     $0 ~ "^[[:space:]]*#" || $0 !~ "=" { next }
     $1 == k { sub(/^[^=]*=/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); gsub(/^\"|\"$/, ""); gsub(/^'"'"'|'"'"'$/, ""); print; exit }
-  ' "$ENV_FILE"
+  ' "$ENV_FILE" 2>/dev/null
 }
 sanitize_url_for_display() {
   node -e '

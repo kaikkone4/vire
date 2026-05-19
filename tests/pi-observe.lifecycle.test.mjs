@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 const cli = new URL('../observability/pi-observe/bin/pi-observe.mjs', import.meta.url).pathname;
 const setup = new URL('../scripts/setup-local-observability.sh', import.meta.url).pathname;
 const langfuseUp = new URL('../scripts/langfuse-up.sh', import.meta.url).pathname;
+const langfuseDown = new URL('../scripts/langfuse-down.sh', import.meta.url).pathname;
 const langfuseSmoke = new URL('../scripts/langfuse-smoke-test.sh', import.meta.url).pathname;
 const exampleEnv = new URL('../observability/langfuse/.env.example', import.meta.url).pathname;
 
@@ -66,6 +67,39 @@ test('setup first run creates chmod-600 env with generated secrets and does not 
   assert.equal(second.status, 0, second.stderr);
   assert.equal(readFileSync(envPath, 'utf8'), 'NEXTAUTH_SECRET=keep-me\n');
   assert.equal((statSync(envPath).mode & 0o777), 0o600);
+});
+
+test('setup fills whitespace-only secret values without overwriting non-empty values', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-setup-empty-'));
+  const lf = join(root, 'observability/langfuse');
+  mkdirSync(lf, { recursive: true });
+  writeFileSync(join(lf, '.env.example'), readFileSync(exampleEnv));
+  writeFileSync(join(lf, '.env'), 'NEXTAUTH_SECRET=   \nSALT=\t \nENCRYPTION_KEY=   \nPOSTGRES_PASSWORD=keep-me\nLANGFUSE_PORT=3000\n');
+  const home = join(root, 'home'); mkdirSync(home);
+  mkdirSync(join(root, 'observability/pi-observe/bin'), { recursive: true });
+  writeFileSync(join(root, 'observability/pi-observe/bin/pi-observe.mjs'), '#!/usr/bin/env node\n');
+  const res = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, HOME: home, PATH: process.env.PATH } });
+  assert.equal(res.status, 0, res.stderr);
+  const envText = readFileSync(join(lf, '.env'), 'utf8');
+  assert.match(envText, /^NEXTAUTH_SECRET=\S+/m);
+  assert.match(envText, /^SALT=\S+/m);
+  assert.match(envText, /^ENCRYPTION_KEY=\S+/m);
+  assert.match(envText, /^POSTGRES_PASSWORD=keep-me$/m);
+});
+
+test('langfuse-down honors PI_OBSERVE_ROOT_DIR override', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-down-root-'));
+  const lf = join(root, 'observability/langfuse');
+  const bin = join(root, 'fake-bin');
+  const marker = join(root, 'docker-pwd');
+  mkdirSync(lf, { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(lf, '.env'), 'LANGFUSE_HOST=http://localhost:3000\n');
+  writeFileSync(join(bin, 'docker'), `#!/usr/bin/env bash\npwd > "${marker}"\nexit 0\n`);
+  chmodSync(join(bin, 'docker'), 0o755);
+  const res = spawnSync('bash', [langfuseDown], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PATH: `${bin}:${process.env.PATH}` } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(readFileSync(marker, 'utf8').trim(), lf);
 });
 
 test('helper scripts display sanitized Langfuse host values only', () => {
