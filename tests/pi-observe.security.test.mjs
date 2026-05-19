@@ -134,6 +134,34 @@ test('project resolution uses env, project file, config map, then fallback with 
   assert.doesNotMatch(raw, /user@example\.com/);
 });
 
+test('invalid project marker contents are ignored instead of becoming unknown or redacted placeholders', () => {
+  const dirs = tempDirs();
+  const symbolCwd = join(dirs.root, 'symbol-marker');
+  const secretCwd = join(dirs.root, 'secret-marker');
+  const mappedCwd = join(dirs.root, 'mapped-marker');
+  mkdirSync(symbolCwd, { recursive: true });
+  mkdirSync(secretCwd, { recursive: true });
+  mkdirSync(mappedCwd, { recursive: true });
+  mkdirSync(dirs.config, { recursive: true });
+  writeFileSync(join(symbolCwd, '.pi-project'), '!!!\n');
+  writeFileSync(join(secretCwd, '.pi-project'), 'ghp_abcdefghijklmnopqrstuvwxyz1234567890\n');
+  writeFileSync(join(mappedCwd, '.pi-project'), '!!!\n');
+  writeFileSync(join(dirs.config, 'projects.json'), JSON.stringify({ projects: { configured: { paths: [mappedCwd] } } }));
+
+  for (const [cwd, stateName, expected] of [[symbolCwd, 'symbol-state', 'symbol-marker'], [secretCwd, 'secret-state', 'secret-marker'], [mappedCwd, 'mapped-state', 'configured']]) {
+    const state = join(dirs.root, stateName);
+    const res = spawnSync(process.execPath, [cli, 'run', '--tool', 'marker-content', '--', process.execPath, '-e', ''], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, PI_OBSERVE_STATE_DIR: state, PI_OBSERVE_CONFIG_DIR: dirs.config, PI_OBSERVE_DOTENV: dirs.dotenv, LANGFUSE_PUBLIC_KEY: '', LANGFUSE_SECRET_KEY: '' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const raw = readFileSync(join(state, 'events.jsonl'), 'utf8');
+    assert.match(raw, new RegExp(`"project":"${expected}"`));
+    assert.doesNotMatch(raw, /"project":"unknown"|redacted_github_token|ghp_/);
+  }
+});
+
 test('project marker symlinks and oversized/non-file markers are ignored safely', () => {
   const dirs = tempDirs();
   const symlinkCwd = join(dirs.root, 'symlink-marker');
