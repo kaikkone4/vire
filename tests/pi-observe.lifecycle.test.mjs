@@ -162,11 +162,9 @@ test('setup reports home cargo outside current PATH and only executes the home c
   assert.match(res.stdout, /source "\$HOME\/\.cargo\/env"|restart the terminal/);
 });
 
-test('setup documents that non-HOME cargo candidates must not be executed', () => {
+test('setup does not reference or execute non-HOME cargo candidates', () => {
   const script = readFileSync(setup, 'utf8');
-  assert.match(script, /\/var\/pi-assistant\/\.cargo\/bin\/cargo/);
-  assert.match(script, /Not executing cargo outside HOME/);
-  assert.doesNotMatch(script, /pi_assistant_cargo --version|\$\{pi_assistant_cargo\} --version|\$pi_assistant_cargo --version/);
+  assert.doesNotMatch(script, /\/var\/pi-assistant\/\.cargo\/bin\/cargo|pi_assistant_cargo/);
 });
 
 test('helper scripts display sanitized Langfuse host values only', () => {

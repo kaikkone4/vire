@@ -129,18 +129,14 @@ else
 fi
 if ! have cargo; then
   home_cargo="$HOME/.cargo/bin/cargo"
-  pi_assistant_cargo="/var/pi-assistant/.cargo/bin/cargo"
   if [[ -x "$home_cargo" ]]; then
     say "Rust/Cargo appears to be installed at $home_cargo, but it is not in this shell's PATH."
     printf 'Cargo: %s\n' "$($home_cargo --version 2>/dev/null || printf 'installed, version check unavailable')"
     printf 'To update this shell, run: source "$HOME/.cargo/env"\n'
     printf 'Or restart the terminal before running Vire/Tauri cargo commands.\n'
-  elif [[ -x "$pi_assistant_cargo" ]]; then
-    say "Rust/Cargo appears to be installed at $pi_assistant_cargo, but it is not in this shell's PATH."
-    printf 'Not executing cargo outside HOME during setup prerequisite checks.\n'
-    printf 'To update this shell, run: source "$HOME/.cargo/env" if rustup installed there, or restart the terminal.\n'
   else
     say "Rust/Cargo was not found. Vire native Tauri builds need Rust, but Langfuse does not."
+    printf 'If rustup just installed Cargo, restart the terminal or run: source "$HOME/.cargo/env"\n'
     if ask "Open rustup installation instructions?"; then open_url "https://rustup.rs/"; fi
   fi
 else
