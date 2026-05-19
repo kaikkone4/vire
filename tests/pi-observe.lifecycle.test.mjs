@@ -55,7 +55,7 @@ test('setup first run creates chmod-600 env with generated secrets and does not 
   mkdirSync(join(root, 'observability/pi-observe/bin'), { recursive: true });
   writeFileSync(join(root, 'observability/pi-observe/bin/pi-observe.mjs'), '#!/usr/bin/env node\n');
   const home = join(root, 'home'); mkdirSync(home);
-  const first = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, HOME: home, PATH: process.env.PATH } });
+  const first = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', HOME: home, PATH: process.env.PATH } });
   assert.equal(first.status, 0, first.stderr);
   const envPath = join(lf, '.env');
   const envText = readFileSync(envPath, 'utf8');
@@ -63,7 +63,7 @@ test('setup first run creates chmod-600 env with generated secrets and does not 
   assert.match(envText, /^POSTGRES_PASSWORD=[A-Za-z0-9]+/m);
   assert.equal((statSync(envPath).mode & 0o777), 0o600);
   writeFileSync(envPath, 'NEXTAUTH_SECRET=keep-me\n');
-  const second = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, HOME: home, PATH: process.env.PATH } });
+  const second = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', HOME: home, PATH: process.env.PATH } });
   assert.equal(second.status, 0, second.stderr);
   assert.equal(readFileSync(envPath, 'utf8'), 'NEXTAUTH_SECRET=keep-me\n');
   assert.equal((statSync(envPath).mode & 0o777), 0o600);
@@ -78,7 +78,7 @@ test('setup fills whitespace-only secret values without overwriting non-empty va
   const home = join(root, 'home'); mkdirSync(home);
   mkdirSync(join(root, 'observability/pi-observe/bin'), { recursive: true });
   writeFileSync(join(root, 'observability/pi-observe/bin/pi-observe.mjs'), '#!/usr/bin/env node\n');
-  const res = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, HOME: home, PATH: process.env.PATH } });
+  const res = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', HOME: home, PATH: process.env.PATH } });
   assert.equal(res.status, 0, res.stderr);
   const envText = readFileSync(join(lf, '.env'), 'utf8');
   assert.match(envText, /^NEXTAUTH_SECRET=\S+/m);
@@ -87,7 +87,7 @@ test('setup fills whitespace-only secret values without overwriting non-empty va
   assert.match(envText, /^POSTGRES_PASSWORD=keep-me$/m);
 });
 
-test('langfuse-down honors PI_OBSERVE_ROOT_DIR override', () => {
+test('langfuse-down honors PI_OBSERVE_ROOT_DIR only with explicit test override', () => {
   const root = mkdtempSync(join(tmpdir(), 'pi-down-root-'));
   const lf = join(root, 'observability/langfuse');
   const bin = join(root, 'fake-bin');
@@ -97,7 +97,7 @@ test('langfuse-down honors PI_OBSERVE_ROOT_DIR override', () => {
   writeFileSync(join(lf, '.env'), 'LANGFUSE_HOST=http://localhost:3000\n');
   writeFileSync(join(bin, 'docker'), `#!/usr/bin/env bash\npwd > "${marker}"\nexit 0\n`);
   chmodSync(join(bin, 'docker'), 0o755);
-  const res = spawnSync('bash', [langfuseDown], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PATH: `${bin}:${process.env.PATH}` } });
+  const res = spawnSync('bash', [langfuseDown], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', PATH: `${bin}:${process.env.PATH}` } });
   assert.equal(res.status, 0, res.stderr);
   assert.equal(readFileSync(marker, 'utf8').trim(), lf);
 });
@@ -111,7 +111,7 @@ test('helper scripts display sanitized Langfuse host values only', () => {
   writeFileSync(join(lf, '.env'), 'LANGFUSE_HOST=https://user:password@example.com:8443/path?token=secret#frag\n');
   writeFileSync(join(bin, 'docker'), '#!/usr/bin/env bash\nexit 0\n');
   chmodSync(join(bin, 'docker'), 0o755);
-  const res = spawnSync('bash', [langfuseUp], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PATH: `${bin}:${process.env.PATH}` } });
+  const res = spawnSync('bash', [langfuseUp], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', PATH: `${bin}:${process.env.PATH}` } });
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /https:\/\/example\.com:8443/);
   assert.doesNotMatch(res.stdout + res.stderr, /user|password|token=secret|frag|\/path/);
@@ -131,7 +131,7 @@ test('smoke test sanitizes remote host display and skips curl without explicit o
   chmodSync(join(piBin, 'pi-observe.mjs'), 0o755);
   writeFileSync(join(fakeBin, 'curl'), `#!/usr/bin/env bash\ntouch "${curlMarker}"\nexit 0\n`);
   chmodSync(join(fakeBin, 'curl'), 0o755);
-  const res = spawnSync('bash', [langfuseSmoke], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PATH: `${fakeBin}:${process.env.PATH}` } });
+  const res = spawnSync('bash', [langfuseSmoke], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', PATH: `${fakeBin}:${process.env.PATH}` } });
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /https:\/\/example\.com:8443/);
   assert.match(res.stdout, /Skipping health curl for non-loopback/);

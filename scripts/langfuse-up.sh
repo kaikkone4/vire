@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT_DIR="${PI_OBSERVE_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS:-false}" == "true" && -n "${PI_OBSERVE_ROOT_DIR:-}" ]]; then
+  ROOT_DIR="$PI_OBSERVE_ROOT_DIR"
+else
+  ROOT_DIR="$SCRIPT_ROOT"
+fi
 cd "$ROOT_DIR/observability/langfuse"
 if [[ ! -f .env ]]; then
   printf 'Missing observability/langfuse/.env. Run ./scripts/setup-local-observability.sh first.\n' >&2
