@@ -144,7 +144,7 @@ test('setup skips pi-observe symlink when user bin directory is not writable', (
   }
 });
 
-test('setup reports home cargo outside current PATH and only executes the home cargo candidate', () => {
+test('setup reports home cargo outside current PATH without executing it', () => {
   const root = mkdtempSync(join(tmpdir(), 'pi-setup-cargo-'));
   const lf = join(root, 'observability/langfuse');
   mkdirSync(lf, { recursive: true });
@@ -154,17 +154,21 @@ test('setup reports home cargo outside current PATH and only executes the home c
   const home = join(root, 'home');
   const cargoDir = join(home, '.cargo/bin');
   mkdirSync(cargoDir, { recursive: true });
-  writeFileSync(join(cargoDir, 'cargo'), '#!/usr/bin/env bash\necho "cargo 1.99.0-test"\n');
+  const marker = join(root, 'cargo-executed');
+  writeFileSync(join(cargoDir, 'cargo'), `#!/usr/bin/env bash\ntouch "${marker}"\nexit 99\n`);
   chmodSync(join(cargoDir, 'cargo'), 0o755);
   const res = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', HOME: home, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } });
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /not in this shell's PATH/);
+  assert.match(res.stdout, /Not executing out-of-PATH cargo candidates/);
   assert.match(res.stdout, /source "\$HOME\/\.cargo\/env"|restart the terminal/);
+  assert.equal(existsSync(marker), false, 'out-of-PATH HOME cargo must not be executed');
 });
 
-test('setup does not reference or execute non-HOME cargo candidates', () => {
+test('setup does not execute non-HOME cargo candidates', () => {
   const script = readFileSync(setup, 'utf8');
-  assert.doesNotMatch(script, /\/var\/pi-assistant\/\.cargo\/bin\/cargo|pi_assistant_cargo/);
+  assert.match(script, /\/var\/pi-assistant\/\.cargo\/bin\/cargo/);
+  assert.doesNotMatch(script, /\/var\/pi-assistant\/\.cargo\/bin\/cargo["']?\s+--version|cargo_candidate --version|\$\{cargo_candidate\} --version|\$cargo_candidate --version/);
 });
 
 test('helper scripts display sanitized Langfuse host values only', () => {
