@@ -144,7 +144,7 @@ test('setup skips pi-observe symlink when user bin directory is not writable', (
   }
 });
 
-test('setup reports rust installed when cargo exists outside current PATH', () => {
+test('setup reports home cargo outside current PATH and only executes the home cargo candidate', () => {
   const root = mkdtempSync(join(tmpdir(), 'pi-setup-cargo-'));
   const lf = join(root, 'observability/langfuse');
   mkdirSync(lf, { recursive: true });
@@ -160,6 +160,13 @@ test('setup reports rust installed when cargo exists outside current PATH', () =
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /not in this shell's PATH/);
   assert.match(res.stdout, /source "\$HOME\/\.cargo\/env"|restart the terminal/);
+});
+
+test('setup documents that non-HOME cargo candidates must not be executed', () => {
+  const script = readFileSync(setup, 'utf8');
+  assert.match(script, /\/var\/pi-assistant\/\.cargo\/bin\/cargo/);
+  assert.match(script, /Not executing cargo outside HOME/);
+  assert.doesNotMatch(script, /pi_assistant_cargo --version|\$\{pi_assistant_cargo\} --version|\$pi_assistant_cargo --version/);
 });
 
 test('helper scripts display sanitized Langfuse host values only', () => {
