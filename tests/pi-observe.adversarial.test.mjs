@@ -37,9 +37,10 @@ function activeState(state) {
   return JSON.parse(readFileSync(join(state, 'runs.json'), 'utf8')).active;
 }
 
-test('PI_OBSERVE_ENABLED=false runs the command but writes no local telemetry state', () => {
-  const { res, state } = run(['run', '--project', 'vire', '--', process.execPath, '-e', 'console.log("disabled ok")'], {
-    env: { PI_OBSERVE_ENABLED: 'false' },
+test('PI_OBSERVE_ENABLED=false runs the command with normal env but writes no local telemetry state', () => {
+  const script = 'if (process.env.DATABASE_URL !== "postgres://disabled-db") process.exit(42); console.log("disabled ok")';
+  const { res, state } = run(['run', '--project', 'vire', '--', process.execPath, '-e', script], {
+    env: { PI_OBSERVE_ENABLED: 'false', DATABASE_URL: 'postgres://disabled-db' },
   });
 
   assert.equal(res.status, 0, res.stderr);

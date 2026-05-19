@@ -35,18 +35,16 @@ function runAsync(args, dirs, extraEnv = {}) {
   });
 }
 
-test('child command receives scrubbed observability secret environment', () => {
+test('enabled wrapper preserves unrelated user runtime environment without injecting dotenv Langfuse secrets', () => {
   const dirs = tempDirs();
-  const script = 'for (const k of ["LANGFUSE_SECRET_KEY","POSTGRES_PASSWORD","REDIS_PASSWORD","MINIO_ROOT_PASSWORD","NEXTAUTH_SECRET"]) if (process.env[k]) process.exit(9); console.log("scrubbed")';
+  writeFileSync(dirs.dotenv, 'LANGFUSE_PUBLIC_KEY=pk-from-dotenv\nLANGFUSE_SECRET_KEY=sk-from-dotenv\n');
+  const script = 'if (process.env.DATABASE_URL !== "postgres://app-db") process.exit(42); if (process.env.LANGFUSE_SECRET_KEY || process.env.LANGFUSE_PUBLIC_KEY) process.exit(43); console.log("env preserved")';
   const res = run(['run', '--project', 'vire', '--', process.execPath, '-e', script], dirs, {
-    LANGFUSE_SECRET_KEY: 'dummy-secret',
-    POSTGRES_PASSWORD: 'dummy-postgres',
-    REDIS_PASSWORD: 'dummy-redis',
-    MINIO_ROOT_PASSWORD: 'dummy-minio',
-    NEXTAUTH_SECRET: 'dummy-nextauth',
+    DATABASE_URL: 'postgres://app-db',
+    REDIS_CONNECTION_STRING: 'redis://app-redis',
   });
   assert.equal(res.status, 0, res.stderr);
-  assert.match(res.stdout, /scrubbed/);
+  assert.match(res.stdout, /env preserved/);
 });
 
 test('safe dotenv parser loads only allowlisted Langfuse keys without shell execution', async () => {

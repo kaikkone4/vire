@@ -17,7 +17,7 @@ const configDir = expand(process.env.PI_OBSERVE_CONFIG_DIR || join(home, '.confi
 const eventsPath = join(stateDir, 'events.jsonl');
 const runsPath = join(stateDir, 'runs.json');
 const ALLOWED_DOTENV_KEYS = new Set(['LANGFUSE_HOST', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_PROJECT_ID', 'PI_OBSERVE_LANGFUSE_TIMEOUT_MS', 'PI_OBSERVE_USER_ID', 'PI_OBSERVE_ALLOW_REMOTE_LANGFUSE']);
-const SCRUB_ENV_KEYS = new Set(['LANGFUSE_HOST', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_PROJECT_ID', 'NEXTAUTH_SECRET', 'SALT', 'ENCRYPTION_KEY', 'LANGFUSE_INIT_USER_PASSWORD', 'POSTGRES_PASSWORD', 'CLICKHOUSE_PASSWORD', 'REDIS_PASSWORD', 'MINIO_ROOT_PASSWORD', 'DATABASE_URL', 'DIRECT_URL', 'REDIS_CONNECTION_STRING']);
+const WRAPPER_ONLY_ENV_KEYS = new Set([]);
 const PROJECT_MARKER_MAX_BYTES = 256;
 
 function expand(p) { return p.replace(/^~(?=$|\/)/, home); }
@@ -67,11 +67,13 @@ function parseDotenvFile(path = process.env.PI_OBSERVE_DOTENV || defaultDotenvPa
 }
 const dotenvConfig = parseDotenvFile();
 function cfg(key, fallback = undefined) { return process.env[key] !== undefined && process.env[key] !== '' ? process.env[key] : (dotenvConfig[key] !== undefined && dotenvConfig[key] !== '' ? dotenvConfig[key] : fallback); }
-function scrubbedEnv() {
+function childEnv() {
+  // Preserve the user's normal environment for transparent/fail-open wrapping.
+  // pi-observe reads Langfuse .env values into dotenvConfig, not process.env, so
+  // those wrapper credentials are not injected into child commands. Only remove
+  // future explicitly wrapper-injected variables, if any are added.
   const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (SCRUB_ENV_KEYS.has(key) || key.startsWith('LANGFUSE_S3_')) delete env[key];
-  }
+  for (const key of WRAPPER_ONLY_ENV_KEYS) delete env[key];
   return env;
 }
 function parseArgs(argv) {
@@ -266,7 +268,7 @@ async function run(argv) {
   await sendLangfuse([{ id: randomUUID(), timestamp: now(), type:'trace-update', body:{ id: traceId, tags:['local', meta.tool, meta.role, project.key, status].filter(Boolean), metadata: sanitizeObject({ ...meta, status, exit_code: code, duration_ms:end-start, end_time: now() }) } }]);
   process.exitCode = code;
 }
-function spawnPassthrough(cmd) { return new Promise(resolve => { const child = spawn(cmd[0], cmd.slice(1), { stdio:'inherit', env: scrubbedEnv() }); child.on('error', e => { console.error(`[pi-observe] failed to start command: ${redact(e.message)}`); resolve(127); }); child.on('close', (code, signal) => resolve(code ?? (signal === 'SIGINT' ? 130 : 1))); }); }
+function spawnPassthrough(cmd) { return new Promise(resolve => { const child = spawn(cmd[0], cmd.slice(1), { stdio:'inherit', env: childEnv() }); child.on('error', e => { console.error(`[pi-observe] failed to start command: ${redact(e.message)}`); resolve(127); }); child.on('close', (code, signal) => resolve(code ?? (signal === 'SIGINT' ? 130 : 1))); }); }
 function manualRunId(project, opts) { return opts.session ? `manual:${project}:${safeSessionId(opts.session)}` : `manual:${project}:${safeToken(opts.tool || 'manual')}:${safeToken(opts.role || 'default')}`; }
 function mark(active, argv) {
   const opts = parseArgs(argv); const project = resolveProject(opts.project); const runId = manualRunId(project.key, opts); const tool = safeToken(opts.tool || 'manual'); const role = opts.role ? safeToken(opts.role) : undefined;
