@@ -79,8 +79,19 @@ else
   printf 'npm: %s\n' "$(npm --version)"
 fi
 if ! have cargo; then
-  say "Rust/Cargo was not found. Vire native Tauri builds need Rust, but Langfuse does not."
-  if ask "Open rustup installation instructions?"; then open_url "https://rustup.rs/"; fi
+  cargo_candidate=""
+  for candidate in "$HOME/.cargo/bin/cargo" "/var/pi-assistant/.cargo/bin/cargo"; do
+    if [[ -x "$candidate" ]]; then cargo_candidate="$candidate"; break; fi
+  done
+  if [[ -n "$cargo_candidate" ]]; then
+    say "Rust/Cargo appears to be installed at $cargo_candidate, but it is not in this shell's PATH."
+    printf 'Cargo: %s\n' "$($cargo_candidate --version 2>/dev/null || printf 'installed, version check unavailable')"
+    printf 'To update this shell, run: source "$HOME/.cargo/env"\n'
+    printf 'Or restart the terminal before running Vire/Tauri cargo commands.\n'
+  else
+    say "Rust/Cargo was not found. Vire native Tauri builds need Rust, but Langfuse does not."
+    if ask "Open rustup installation instructions?"; then open_url "https://rustup.rs/"; fi
+  fi
 else
   printf 'Cargo: %s\n' "$(cargo --version)"
 fi
@@ -106,10 +117,46 @@ if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/
   say "Port $PORT is already in use. Edit $ENV_FILE and set LANGFUSE_PORT to another localhost port before starting."
 fi
 
-mkdir -p "$HOME/.local/bin"
-ln -sf "$ROOT_DIR/observability/pi-observe/bin/pi-observe.mjs" "$HOME/.local/bin/pi-observe"
-say "Installed/updated pi-observe symlink at $HOME/.local/bin/pi-observe"
-printf 'Add this to your shell profile if needed: export PATH="$HOME/.local/bin:$PATH"\n'
+install_pi_observe_link(){
+  local bin_dir="$HOME/.local/bin"
+  local target="$bin_dir/pi-observe"
+  local source="$ROOT_DIR/observability/pi-observe/bin/pi-observe.mjs"
+  if [[ -e "$HOME/.local" && ! -d "$HOME/.local" ]]; then
+    say "Cannot install pi-observe symlink: $HOME/.local exists but is not a directory."
+    printf 'Fix manually, then rerun setup. No sudo was run by this script.\n'
+    return 0
+  fi
+  if ! mkdir -p "$bin_dir" 2>/dev/null; then
+    say "Cannot create $bin_dir; skipping pi-observe symlink."
+    printf 'Inspect ownership/permissions with: ls -ld "%s" "%s" "%s"\n' "$HOME" "$HOME/.local" "$bin_dir"
+    printf 'If ownership is wrong, fix explicitly, e.g.: sudo chown -R "%s" "%s"\n' "$(id -un)" "$HOME/.local"
+    printf 'Then rerun setup. This script never runs sudo automatically.\n'
+    return 0
+  fi
+  if [[ ! -w "$bin_dir" ]]; then
+    say "$bin_dir is not writable; skipping pi-observe symlink."
+    printf 'Inspect ownership/permissions with: ls -ld "%s"\n' "$bin_dir"
+    printf 'If ownership is wrong, fix explicitly, e.g.: sudo chown -R "%s" "%s"\n' "$(id -un)" "$HOME/.local"
+    printf 'Alternative: add an alias manually to %s\n' "$source"
+    return 0
+  fi
+  if [[ -e "$target" && ! -w "$target" && ! -L "$target" ]]; then
+    say "$target exists and is not writable; skipping pi-observe symlink."
+    printf 'Inspect it with: ls -l "%s"\n' "$target"
+    printf 'Move/remove it or fix ownership, then rerun setup. This script never runs sudo automatically.\n'
+    return 0
+  fi
+  if ln -sfn "$source" "$target" 2>/dev/null; then
+    say "Installed/updated pi-observe symlink at $target"
+    printf 'Add this to your shell profile if needed: export PATH="$HOME/.local/bin:$PATH"\n'
+  else
+    say "Could not create pi-observe symlink at $target; continuing setup."
+    printf 'Inspect ownership/permissions with: ls -ld "%s" "%s"\n' "$bin_dir" "$target"
+    printf 'If ownership is wrong, fix explicitly, e.g.: sudo chown -R "%s" "%s"\n' "$(id -un)" "$HOME/.local"
+    printf 'Manual fallback: run "%s" directly.\n' "$source"
+  fi
+}
+install_pi_observe_link
 
 if ask "Start the local Langfuse stack now?"; then
   "$ROOT_DIR/scripts/langfuse-up.sh"
