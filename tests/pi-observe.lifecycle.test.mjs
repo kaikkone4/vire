@@ -108,6 +108,44 @@ test('langfuse-down ignores PI_OBSERVE_ROOT_DIR unless explicit test override is
   assert.equal(readFileSync(marker, 'utf8').trim(), lf);
 });
 
+test('setup skips pi-observe symlink when user bin directory is not writable', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-setup-bin-'));
+  const lf = join(root, 'observability/langfuse');
+  mkdirSync(lf, { recursive: true });
+  writeFileSync(join(lf, '.env.example'), readFileSync(exampleEnv));
+  mkdirSync(join(root, 'observability/pi-observe/bin'), { recursive: true });
+  writeFileSync(join(root, 'observability/pi-observe/bin/pi-observe.mjs'), '#!/usr/bin/env node\n');
+  const home = join(root, 'home');
+  const bin = join(home, '.local/bin');
+  mkdirSync(bin, { recursive: true });
+  chmodSync(bin, 0o500);
+  try {
+    const res = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', HOME: home, PATH: process.env.PATH } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /not writable|Could not create pi-observe symlink|skipping pi-observe symlink/i);
+  } finally {
+    chmodSync(bin, 0o700);
+  }
+});
+
+test('setup reports rust installed when cargo exists outside current PATH', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-setup-cargo-'));
+  const lf = join(root, 'observability/langfuse');
+  mkdirSync(lf, { recursive: true });
+  writeFileSync(join(lf, '.env.example'), readFileSync(exampleEnv));
+  mkdirSync(join(root, 'observability/pi-observe/bin'), { recursive: true });
+  writeFileSync(join(root, 'observability/pi-observe/bin/pi-observe.mjs'), '#!/usr/bin/env node\n');
+  const home = join(root, 'home');
+  const cargoDir = join(home, '.cargo/bin');
+  mkdirSync(cargoDir, { recursive: true });
+  writeFileSync(join(cargoDir, 'cargo'), '#!/usr/bin/env bash\necho "cargo 1.99.0-test"\n');
+  chmodSync(join(cargoDir, 'cargo'), 0o755);
+  const res = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', HOME: home, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /not in this shell's PATH/);
+  assert.match(res.stdout, /source "\$HOME\/\.cargo\/env"|restart the terminal/);
+});
+
 test('helper scripts display sanitized Langfuse host values only', () => {
   const root = mkdtempSync(join(tmpdir(), 'pi-helper-host-'));
   const lf = join(root, 'observability/langfuse');
