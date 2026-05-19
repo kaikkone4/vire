@@ -43,6 +43,55 @@ replace_empty(){
   local key="$1" value="$2"
   KEY="$key" VALUE="$value" perl -0pi -e 'my $k = $ENV{KEY}; my $v = $ENV{VALUE}; s/^[[:space:]]*\Q$k\E[[:space:]]*=[[:space:]]*$/$k=$v/mg' "$ENV_FILE"
 }
+ensure_safe_env_file(){
+  if [[ -L "$ENV_FILE" ]]; then
+    say "Refusing to use symlinked observability/langfuse/.env for safety."
+    printf 'This setup script will not chmod or edit symlink targets.\n'
+    printf 'Inspect with: ls -l "%s"\n' "$ENV_FILE"
+    printf 'To continue, move the symlink aside and create a regular file from the template:\n'
+    printf '  mv "%s" "%s.symlink-backup"\n' "$ENV_FILE" "$ENV_FILE"
+    printf '  cp "%s" "%s"\n' "$EXAMPLE_FILE" "$ENV_FILE"
+    printf '  chmod 600 "%s"\n' "$ENV_FILE"
+    return 1
+  fi
+  if [[ ! -e "$ENV_FILE" ]]; then
+    say "Creating local .env from .env.example (secrets stay local and are gitignored)."
+    local tmp
+    tmp="$(mktemp "$LF_DIR/.env.tmp.XXXXXX")"
+    chmod 600 "$tmp"
+    cp "$EXAMPLE_FILE" "$tmp"
+    chmod 600 "$tmp"
+    if ! ln "$tmp" "$ENV_FILE" 2>/dev/null; then
+      rm -f "$tmp"
+      say "Could not create $ENV_FILE safely; it may have appeared concurrently. Rerun setup after inspecting the path."
+      return 1
+    fi
+    rm -f "$tmp"
+  else
+    if [[ ! -f "$ENV_FILE" ]]; then
+      say "Refusing to use observability/langfuse/.env because it is not a regular file."
+      printf 'Inspect with: ls -l "%s"\n' "$ENV_FILE"
+      return 1
+    fi
+    say ".env already exists; not overwriting."
+  fi
+  local expected_dir actual_dir actual_name
+  expected_dir="$(cd "$LF_DIR" && pwd -P)"
+  actual_dir="$(cd "$(dirname "$ENV_FILE")" && pwd -P)"
+  actual_name="$(basename "$ENV_FILE")"
+  if [[ "$actual_dir" != "$expected_dir" || "$actual_name" != ".env" ]]; then
+    say "Refusing to use .env outside observability/langfuse."
+    printf 'Expected directory: %s\n' "$expected_dir"
+    printf 'Actual path: %s/%s\n' "$actual_dir" "$actual_name"
+    return 1
+  fi
+  if [[ -L "$ENV_FILE" || ! -f "$ENV_FILE" ]]; then
+    say "Refusing to chmod/edit .env because it is no longer a regular non-symlink file."
+    printf 'Inspect with: ls -l "%s"\n' "$ENV_FILE"
+    return 1
+  fi
+  chmod 600 "$ENV_FILE"
+}
 
 say "Local observability setup (Langfuse + pi-observe)"
 printf 'OS: %s / %s\n' "$(uname -s)" "$(uname -m)"
@@ -79,19 +128,26 @@ else
   printf 'npm: %s\n' "$(npm --version)"
 fi
 if ! have cargo; then
-  say "Rust/Cargo was not found. Vire native Tauri builds need Rust, but Langfuse does not."
-  if ask "Open rustup installation instructions?"; then open_url "https://rustup.rs/"; fi
+  cargo_candidate=""
+  for candidate in "$HOME/.cargo/bin/cargo" "/var/pi-assistant/.cargo/bin/cargo"; do
+    if [[ -x "$candidate" ]]; then cargo_candidate="$candidate"; break; fi
+  done
+  if [[ -n "$cargo_candidate" ]]; then
+    say "Rust/Cargo appears to be installed at $cargo_candidate, but it is not in this shell's PATH."
+    printf 'Not executing out-of-PATH cargo candidates during setup prerequisite checks.\n'
+    printf 'To update this shell, run: source "$HOME/.cargo/env" if rustup installed there, or restart the terminal.\n'
+  else
+    say "Rust/Cargo was not found. Vire native Tauri builds need Rust, but Langfuse does not."
+    printf 'If rustup just installed Cargo, restart the terminal or run: source "$HOME/.cargo/env"\n'
+    if ask "Open rustup installation instructions?"; then open_url "https://rustup.rs/"; fi
+  fi
 else
   printf 'Cargo: %s\n' "$(cargo --version)"
 fi
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  say "Creating local .env from .env.example (secrets stay local and are gitignored)."
-  cp "$EXAMPLE_FILE" "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
-else
-  say ".env already exists; not overwriting."
-  chmod 600 "$ENV_FILE"
+if ! ensure_safe_env_file; then
+  say "Setup cannot continue until observability/langfuse/.env is a regular local file."
+  exit 1
 fi
 
 say "Ensured $ENV_FILE permissions are 0600 before filling missing secrets."
@@ -106,10 +162,46 @@ if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/
   say "Port $PORT is already in use. Edit $ENV_FILE and set LANGFUSE_PORT to another localhost port before starting."
 fi
 
-mkdir -p "$HOME/.local/bin"
-ln -sf "$ROOT_DIR/observability/pi-observe/bin/pi-observe.mjs" "$HOME/.local/bin/pi-observe"
-say "Installed/updated pi-observe symlink at $HOME/.local/bin/pi-observe"
-printf 'Add this to your shell profile if needed: export PATH="$HOME/.local/bin:$PATH"\n'
+install_pi_observe_link(){
+  local bin_dir="$HOME/.local/bin"
+  local target="$bin_dir/pi-observe"
+  local source="$ROOT_DIR/observability/pi-observe/bin/pi-observe.mjs"
+  if [[ -e "$HOME/.local" && ! -d "$HOME/.local" ]]; then
+    say "Cannot install pi-observe symlink: $HOME/.local exists but is not a directory."
+    printf 'Fix manually, then rerun setup. No sudo was run by this script.\n'
+    return 0
+  fi
+  if ! mkdir -p "$bin_dir" 2>/dev/null; then
+    say "Cannot create $bin_dir; skipping pi-observe symlink."
+    printf 'Inspect ownership/permissions with: ls -ld "%s" "%s" "%s"\n' "$HOME" "$HOME/.local" "$bin_dir"
+    printf 'If ownership is wrong, fix explicitly, e.g.: sudo chown -R "%s" "%s"\n' "$(id -un)" "$HOME/.local"
+    printf 'Then rerun setup. This script never runs sudo automatically.\n'
+    return 0
+  fi
+  if [[ ! -w "$bin_dir" ]]; then
+    say "$bin_dir is not writable; skipping pi-observe symlink."
+    printf 'Inspect ownership/permissions with: ls -ld "%s"\n' "$bin_dir"
+    printf 'If ownership is wrong, fix explicitly, e.g.: sudo chown -R "%s" "%s"\n' "$(id -un)" "$HOME/.local"
+    printf 'Alternative: add an alias manually to %s\n' "$source"
+    return 0
+  fi
+  if [[ -e "$target" && ! -w "$target" && ! -L "$target" ]]; then
+    say "$target exists and is not writable; skipping pi-observe symlink."
+    printf 'Inspect it with: ls -l "%s"\n' "$target"
+    printf 'Move/remove it or fix ownership, then rerun setup. This script never runs sudo automatically.\n'
+    return 0
+  fi
+  if ln -sfn "$source" "$target" 2>/dev/null; then
+    say "Installed/updated pi-observe symlink at $target"
+    printf 'Add this to your shell profile if needed: export PATH="$HOME/.local/bin:$PATH"\n'
+  else
+    say "Could not create pi-observe symlink at $target; continuing setup."
+    printf 'Inspect ownership/permissions with: ls -ld "%s" "%s"\n' "$bin_dir" "$target"
+    printf 'If ownership is wrong, fix explicitly, e.g.: sudo chown -R "%s" "%s"\n' "$(id -un)" "$HOME/.local"
+    printf 'Manual fallback: run "%s" directly.\n' "$source"
+  fi
+}
+install_pi_observe_link
 
 if ask "Start the local Langfuse stack now?"; then
   "$ROOT_DIR/scripts/langfuse-up.sh"

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -35,18 +35,16 @@ function runAsync(args, dirs, extraEnv = {}) {
   });
 }
 
-test('child command receives scrubbed observability secret environment', () => {
+test('enabled wrapper preserves unrelated user runtime environment without injecting dotenv Langfuse secrets', () => {
   const dirs = tempDirs();
-  const script = 'for (const k of ["LANGFUSE_SECRET_KEY","POSTGRES_PASSWORD","REDIS_PASSWORD","MINIO_ROOT_PASSWORD","NEXTAUTH_SECRET"]) if (process.env[k]) process.exit(9); console.log("scrubbed")';
+  writeFileSync(dirs.dotenv, 'LANGFUSE_PUBLIC_KEY=pk-from-dotenv\nLANGFUSE_SECRET_KEY=sk-from-dotenv\n');
+  const script = 'if (process.env.DATABASE_URL !== "postgres://app-db") process.exit(42); if (process.env.LANGFUSE_SECRET_KEY || process.env.LANGFUSE_PUBLIC_KEY) process.exit(43); console.log("env preserved")';
   const res = run(['run', '--project', 'vire', '--', process.execPath, '-e', script], dirs, {
-    LANGFUSE_SECRET_KEY: 'dummy-secret',
-    POSTGRES_PASSWORD: 'dummy-postgres',
-    REDIS_PASSWORD: 'dummy-redis',
-    MINIO_ROOT_PASSWORD: 'dummy-minio',
-    NEXTAUTH_SECRET: 'dummy-nextauth',
+    DATABASE_URL: 'postgres://app-db',
+    REDIS_CONNECTION_STRING: 'redis://app-redis',
   });
   assert.equal(res.status, 0, res.stderr);
-  assert.match(res.stdout, /scrubbed/);
+  assert.match(res.stdout, /env preserved/);
 });
 
 test('safe dotenv parser loads only allowlisted Langfuse keys without shell execution', async () => {
@@ -118,11 +116,11 @@ test('Langfuse HTTP rejection warns without blocking wrapped command', async () 
   assert.doesNotMatch(res.stderr, /sk-local|pk-local/);
 });
 
-test('project resolution uses env, project file, config map, then fallback with sanitization', () => {
+test('project resolution accepts only whole-marker safe project keys', () => {
   const dirs = tempDirs();
-  const cwd = join(dirs.root, 'Unsafe Project');
+  const cwd = join(dirs.root, 'Safe Project');
   mkdirSync(cwd, { recursive: true });
-  writeFileSync(join(cwd, '.pi-project'), 'Client Email user@example.com $$$');
+  writeFileSync(join(cwd, '.pi-project'), '  Client_1.2-key\n');
   const res = spawnSync(process.execPath, [cli, 'run', '--tool', 'proj', '--', process.execPath, '-e', ''], {
     cwd,
     encoding: 'utf8',
@@ -130,8 +128,66 @@ test('project resolution uses env, project file, config map, then fallback with 
   });
   assert.equal(res.status, 0, res.stderr);
   const raw = readFileSync(join(dirs.state, 'events.jsonl'), 'utf8');
-  assert.match(raw, /client/);
-  assert.doesNotMatch(raw, /user@example\.com/);
+  assert.match(raw, /"project":"client_1.2-key"/);
+});
+
+test('invalid project marker contents are ignored instead of becoming unknown or redacted placeholders', () => {
+  const dirs = tempDirs();
+  const symbolCwd = join(dirs.root, 'symbol-marker');
+  const secretCwd = join(dirs.root, 'secret-marker');
+  const mixedCwd = join(dirs.root, 'mixed-marker');
+  const mappedCwd = join(dirs.root, 'mapped-marker');
+  mkdirSync(symbolCwd, { recursive: true });
+  mkdirSync(secretCwd, { recursive: true });
+  mkdirSync(mixedCwd, { recursive: true });
+  mkdirSync(mappedCwd, { recursive: true });
+  mkdirSync(dirs.config, { recursive: true });
+  writeFileSync(join(symbolCwd, '.pi-project'), '!!!\n');
+  writeFileSync(join(secretCwd, '.pi-project'), 'ghp_abcdefghijklmnopqrstuvwxyz1234567890\n');
+  writeFileSync(join(mixedCwd, '.pi-project'), 'vire extra-data user@example.com\n');
+  writeFileSync(join(mappedCwd, '.pi-project'), '!!!\n');
+  writeFileSync(join(dirs.config, 'projects.json'), JSON.stringify({ projects: { configured: { paths: [mappedCwd] } } }));
+
+  for (const [cwd, stateName, expected] of [[symbolCwd, 'symbol-state', 'symbol-marker'], [secretCwd, 'secret-state', 'secret-marker'], [mixedCwd, 'mixed-state', 'mixed-marker'], [mappedCwd, 'mapped-state', 'configured']]) {
+    const state = join(dirs.root, stateName);
+    const res = spawnSync(process.execPath, [cli, 'run', '--tool', 'marker-content', '--', process.execPath, '-e', ''], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, PI_OBSERVE_STATE_DIR: state, PI_OBSERVE_CONFIG_DIR: dirs.config, PI_OBSERVE_DOTENV: dirs.dotenv, LANGFUSE_PUBLIC_KEY: '', LANGFUSE_SECRET_KEY: '' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const raw = readFileSync(join(state, 'events.jsonl'), 'utf8');
+    assert.match(raw, new RegExp(`"project":"${expected}"`));
+    assert.doesNotMatch(raw, /"project":"unknown"|"project":"vire"|redacted_github_token|ghp_|user@example\.com/);
+  }
+});
+
+test('project marker symlinks and oversized/non-file markers are ignored safely', () => {
+  const dirs = tempDirs();
+  const symlinkCwd = join(dirs.root, 'symlink-marker');
+  const oversizedCwd = join(dirs.root, 'oversized-marker');
+  const directoryCwd = join(dirs.root, 'directory-marker');
+  mkdirSync(symlinkCwd, { recursive: true });
+  mkdirSync(oversizedCwd, { recursive: true });
+  mkdirSync(directoryCwd, { recursive: true });
+  const markerTarget = join(dirs.root, 'marker-target');
+  writeFileSync(markerTarget, 'vire\n');
+  symlinkSync(markerTarget, join(symlinkCwd, '.pi-project'));
+  writeFileSync(join(oversizedCwd, '.pi-project'), `vire${'x'.repeat(300)}\n`);
+  mkdirSync(join(directoryCwd, '.pi-project'));
+
+  for (const [cwd, expected] of [[symlinkCwd, 'symlink-marker'], [oversizedCwd, 'oversized-marker'], [directoryCwd, 'directory-marker']]) {
+    const state = join(dirs.root, `${expected}-state`);
+    const res = spawnSync(process.execPath, [cli, 'run', '--tool', 'marker-safety', '--', process.execPath, '-e', ''], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, PI_OBSERVE_STATE_DIR: state, PI_OBSERVE_CONFIG_DIR: dirs.config, PI_OBSERVE_DOTENV: dirs.dotenv, LANGFUSE_PUBLIC_KEY: '', LANGFUSE_SECRET_KEY: '' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const raw = readFileSync(join(state, 'events.jsonl'), 'utf8');
+    assert.doesNotMatch(raw, /"project":"vire"/);
+    assert.match(raw, new RegExp(`"project":"${expected}"`));
+  }
 });
 
 test('path project mapping matches only real directory boundaries, not same-prefix siblings', () => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -106,6 +106,69 @@ test('langfuse-down ignores PI_OBSERVE_ROOT_DIR unless explicit test override is
   const honored = spawnSync('bash', [langfuseDown], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', PATH: `${bin}:${process.env.PATH}` } });
   assert.equal(honored.status, 0, honored.stderr);
   assert.equal(readFileSync(marker, 'utf8').trim(), lf);
+});
+
+test('setup refuses symlinked .env without modifying symlink target', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-setup-env-symlink-'));
+  const lf = join(root, 'observability/langfuse');
+  mkdirSync(lf, { recursive: true });
+  writeFileSync(join(lf, '.env.example'), readFileSync(exampleEnv));
+  const target = join(root, 'target-file');
+  writeFileSync(target, 'NEXTAUTH_SECRET=   \n');
+  symlinkSync(target, join(lf, '.env'));
+  const before = readFileSync(target, 'utf8');
+  const home = join(root, 'home'); mkdirSync(home);
+  const res = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', HOME: home, PATH: process.env.PATH } });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stdout + res.stderr, /Refusing to use symlinked/);
+  assert.equal(readFileSync(target, 'utf8'), before);
+});
+
+test('setup skips pi-observe symlink when user bin directory is not writable', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-setup-bin-'));
+  const lf = join(root, 'observability/langfuse');
+  mkdirSync(lf, { recursive: true });
+  writeFileSync(join(lf, '.env.example'), readFileSync(exampleEnv));
+  mkdirSync(join(root, 'observability/pi-observe/bin'), { recursive: true });
+  writeFileSync(join(root, 'observability/pi-observe/bin/pi-observe.mjs'), '#!/usr/bin/env node\n');
+  const home = join(root, 'home');
+  const bin = join(home, '.local/bin');
+  mkdirSync(bin, { recursive: true });
+  chmodSync(bin, 0o500);
+  try {
+    const res = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', HOME: home, PATH: process.env.PATH } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /not writable|Could not create pi-observe symlink|skipping pi-observe symlink/i);
+  } finally {
+    chmodSync(bin, 0o700);
+  }
+});
+
+test('setup reports home cargo outside current PATH without executing it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-setup-cargo-'));
+  const lf = join(root, 'observability/langfuse');
+  mkdirSync(lf, { recursive: true });
+  writeFileSync(join(lf, '.env.example'), readFileSync(exampleEnv));
+  mkdirSync(join(root, 'observability/pi-observe/bin'), { recursive: true });
+  writeFileSync(join(root, 'observability/pi-observe/bin/pi-observe.mjs'), '#!/usr/bin/env node\n');
+  const home = join(root, 'home');
+  const cargoDir = join(home, '.cargo/bin');
+  mkdirSync(cargoDir, { recursive: true });
+  const marker = join(root, 'cargo-executed');
+  writeFileSync(join(cargoDir, 'cargo'), `#!/usr/bin/env bash\ntouch "${marker}"\nexit 99\n`);
+  chmodSync(join(cargoDir, 'cargo'), 0o755);
+  const res = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', HOME: home, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /not in this shell's PATH/);
+  assert.match(res.stdout, /Not executing out-of-PATH cargo candidates/);
+  assert.match(res.stdout, /source "\$HOME\/\.cargo\/env"|restart the terminal/);
+  assert.equal(existsSync(marker), false, 'out-of-PATH HOME cargo must not be executed');
+});
+
+test('setup does not execute non-HOME cargo candidates', () => {
+  const script = readFileSync(setup, 'utf8');
+  assert.match(script, /\/var\/pi-assistant\/\.cargo\/bin\/cargo/);
+  assert.doesNotMatch(script, /\/var\/pi-assistant\/\.cargo\/bin\/cargo["']?\s+--version|cargo_candidate --version|\$\{cargo_candidate\} --version|\$cargo_candidate --version/);
 });
 
 test('helper scripts display sanitized Langfuse host values only', () => {
