@@ -118,11 +118,11 @@ test('Langfuse HTTP rejection warns without blocking wrapped command', async () 
   assert.doesNotMatch(res.stderr, /sk-local|pk-local/);
 });
 
-test('project resolution uses env, project file, config map, then fallback with sanitization', () => {
+test('project resolution accepts only whole-marker safe project keys', () => {
   const dirs = tempDirs();
-  const cwd = join(dirs.root, 'Unsafe Project');
+  const cwd = join(dirs.root, 'Safe Project');
   mkdirSync(cwd, { recursive: true });
-  writeFileSync(join(cwd, '.pi-project'), 'Client Email user@example.com $$$');
+  writeFileSync(join(cwd, '.pi-project'), '  Client_1.2-key\n');
   const res = spawnSync(process.execPath, [cli, 'run', '--tool', 'proj', '--', process.execPath, '-e', ''], {
     cwd,
     encoding: 'utf8',
@@ -130,25 +130,27 @@ test('project resolution uses env, project file, config map, then fallback with 
   });
   assert.equal(res.status, 0, res.stderr);
   const raw = readFileSync(join(dirs.state, 'events.jsonl'), 'utf8');
-  assert.match(raw, /client/);
-  assert.doesNotMatch(raw, /user@example\.com/);
+  assert.match(raw, /"project":"client_1.2-key"/);
 });
 
 test('invalid project marker contents are ignored instead of becoming unknown or redacted placeholders', () => {
   const dirs = tempDirs();
   const symbolCwd = join(dirs.root, 'symbol-marker');
   const secretCwd = join(dirs.root, 'secret-marker');
+  const mixedCwd = join(dirs.root, 'mixed-marker');
   const mappedCwd = join(dirs.root, 'mapped-marker');
   mkdirSync(symbolCwd, { recursive: true });
   mkdirSync(secretCwd, { recursive: true });
+  mkdirSync(mixedCwd, { recursive: true });
   mkdirSync(mappedCwd, { recursive: true });
   mkdirSync(dirs.config, { recursive: true });
   writeFileSync(join(symbolCwd, '.pi-project'), '!!!\n');
   writeFileSync(join(secretCwd, '.pi-project'), 'ghp_abcdefghijklmnopqrstuvwxyz1234567890\n');
+  writeFileSync(join(mixedCwd, '.pi-project'), 'vire extra-data user@example.com\n');
   writeFileSync(join(mappedCwd, '.pi-project'), '!!!\n');
   writeFileSync(join(dirs.config, 'projects.json'), JSON.stringify({ projects: { configured: { paths: [mappedCwd] } } }));
 
-  for (const [cwd, stateName, expected] of [[symbolCwd, 'symbol-state', 'symbol-marker'], [secretCwd, 'secret-state', 'secret-marker'], [mappedCwd, 'mapped-state', 'configured']]) {
+  for (const [cwd, stateName, expected] of [[symbolCwd, 'symbol-state', 'symbol-marker'], [secretCwd, 'secret-state', 'secret-marker'], [mixedCwd, 'mixed-state', 'mixed-marker'], [mappedCwd, 'mapped-state', 'configured']]) {
     const state = join(dirs.root, stateName);
     const res = spawnSync(process.execPath, [cli, 'run', '--tool', 'marker-content', '--', process.execPath, '-e', ''], {
       cwd,
@@ -158,7 +160,7 @@ test('invalid project marker contents are ignored instead of becoming unknown or
     assert.equal(res.status, 0, res.stderr);
     const raw = readFileSync(join(state, 'events.jsonl'), 'utf8');
     assert.match(raw, new RegExp(`"project":"${expected}"`));
-    assert.doesNotMatch(raw, /"project":"unknown"|redacted_github_token|ghp_/);
+    assert.doesNotMatch(raw, /"project":"unknown"|"project":"vire"|redacted_github_token|ghp_|user@example\.com/);
   }
 });
 

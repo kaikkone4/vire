@@ -99,10 +99,9 @@ function readProjectMarker(path) {
     const info = statSync(path);
     if (!info.isFile() || info.size > PROJECT_MARKER_MAX_BYTES) return null;
     const raw = readFileSync(path, 'utf8').slice(0, PROJECT_MARKER_MAX_BYTES);
-    const firstLine = raw.split(/\r?\n/, 1)[0] || '';
-    const token = firstLine.trim().split(/\s+/, 1)[0];
-    if (!token || !isSafeProjectKey(token)) return null;
-    const safe = safeToken(token);
+    const payload = raw.trim();
+    if (!payload || /\s/.test(payload) || !isSafeProjectKey(payload)) return null;
+    const safe = safeToken(payload);
     return isSafeProjectKey(safe) ? safe : null;
   } catch { return null; }
 }
