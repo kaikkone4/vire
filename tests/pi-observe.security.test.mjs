@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -132,6 +132,34 @@ test('project resolution uses env, project file, config map, then fallback with 
   const raw = readFileSync(join(dirs.state, 'events.jsonl'), 'utf8');
   assert.match(raw, /client/);
   assert.doesNotMatch(raw, /user@example\.com/);
+});
+
+test('project marker symlinks and oversized/non-file markers are ignored safely', () => {
+  const dirs = tempDirs();
+  const symlinkCwd = join(dirs.root, 'symlink-marker');
+  const oversizedCwd = join(dirs.root, 'oversized-marker');
+  const directoryCwd = join(dirs.root, 'directory-marker');
+  mkdirSync(symlinkCwd, { recursive: true });
+  mkdirSync(oversizedCwd, { recursive: true });
+  mkdirSync(directoryCwd, { recursive: true });
+  const markerTarget = join(dirs.root, 'marker-target');
+  writeFileSync(markerTarget, 'vire\n');
+  symlinkSync(markerTarget, join(symlinkCwd, '.pi-project'));
+  writeFileSync(join(oversizedCwd, '.pi-project'), `vire${'x'.repeat(300)}\n`);
+  mkdirSync(join(directoryCwd, '.pi-project'));
+
+  for (const [cwd, expected] of [[symlinkCwd, 'symlink-marker'], [oversizedCwd, 'oversized-marker'], [directoryCwd, 'directory-marker']]) {
+    const state = join(dirs.root, `${expected}-state`);
+    const res = spawnSync(process.execPath, [cli, 'run', '--tool', 'marker-safety', '--', process.execPath, '-e', ''], {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, PI_OBSERVE_STATE_DIR: state, PI_OBSERVE_CONFIG_DIR: dirs.config, PI_OBSERVE_DOTENV: dirs.dotenv, LANGFUSE_PUBLIC_KEY: '', LANGFUSE_SECRET_KEY: '' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const raw = readFileSync(join(state, 'events.jsonl'), 'utf8');
+    assert.doesNotMatch(raw, /"project":"vire"/);
+    assert.match(raw, new RegExp(`"project":"${expected}"`));
+  }
 });
 
 test('path project mapping matches only real directory boundaries, not same-prefix siblings', () => {
