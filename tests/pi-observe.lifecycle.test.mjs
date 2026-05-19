@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -106,6 +106,22 @@ test('langfuse-down ignores PI_OBSERVE_ROOT_DIR unless explicit test override is
   const honored = spawnSync('bash', [langfuseDown], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', PATH: `${bin}:${process.env.PATH}` } });
   assert.equal(honored.status, 0, honored.stderr);
   assert.equal(readFileSync(marker, 'utf8').trim(), lf);
+});
+
+test('setup refuses symlinked .env without modifying symlink target', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-setup-env-symlink-'));
+  const lf = join(root, 'observability/langfuse');
+  mkdirSync(lf, { recursive: true });
+  writeFileSync(join(lf, '.env.example'), readFileSync(exampleEnv));
+  const target = join(root, 'target-file');
+  writeFileSync(target, 'NEXTAUTH_SECRET=   \n');
+  symlinkSync(target, join(lf, '.env'));
+  const before = readFileSync(target, 'utf8');
+  const home = join(root, 'home'); mkdirSync(home);
+  const res = spawnSync('bash', [setup], { input: 'n\nn\nn\nn\nn\n', encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', HOME: home, PATH: process.env.PATH } });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stdout + res.stderr, /Refusing to use symlinked/);
+  assert.equal(readFileSync(target, 'utf8'), before);
 });
 
 test('setup skips pi-observe symlink when user bin directory is not writable', () => {

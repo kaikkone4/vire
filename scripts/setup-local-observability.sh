@@ -43,6 +43,44 @@ replace_empty(){
   local key="$1" value="$2"
   KEY="$key" VALUE="$value" perl -0pi -e 'my $k = $ENV{KEY}; my $v = $ENV{VALUE}; s/^[[:space:]]*\Q$k\E[[:space:]]*=[[:space:]]*$/$k=$v/mg' "$ENV_FILE"
 }
+ensure_safe_env_file(){
+  if [[ -L "$ENV_FILE" ]]; then
+    say "Refusing to use symlinked observability/langfuse/.env for safety."
+    printf 'This setup script will not chmod or edit symlink targets.\n'
+    printf 'Inspect with: ls -l "%s"\n' "$ENV_FILE"
+    printf 'To continue, move the symlink aside and create a regular file from the template:\n'
+    printf '  mv "%s" "%s.symlink-backup"\n' "$ENV_FILE" "$ENV_FILE"
+    printf '  cp "%s" "%s"\n' "$EXAMPLE_FILE" "$ENV_FILE"
+    printf '  chmod 600 "%s"\n' "$ENV_FILE"
+    return 1
+  fi
+  if [[ ! -e "$ENV_FILE" ]]; then
+    say "Creating local .env from .env.example (secrets stay local and are gitignored)."
+    local tmp
+    tmp="$(mktemp "$LF_DIR/.env.tmp.XXXXXX")"
+    chmod 600 "$tmp"
+    cp "$EXAMPLE_FILE" "$tmp"
+    chmod 600 "$tmp"
+    if ! ln "$tmp" "$ENV_FILE" 2>/dev/null; then
+      rm -f "$tmp"
+      say "Could not create $ENV_FILE safely; it may have appeared concurrently. Rerun setup after inspecting the path."
+      return 1
+    fi
+    rm -f "$tmp"
+  else
+    if [[ ! -f "$ENV_FILE" ]]; then
+      say "Refusing to use observability/langfuse/.env because it is not a regular file."
+      printf 'Inspect with: ls -l "%s"\n' "$ENV_FILE"
+      return 1
+    fi
+    say ".env already exists; not overwriting."
+  fi
+  case "$(cd "$LF_DIR" && pwd -P)/.env" in
+    "$(cd "$LF_DIR" && pwd -P)"/.env) ;;
+    *) say "Refusing to use .env outside observability/langfuse."; return 1 ;;
+  esac
+  chmod 600 "$ENV_FILE"
+}
 
 say "Local observability setup (Langfuse + pi-observe)"
 printf 'OS: %s / %s\n' "$(uname -s)" "$(uname -m)"
@@ -96,13 +134,9 @@ else
   printf 'Cargo: %s\n' "$(cargo --version)"
 fi
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  say "Creating local .env from .env.example (secrets stay local and are gitignored)."
-  cp "$EXAMPLE_FILE" "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
-else
-  say ".env already exists; not overwriting."
-  chmod 600 "$ENV_FILE"
+if ! ensure_safe_env_file; then
+  say "Setup cannot continue until observability/langfuse/.env is a regular local file."
+  exit 1
 fi
 
 say "Ensured $ENV_FILE permissions are 0600 before filling missing secrets."
