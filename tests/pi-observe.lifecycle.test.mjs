@@ -87,18 +87,24 @@ test('setup fills whitespace-only secret values without overwriting non-empty va
   assert.match(envText, /^POSTGRES_PASSWORD=keep-me$/m);
 });
 
-test('langfuse-down honors PI_OBSERVE_ROOT_DIR only with explicit test override', () => {
+test('langfuse-down ignores PI_OBSERVE_ROOT_DIR unless explicit test override is enabled', () => {
   const root = mkdtempSync(join(tmpdir(), 'pi-down-root-'));
   const lf = join(root, 'observability/langfuse');
   const bin = join(root, 'fake-bin');
   const marker = join(root, 'docker-pwd');
+  const scriptLf = new URL('../observability/langfuse', import.meta.url).pathname;
   mkdirSync(lf, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(lf, '.env'), 'LANGFUSE_HOST=http://localhost:3000\n');
   writeFileSync(join(bin, 'docker'), `#!/usr/bin/env bash\npwd > "${marker}"\nexit 0\n`);
   chmodSync(join(bin, 'docker'), 0o755);
-  const res = spawnSync('bash', [langfuseDown], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', PATH: `${bin}:${process.env.PATH}` } });
-  assert.equal(res.status, 0, res.stderr);
+
+  const ignored = spawnSync('bash', [langfuseDown], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'false', PATH: `${bin}:${process.env.PATH}` } });
+  assert.equal(ignored.status, 0, ignored.stderr);
+  assert.equal(readFileSync(marker, 'utf8').trim(), scriptLf);
+
+  const honored = spawnSync('bash', [langfuseDown], { encoding: 'utf8', env: { ...process.env, PI_OBSERVE_ROOT_DIR: root, PI_OBSERVE_ALLOW_ROOT_OVERRIDE_FOR_TESTS: 'true', PATH: `${bin}:${process.env.PATH}` } });
+  assert.equal(honored.status, 0, honored.stderr);
   assert.equal(readFileSync(marker, 'utf8').trim(), lf);
 });
 
