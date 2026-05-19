@@ -28,7 +28,7 @@ Captured: project key, tool/role, timing, exit status, cwd basename, safe git br
 
 Not captured by default: raw prompts, full command args, terminal streams, file contents, diffs, environment variables, screenshots, browser history, or hidden editor/CLI logs.
 
-`pi-observe` loads only the needed Langfuse API variables from `observability/langfuse/.env` using a data-only parser; do not source the full `.env`. Wrapped child commands receive a scrubbed environment with Langfuse/backing-service secrets removed. Langfuse ingestion is restricted to loopback hosts (`localhost`, `127.0.0.1`, `::1`) by default; set `PI_OBSERVE_ALLOW_REMOTE_LANGFUSE=true` only if you intentionally point telemetry at a remote Langfuse endpoint. Session IDs supplied via `--session` or `PI_OBSERVE_SESSION` are hashed before storage/transmission.
+`pi-observe` loads only the needed Langfuse API variables from `observability/langfuse/.env` using a data-only parser; do not source the full `.env`. Dotenv-loaded Langfuse secrets are not injected into wrapped commands. The user's existing exported environment is preserved for transparent tool behavior unless you explicitly clear it before invoking `pi-observe`. Langfuse ingestion is restricted to loopback hosts (`localhost`, `127.0.0.1`, `::1`) by default; set `PI_OBSERVE_ALLOW_REMOTE_LANGFUSE=true` only if you intentionally point telemetry at a remote Langfuse endpoint. Session IDs supplied via `--session` or `PI_OBSERVE_SESSION` are hashed before storage/transmission.
 
 Disable wrapper telemetry while still running commands:
 
