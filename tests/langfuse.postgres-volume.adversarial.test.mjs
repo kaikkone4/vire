@@ -12,7 +12,7 @@ test('Postgres credential guard validates .env password, not stale container env
   );
   assert.match(
     upScript,
-    /exec\s+-T(?:\s+-e\s+PGPASSWORD=|[\s\S]*PGPASSWORD=.*awk|[\s\S]*PGPASSWORD=.*grep)/,
+    /pg_password="\$\(env_value POSTGRES_PASSWORD\)"[\s\S]*PGPASSWORD="\$pg_password"[\s\\\n]*docker compose --env-file \.env exec -T -e PGUSER -e PGDATABASE -e PGPASSWORD postgres/,
     'guard should pass the POSTGRES_PASSWORD read from observability/langfuse/.env into psql, so already-running containers with old env cannot mask password drift'
   );
 });

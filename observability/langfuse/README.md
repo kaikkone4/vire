@@ -45,6 +45,8 @@ Dangerous full reset (deletes local Langfuse volumes):
 ./scripts/langfuse-down.sh -v
 ```
 
+The script asks for interactive confirmation before deleting volumes. For non-interactive automation, pass `--force` or set `LANGFUSE_DOWN_FORCE=true` only after taking any needed backups.
+
 Backups are not automated in phase 1. For important data, export from Langfuse and/or back up Docker volumes before reset.
 
 ## Security notes
@@ -83,6 +85,6 @@ If the local Langfuse data is disposable, reset the named volumes and recreate t
 ./scripts/langfuse-up.sh
 ```
 
-This deletes local Langfuse Postgres, Redis, ClickHouse, and MinIO data. Back up or export anything important first.
+This deletes local Langfuse Postgres, Redis, ClickHouse, and MinIO data after confirmation. Back up or export anything important first. In non-interactive automation, use `./scripts/langfuse-down.sh -v --force` only when deletion is intentional.
 
 If the data is important, do **not** delete volumes. Restore the `POSTGRES_PASSWORD` value that was used when the volume was first initialized, or perform a manual Postgres password rotation from inside the database, then rerun `./scripts/langfuse-up.sh`.

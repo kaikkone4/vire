@@ -17,8 +17,22 @@ sanitize_url_for_display() {
     catch { console.log("invalid-host"); }
   ' "$1" 2>/dev/null || printf '%s\n' 'invalid-host'
 }
-raw_host="$(awk -F= '$1 == "LANGFUSE_HOST" { sub(/^[^=]*=/, ""); print; exit }' .env 2>/dev/null || true)"
-raw_host="${raw_host:-http://localhost:3000}"
+env_value() {
+  local key="$1" default="${2:-}"
+  local value
+  value="$(awk -v key="$key" '
+    $0 ~ "^[[:space:]]*#" { next }
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub(/^[^=]*=/, "")
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+      if (($0 ~ /^".*"$/) || ($0 ~ /^'"'"'.*'"'"'$/)) $0 = substr($0, 2, length($0) - 2)
+      print
+      exit
+    }
+  ' .env 2>/dev/null || true)"
+  printf '%s\n' "${value:-$default}"
+}
+raw_host="$(env_value LANGFUSE_HOST http://localhost:3000)"
 postgres_volume_exists() {
   docker volume inspect vire-local-langfuse_langfuse_postgres >/dev/null 2>&1 \
     || docker volume inspect langfuse_postgres >/dev/null 2>&1
@@ -31,17 +45,53 @@ check_postgres_credentials() {
     return 0
   fi
 
+  local pg_user pg_password pg_db max_attempts sleep_seconds attempt err_file rc
+  pg_user="$(env_value POSTGRES_USER langfuse)"
+  pg_password="$(env_value POSTGRES_PASSWORD)"
+  pg_db="$(env_value POSTGRES_DB langfuse)"
+  max_attempts="${LANGFUSE_POSTGRES_PREFLIGHT_RETRIES:-30}"
+  sleep_seconds="${LANGFUSE_POSTGRES_PREFLIGHT_SLEEP_SECONDS:-2}"
+  if [[ -z "$pg_password" ]]; then
+    return 0
+  fi
+
   printf 'Existing Langfuse Postgres volume detected; verifying .env database credentials before starting Langfuse.\n'
   docker compose --env-file .env up -d postgres >/dev/null
-  if ! docker compose --env-file .env exec -T postgres sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT 1"' >/dev/null; then
-    printf '\nPostgres rejected the credentials from observability/langfuse/.env.\n' >&2
-    printf 'Most likely the named Docker volume was initialized with an older POSTGRES_PASSWORD; Postgres ignores later POSTGRES_PASSWORD changes for existing data directories.\n' >&2
-    printf 'If you do not need the local Langfuse data, reset the local volumes:\n' >&2
-    printf '  ./scripts/langfuse-down.sh -v\n' >&2
-    printf '  ./scripts/langfuse-up.sh\n' >&2
-    printf 'If you need the data, restore the previous POSTGRES_PASSWORD in .env or perform a manual Postgres password rotation from inside the database.\n' >&2
-    exit 1
-  fi
+  err_file="$(mktemp "${TMPDIR:-/tmp}/langfuse-postgres-preflight.XXXXXX")"
+  trap 'rm -f "$err_file"' RETURN
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    : >"$err_file"
+    if PGUSER="$pg_user" PGDATABASE="$pg_db" PGPASSWORD="$pg_password" \
+      docker compose --env-file .env exec -T -e PGUSER -e PGDATABASE -e PGPASSWORD postgres \
+      sh -c 'psql -U "$PGUSER" -d "$PGDATABASE" -tAc "SELECT 1"' >/dev/null 2>"$err_file"; then
+      rm -f "$err_file"
+      trap - RETURN
+      return 0
+    else
+      rc=$?
+    fi
+    if grep -Eiq 'password authentication failed|authentication failed|no password supplied|role ".*" does not exist|database ".*" does not exist' "$err_file"; then
+      rm -f "$err_file"
+      trap - RETURN
+      printf '\nPostgres rejected the credentials from observability/langfuse/.env.\n' >&2
+      printf 'Most likely the named Docker volume was initialized with an older POSTGRES_PASSWORD; Postgres ignores later POSTGRES_PASSWORD changes for existing data directories.\n' >&2
+      printf 'If you do not need the local Langfuse data, reset the local volumes:\n' >&2
+      printf '  ./scripts/langfuse-down.sh -v --force\n' >&2
+      printf '  ./scripts/langfuse-up.sh\n' >&2
+      printf 'If you need the data, restore the previous POSTGRES_PASSWORD in .env or perform a manual Postgres password rotation from inside the database.\n' >&2
+      printf 'Postgres may have been started for this check; stop it with ./scripts/langfuse-down.sh if needed.\n' >&2
+      exit 1
+    fi
+    if (( attempt < max_attempts )); then
+      sleep "$sleep_seconds"
+    fi
+  done
+  rm -f "$err_file"
+  trap - RETURN
+  printf '\nPostgres did not become ready for an authenticated credential check after %s attempts.\n' "$max_attempts" >&2
+  printf 'This looks like a startup/readiness problem, not a confirmed password mismatch. Check logs with:\n' >&2
+  printf '  cd observability/langfuse && docker compose --env-file .env logs postgres --tail=100\n' >&2
+  exit "$rc"
 }
 check_postgres_credentials
 docker compose --env-file .env up -d
