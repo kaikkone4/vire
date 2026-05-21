@@ -64,3 +64,25 @@ docker compose --env-file .env logs langfuse-web langfuse-worker --tail=100
 ```
 
 Avoid commands that print secrets. Do not share `.env` contents.
+
+### Prisma `P1000` / Postgres authentication failed
+
+If `langfuse-web` or `langfuse-worker` fails during Prisma migrations with `Authentication failed against database server at postgres`, the usual local cause is a password/volume mismatch:
+
+- Docker named volume `vire-local-langfuse_langfuse_postgres` already contains an initialized Postgres data directory.
+- `POSTGRES_PASSWORD` in `.env` was generated or changed later.
+- The official Postgres image only uses `POSTGRES_PASSWORD` on first initialization; it does not update the password for an existing data directory.
+- The Postgres healthcheck can still pass because `pg_isready` checks readiness, not password authentication.
+
+`./scripts/langfuse-up.sh` now verifies the `.env` database credentials against an existing local Postgres volume before starting the full stack and stops with remediation steps if they fail.
+
+If the local Langfuse data is disposable, reset the named volumes and recreate them with the current `.env` secrets:
+
+```sh
+./scripts/langfuse-down.sh -v
+./scripts/langfuse-up.sh
+```
+
+This deletes local Langfuse Postgres, Redis, ClickHouse, and MinIO data. Back up or export anything important first.
+
+If the data is important, do **not** delete volumes. Restore the `POSTGRES_PASSWORD` value that was used when the volume was first initialized, or perform a manual Postgres password rotation from inside the database, then rerun `./scripts/langfuse-up.sh`.
