@@ -118,7 +118,8 @@ test('langfuse-up reports auth failure without printing the current .env passwor
   const res = runUp(ctx.root, ctx.bin, { FAKE_EXEC_MODE: 'auth-failure' });
   assert.notEqual(res.status, 0);
   assert.match(res.stderr, /Postgres rejected the credentials/);
-  assert.match(res.stderr, /langfuse-down\.sh -v --force/);
+  assert.match(res.stderr, /langfuse-down\.sh -v\n/);
+  assert.match(res.stderr, /non-interactive automation only, pass --force/);
   assert.doesNotMatch(res.stdout + res.stderr, /new-secret-value/);
 });
 

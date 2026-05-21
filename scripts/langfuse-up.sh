@@ -75,9 +75,10 @@ check_postgres_credentials() {
       trap - RETURN
       printf '\nPostgres rejected the credentials from observability/langfuse/.env.\n' >&2
       printf 'Most likely the named Docker volume was initialized with an older POSTGRES_PASSWORD; Postgres ignores later POSTGRES_PASSWORD changes for existing data directories.\n' >&2
-      printf 'If you do not need the local Langfuse data, reset the local volumes:\n' >&2
-      printf '  ./scripts/langfuse-down.sh -v --force\n' >&2
+      printf 'If you do not need the local Langfuse data, reset the local volumes interactively:\n' >&2
+      printf '  ./scripts/langfuse-down.sh -v\n' >&2
       printf '  ./scripts/langfuse-up.sh\n' >&2
+      printf 'For non-interactive automation only, pass --force or set LANGFUSE_DOWN_FORCE=true after confirming data deletion is intentional.\n' >&2
       printf 'If you need the data, restore the previous POSTGRES_PASSWORD in .env or perform a manual Postgres password rotation from inside the database.\n' >&2
       printf 'Postgres may have been started for this check; stop it with ./scripts/langfuse-down.sh if needed.\n' >&2
       exit 1
