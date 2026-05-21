@@ -43,6 +43,11 @@ replace_empty(){
   local key="$1" value="$2"
   KEY="$key" VALUE="$value" perl -0pi -e 'my $k = $ENV{KEY}; my $v = $ENV{VALUE}; s/^[[:space:]]*\Q$k\E[[:space:]]*=[[:space:]]*$/$k=$v/mg' "$ENV_FILE"
 }
+postgres_volume_exists(){
+  command -v docker >/dev/null 2>&1 || return 1
+  docker volume inspect vire-local-langfuse_langfuse_postgres >/dev/null 2>&1 \
+    || docker volume inspect langfuse_postgres >/dev/null 2>&1
+}
 ensure_safe_env_file(){
   if [[ -L "$ENV_FILE" ]]; then
     say "Refusing to use symlinked observability/langfuse/.env for safety."
@@ -152,10 +157,21 @@ fi
 
 say "Ensured $ENV_FILE permissions are 0600 before filling missing secrets."
 say "Generating missing local-only secrets in .env."
+generated_postgres_password=false
 for key in NEXTAUTH_SECRET SALT POSTGRES_PASSWORD CLICKHOUSE_PASSWORD REDIS_PASSWORD MINIO_ROOT_PASSWORD LANGFUSE_INIT_USER_PASSWORD; do
-  if is_empty_key "$key"; then replace_empty "$key" "$(secret 48)"; fi
+  if is_empty_key "$key"; then
+    replace_empty "$key" "$(secret 48)"
+    if [[ "$key" == "POSTGRES_PASSWORD" ]]; then generated_postgres_password=true; fi
+  fi
 done
 if is_empty_key ENCRYPTION_KEY; then replace_empty ENCRYPTION_KEY "$(openssl rand -hex 32 2>/dev/null || secret 64)"; fi
+if [[ "$generated_postgres_password" == "true" ]] && postgres_volume_exists; then
+  say "Existing Langfuse Postgres volume found after generating a new POSTGRES_PASSWORD."
+  printf 'Postgres only applies POSTGRES_PASSWORD when its data directory is first initialized.\n'
+  printf 'If this volume was initialized with a different password, Langfuse may fail migrations with Prisma P1000.\n'
+  printf 'If you do not need local Langfuse data, reset with: ./scripts/langfuse-down.sh -v\n'
+  printf 'If you need the data, keep/restore the password that originally initialized the volume or rotate it manually in Postgres.\n'
+fi
 
 PORT="$(grep -E '^LANGFUSE_PORT=' "$ENV_FILE" | tail -1 | cut -d= -f2 || true)"; PORT="${PORT:-3000}"
 if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
