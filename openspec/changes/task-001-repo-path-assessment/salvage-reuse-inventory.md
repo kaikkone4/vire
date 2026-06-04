@@ -189,6 +189,11 @@ values were printed or written.
 
 ## 7. Gaps register (for downstream tasks)
 
+> Downstream TASK-NNN pointers in this document are **indicative**, not a finalized backlog
+> numbering — TASK-003 owns implementation-path sequencing. Where this inventory and `arch-review.md`
+> cite different numbers for the same control (e.g. SEC-005/006/008), treat both as directional; the
+> control mapping in §5, not the task number, is authoritative.
+
 - No outbound network client in the app (SEC-002 importer net-new) → TASK-007/012.
 - No migration framework; schema is create-if-not-exists only → TASK-004.
 - 12 of 13 BA evidence entities absent; `projects` partial → TASK-004.
