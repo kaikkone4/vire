@@ -14,19 +14,23 @@
 > Langfuse API** (configurable base URL, project-scoped credentials, environment/date filtering).
 > A local Docker Langfuse stack is an **optional dev fallback / contract-test fixture, no longer a
 > blocking dependency** — so the spike is **no longer Docker-blocked**. Import-flow logic is proven
-> with mocked HTTP fixtures (+ optional local Docker). The remaining **live cloud round-trip** rows
-> (real field names/units/nullability against Janne's project) are PENDING **configured cloud
-> credentials in local secure config**; if absent, SW-2 returns `needs_input` to request them via
-> secure local `.env` — never by probing or printing secrets. See `langfuse-validation-report.md`
-> §0/§12 (to be revised by SW-2).
+> offline with synthetic fixtures (`langfuse-probe.mjs --mock`).
+>
+> **SW-2 live round-trip (2026-06-04):** project-scoped credentials were present in local secure
+> config, so the **live cloud round-trip was performed** against `https://cloud.langfuse.com`: auth
+> succeeded (health 200), the real trace/observation schema was recorded **shape-only** (no values,
+> no secrets), pagination + per-environment cursor were exercised over a real window, and the
+> **wrong-env workspace failure mode was empirically confirmed** (`vire` env empty; real traffic in
+> `default`). No `needs_input` was required. See `langfuse-validation-report.md` §0/§2/§5/§12.
 
 ## 1. Validation environment and safety scaffold
-- [ ] 1.1 Configure access to the **configured Langfuse API** (cloud-first, DEC-018): a
+- [x] 1.1 Configure access to the **configured Langfuse API** (cloud-first, DEC-018): a
       **configurable base URL** and **project-scoped credentials** loaded from local secure config
       (`observability/langfuse/.env` or equivalent); confirm reachability via the public health
       endpoint. The local Docker stack (`scripts/setup-local-observability.sh`, `langfuse-up.sh`,
-      `langfuse-smoke-test.sh`) is an **optional offline/dev fallback**, not required. — **PENDING:
-      live cloud round-trip needs configured credentials; SW-2 returns `needs_input` if absent.**
+      `langfuse-smoke-test.sh`) is an **optional offline/dev fallback**, not required. — **done:
+      credentials present in local secure config; live reachability confirmed (health HTTP 200
+      against `https://cloud.langfuse.com`); no `needs_input` required.**
 - [x] 1.2 Establish the isolated spike path `spikes/task-007-langfuse-importer/` and confirm it is
       **not** a member of any shipped build target (not added to the Tauri app, not referenced by
       `src-tauri/src/`, not under `observability/`).
@@ -38,29 +42,30 @@
       **reference-only**: not modified, not turned into a new pi/Claude adapter, not imported/reused.
 
 ## 2. Trace schema and time/usage/cost validation
-- [ ] 2.1 Query non-sensitive pi and Claude Code traces from the **configured Langfuse API**
+- [x] 2.1 Query non-sensitive pi and Claude Code traces from the **configured Langfuse API**
       (cloud-first) for `vire` (and a `default`/wrong-env case); optionally reproduce offline by
-      emitting via `pi-observe` to the local Docker fixture. — **PENDING: live cloud round-trip
-      needs configured credentials (`needs_input` if absent).**
+      emitting via `pi-observe` to the local Docker fixture. — **done: live query performed; `vire`
+      empty, real traffic in `default` (50 traces, 2 pages) — wrong-env confirmed (report §2/§5).**
 - [x] 2.2 Record the **observed** trace/observation schema (3.63.0 public-API contract; cloud uses
       the same public API): identity, `environment`, start/end timestamps, session ID,
       name/metadata, usage, cost (field names, units, nullability) — do not assume field names.
-      — recorded from the public-API contract + authoritative emitter source (report §2); live
-      cloud round-trip PENDING credentials.
+      — recorded **shape-only from the live cloud round-trip** + authoritative emitter source
+      (report §2): `sessionId` nullable, `metadata` key-count varies, trace carries aggregate
+      `totalCost`+`latency`, `usage` map keys are `{input,output,total,unit}` (not historical names).
 - [x] 2.3 Validate time, usage, and cost semantics as sufficient to serve as the primary AI
       time/usage/cost source where traces are valid; note any field that triggers `schema mismatch`.
       — report §3; key finding: usage/cost live on generation **observations**, not on pi-observe traces.
 
 ## 3. Import flow: pagination, deduplication, cursors
 - [x] 3.1 Design and prove the REST query by `environment` + date/time window against the
-      **configured Langfuse API** (configurable base URL; mocked fixtures + optional local Docker).
-      — designed + implemented in probe; live cloud demo PENDING credentials (report §6.1).
+      **configured Langfuse API** (configurable base URL; offline `--mock` + optional local Docker).
+      — designed + implemented in probe; **live query exercised** against the configured API (report §6.1).
 - [x] 3.2 Prove **pagination** to window completion and compute the per-environment cursor/checkpoint
-      position (durable persistence deferred to TASK-007 MVP / TASK-004). — probe walks pages, cursor
-      = max observed timestamp (report §6.2); live cloud demo PENDING credentials.
+      position (durable persistence deferred to TASK-007 MVP / TASK-004). — `--mock` proves a 3-page
+      window deterministically; **live walked a real 2-page window**, cursor = max observed timestamp (report §6.2).
 - [x] 3.3 Prove **deduplication** by trace ID scoped to environment/project across pages, re-imports,
-      and overlapping windows. — dedup key `(environment, trace_id)` in probe (report §6.3); live
-      cloud demo PENDING credentials.
+      and overlapping windows. — dedup key `(environment, trace_id)`; `--mock` proves 1 cross-page
+      duplicate suppressed + idempotent overlap re-import (report §6.3).
 
 ## 4. Source-health state model
 - [x] 4.1 Define the health-state model: `valid`, `missing`, `stale`, `wrong/default environment`,
@@ -68,11 +73,11 @@
       detection basis and user-visible consequence. — report §4 (9-state table).
 - [x] 4.2 Validate detectable transitions against the configured Langfuse API (mocked fixtures +
       optional local Docker), including the **invariant that absence never equals zero usage/cost**.
-      — invariant enforced in design + probe (empty env ⇒ cursor `none`, not 0); live cloud
-      transition demo PENDING credentials.
+      — invariant enforced in design + asserted in `--mock` (empty env ⇒ cursor `null`, not 0; all
+      9 states asserted produced-by-detection-rule); empty `vire` env confirmed `missing` live.
 - [x] 4.3 Validate the workspace-specific failure modes: pi-langfuse traces landing in `default`
       (wrong-env), and Claude Code hook silent-fail (missing/stale) — surfaced, not silently trusted.
-      — report §5; confirmed structurally (pi-observe sets no `environment`).
+      — report §5; **empirically confirmed live**: `vire` env empty, real traffic in `default`.
 
 ## 5. Project-mapping signal assessment
 - [x] 5.1 Assess `environment` (primary), session ID, and metadata (project key, tool/role, cwd
@@ -89,7 +94,8 @@
 
 ## 7. Security and boundary checks
 - [x] 7.1 Confirm the importer contacts only the configured Langfuse base URL / trace endpoints and
-      egresses no raw macOS activity (SEC-002). — report §10; probe refuses non-loopback hosts.
+      egresses no raw macOS activity (SEC-002). — report §10; probe builds every request as
+      base+path, never follows absolute URLs from data, rejects non-`http(s)` hosts, GET-only.
 - [x] 7.2 Confirm no credentials appear in any artifact, log, fixture, or PR output; documented
       config uses redacted placeholders only (SEC-003). — report §10; secret scan §8.3.
 
@@ -100,8 +106,8 @@
 - [x] 8.2 Confirm the exit gate: **Langfuse can be used as primary AI time/usage/cost source where
       valid; missing/stale/wrong-env/delayed/duplicate/schema/auth states are visible; credentials
       protected.** No durable importer shipped; no host-runtime or schema decision taken (TASK-003 /
-      TASK-004 / TASK-007 MVP own those). — report §11; live **cloud** round-trip rows PENDING
-      configured credentials (no longer Docker-blocked per DEC-018; report §12, to be revised by SW-2).
+      TASK-004 / TASK-007 MVP own those). — report §11; live **cloud** round-trip **performed**
+      (schema confirmed shape-only, pagination/cursor exercised, wrong-env confirmed); report §12.
 - [x] 8.3 Verify all produced artifacts by re-reading them; confirm no credentials, prompt/response
       text, command bodies, secrets, or environment dumps appear. — secret scan run, no values printed.
 - [x] 8.4 Run `openspec validate task-007-langfuse-importer-validation --strict` → valid.
