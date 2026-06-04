@@ -5,14 +5,51 @@
 - **Branch (implementation):** `feat/task-007-langfuse-importer-validation`
 - **Tier:** L2 · **Gate context:** APP-005 (SEC-002 network boundary, SEC-003 credentials primary;
   SEC-004 only as a downstream consumer note — no totals are produced here)
-- **Date:** 2026-06-04
-- **Verdict:** **SPLIT-REQUIRED** — WP-007 is a "Spike + MVP" work package whose two halves the BA's
-  own dependency graph separates across the TASK-003/TASK-004 gate. This change is scoped to the
-  **Phase A spike** (validation + design), which is fully doable now and unblocks the gate. The
-  **durable importer MVP** must be a separate change gated on TASK-003 (host runtime) and TASK-004
-  (schema). No BA escalation: the BA plan already anticipates this two-phase split, so no
-  `escalate-to-ba` is needed. No new TASK ID is required — both phases live under work package
-  **WP-007 / TASK-007** (see §3).
+- **Date:** 2026-06-04 · **Revised:** 2026-06-04 for **DEC-018** (cloud-first configured Langfuse
+  source) — see §0 revision addendum
+- **Verdict:** **SPLIT-REQUIRED (unchanged)** — WP-007 is a "Spike + MVP" work package whose two
+  halves the BA's own dependency graph separates across the TASK-003/TASK-004 gate. This change is
+  scoped to the **Phase A spike** (validation + design), which is fully doable now and unblocks the
+  gate. The **durable importer MVP** remains a separate change gated on TASK-003 (host runtime) and
+  TASK-004 (schema). **DEC-018 does not change the split**, but it **removes the local-Docker
+  blocker** from Phase A: validation is now **cloud-first against the configured Langfuse API**, with
+  local Docker as an optional dev/contract fixture (§0). No BA escalation: DEC-018 is the BA's own
+  accepted addendum, so no `escalate-to-ba` is needed. No new TASK ID is required — both phases live
+  under work package **WP-007 / TASK-007** (see §3).
+
+## 0. DEC-018 revision addendum (2026-06-04) — cloud-first; Phase A no longer Docker-blocked
+
+DEC-018 (accepted addendum to DEC-017; `07_decision_log.md`; `03` §4.4/§11.1/§11.2;
+`04` §13/§14) makes Janne's **configured Langfuse API project the MVP canonical AI usage/cost
+import source**, validated **cloud-first** where pi/Claude instrumentation already writes traces. It
+explicitly states a **local Docker Langfuse stack is NOT a blocking validation dependency** — only
+an optional developer fallback / contract-test fixture / self-host evaluation harness. This revises
+the prior review on exactly one axis:
+
+- **Reassessed: the earlier `blocked` status is withdrawn.** The previous SW-2 run returned
+  `blocked` because the local Docker stack could not be brought up (daemon down, no compose plugin,
+  no `.env`). Under DEC-018 **that is no longer a blocker**: the local stack was never the required
+  path. The import-flow logic (pagination, dedup, cursor, health detection) is proven with **mocked
+  HTTP fixtures** (and optionally local Docker) without a container; the **live round-trip** moves to
+  the **configured cloud API** using project-scoped credentials from local secure config. If those
+  credentials are not yet configured, the correct status is **`needs_input`** to request them via
+  secure local `.env` — **not** `blocked` on Docker. SEC-003 still forbids probing/printing secrets.
+- **Unchanged: SPLIT-REQUIRED.** DEC-018 changes the *source* (cloud vs local), not the
+  *boundary ownership*. The durable importer MVP still needs the TASK-003 host runtime and the
+  TASK-004 durable schema/cursors, so the MVP stays a follow-up change gated on both (§2, §3).
+- **SEC-002 boundary re-affirmed, not widened.** DEC-018 confirms the allowed network path is
+  **configured Langfuse trace import only** (cloud or optional local) — read-only import of
+  *existing* AI traces. Vire still sends **no** raw macOS activity, window titles, prompts, command
+  bodies, or env dumps to Langfuse. "Local-only Vire" governs *raw activity/evidence staying local*;
+  it does **not** require the Langfuse service to be local. So the cloud base URL is an in-scope
+  SEC-002 path, and the importer remaining a pull-only client is the control.
+- **Configurability is now a first-class requirement** (carried into the spec): configurable base
+  URL, project-scoped credentials, environment + date filtering, auth redaction, pagination/dedup,
+  observed usage/cost schema validation, and trace-health states.
+
+Sections 1–7 below remain valid as written; where they say "local stack," read "configured Langfuse
+API (cloud-first), with local Docker as optional fixture." The targeted SEC-002/§5 updates are
+inlined in those sections.
 
 ## 1. Scope validation against BA architecture
 
@@ -73,7 +110,7 @@ package**, not a new ID:
 
 | Phase | OpenSpec change | Gate / depends on | Status |
 | --- | --- | --- | --- |
-| A — spike (this change) | `task-007-langfuse-importer-validation` | depends on TASK-001 (done); uses local Langfuse stack | **ready now** |
+| A — spike (this change) | `task-007-langfuse-importer-validation` | depends on TASK-001 (done); cloud-first configured Langfuse API (DEC-018), local Docker optional fixture | **ready now (not Docker-blocked)** |
 | B — MVP (follow-up) | `task-007-langfuse-importer-mvp` (proposed name) | **gated on TASK-003** (host runtime) **and TASK-004** (schema) | **deferred** |
 
 The follow-up MVP change should be created **after** TASK-003 and TASK-004 land, reusing this
@@ -84,7 +121,7 @@ needed: this two-phase shape is the BA's own plan, not a divergence from it.
 
 | Control | Spike-scope handling | Downstream (TASK-007 MVP / TASK-012) |
 | --- | --- | --- |
-| **SEC-002** network boundary | The importer's whole point is the one allowed network path. Spec pins requests to the **configured Langfuse base URL / trace endpoints** (local stack `http://localhost:3000`) and forbids raw macOS activity egress. The importer is read-only against Langfuse — it pulls traces, never pushes activity. | Mocked-HTTP assertions + release network smoke test prove only Langfuse import fields leave; no raw activity egress. |
+| **SEC-002** network boundary | The importer's whole point is the one allowed network path. Per DEC-018 the spec pins requests to the **configured Langfuse base URL / trace endpoints** (Langfuse **Cloud** first; optional local stack) and forbids raw macOS activity / prompt / command-body / env-dump egress to Langfuse. The importer is read-only — it **pulls existing AI traces, never pushes activity**. "Local-only Vire" keeps raw activity/evidence local; it does not require the Langfuse service to be local. | Mocked-HTTP assertions + release network smoke test prove only configured-Langfuse import calls leave; no raw activity egress. |
 | **SEC-003** credentials | Spec forbids credentials in SQLite rows, logs, exports, fixtures, PR output, screenshots; mandates redacted placeholders and local-secure-config loading only. Mirrors the repo's existing posture (`observability/langfuse/.env` is chmod 600 + gitignored; `pi-observe` loads keys via a data-only parser and never injects them into wrapped commands). | Secret-scan + redaction/log-format tests on the durable importer/config. |
 | **SEC-004** approval invariant | **N/A here** — the spike produces no billable/profitability totals. Recorded so the MVP keeps AI cost/time **separate from approved human duration** and never auto-promotes to totals (TASK-009/010/013 own the invariant). | Summary-side concern (TASK-010/013), not the importer. |
 | Probe data safety | Spec mandates **no real sensitive trace content persisted** — redacted/synthetic output or ephemeral local logs with documented cleanup; no secrets/prompt/response/command bodies/env dumps. | Carries into MVP importer test fixtures (synthetic/anonymized traces only). |
@@ -98,12 +135,14 @@ design.
 These are **design inputs**, not blockers — surfacing exactly this kind of detail is the spike's
 purpose, so none warrant `escalate-to-ba`:
 
-- **Local validation environment is already present.** `observability/langfuse/`
-  (`langfuse/langfuse:3.63.0`, loopback) + `pi-observe` + `scripts/langfuse-*.sh` give a
-  non-sensitive validation harness. The spike can proceed **without probing Janne's production
-  secrets** (BA: "validate API shape using local/dev or non-sensitive real data where possible").
-  If real-environment **cost** confirmation later requires Janne's keys, the implementer returns
-  `needs_input` rather than probing — no secrets in this spike.
+- **Cloud-first per DEC-018; local Docker is an optional fixture.** Validation targets the
+  **configured Langfuse API** (cloud-first) with project-scoped credentials and environment/date
+  filters. `observability/langfuse/` (`langfuse/langfuse:3.63.0`, loopback) + `pi-observe` +
+  `scripts/langfuse-*.sh` remain a useful **offline/dev contract-test fixture and self-host
+  evaluation harness**, but are **not** the blocking gate. The spike proceeds **without probing
+  Janne's production secrets**: the live cloud round-trip uses credentials from local secure config,
+  and if they are not configured the implementer returns **`needs_input`** to request them — the
+  Docker daemon being unavailable is **no longer a blocker**.
 - **Schema must be observed, not assumed.** `04` §14 flags "Langfuse cost schema varies." The spike
   records the **observed** `3.63.0` usage/cost field shapes and makes `schema mismatch` a
   first-class health state, so the importer degrades visibly instead of producing wrong cost totals.
@@ -136,9 +175,11 @@ purpose, so none warrant `escalate-to-ba`:
 ## 7. Handoff
 
 - **SW-2 implementer (primary):** **integration-engineer** — owns the Langfuse public-API import
-  validation: bring up the local stack, validate trace schema/time/usage/cost, prove
-  pagination/dedup/cursor logic, define and validate the health-state model, and produce the
-  mapping-signal assessment.
+  validation: validate **cloud-first against the configured Langfuse API** (configurable base URL,
+  project-scoped credentials, environment/date filtering; local Docker optional fixture), validate
+  trace schema/time/usage/cost, prove pagination/dedup/cursor logic (mocked fixtures + optional local
+  Docker), define and validate the health-state model, and produce the mapping-signal assessment.
+  Return `needs_input` for cloud credentials if not configured — never probe secrets.
 - **Consulted:**
   - **backend-developer** (Rust/Tauri) — the host-runtime REST-client / SQLite-shape friction
     signal that feeds TASK-003, and the proposed `langfuse_import_runs` shape for TASK-004.
@@ -150,9 +191,10 @@ purpose, so none warrant `escalate-to-ba`:
   1. **Credential safety:** confirm no credentials (or secret-shaped strings) appear in any
      artifact, probe output, log, fixture, or PR text; documented config uses redacted placeholders;
      secret-scan committed spike artifacts (filenames/counts only, no values printed) (SEC-003).
-  2. **Network-boundary check:** confirm validation traffic targets only the configured Langfuse
-     base URL / trace endpoints (local `http://localhost:3000`) and that **no raw macOS activity,
-     window titles, prompt/response text, or command bodies** are sent (SEC-002).
+  2. **Network-boundary check:** confirm validation traffic targets only the **configured Langfuse
+     base URL / trace endpoints** (Langfuse Cloud or optional local), imports only existing AI
+     traces, and that **no raw macOS activity, window titles, prompt/response text, command bodies,
+     or env dumps** are sent to Langfuse (SEC-002, DEC-018).
   3. **Isolation check:** confirm `spikes/task-007-langfuse-importer/` is **not** referenced by any
      shipped build target and that no file under `src/`, `src-tauri/src/`, or `observability/` was
      modified; confirm the `pi-observe` emitter and legacy manual-tracker surface were not modified,

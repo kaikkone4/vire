@@ -4,14 +4,18 @@
 
 ### Requirement: Langfuse trace schema, time, usage, and cost fields are validated
 
-The spike SHALL validate the Langfuse public-API trace schema actually served by the pinned local
-stack (`langfuse/langfuse:3.63.0`) against real non-sensitive data, and SHALL record the observed
-fields for trace/observation identity, `environment`, start/end timestamps, session ID,
-name/metadata, usage, and cost rather than assuming field names.
+The spike SHALL validate the Langfuse public-API trace schema against the **configured Langfuse API
+(cloud-first per DEC-018)** — a configurable base URL with project-scoped credentials and
+environment/date filtering — using real non-sensitive data, and SHALL record the observed fields
+for trace/observation identity, `environment`, start/end timestamps, session ID, name/metadata,
+usage, and cost rather than assuming field names. A local Docker Langfuse stack
+(`langfuse/langfuse:3.63.0`) MAY be used as an optional offline/dev contract-test fixture but SHALL
+NOT be a blocking validation dependency.
 
-#### Scenario: Observed schema is recorded from the running stack
+#### Scenario: Observed schema is recorded from the configured Langfuse API
 
-- **WHEN** the importer queries the local Langfuse public API for traces emitted by `pi-observe`
+- **WHEN** the importer queries the configured Langfuse public API (cloud-first, or the optional
+  local fixture) for traces written by existing pi/Claude instrumentation
 - **THEN** the observed trace/observation schema is recorded, including `environment`, start/end
   timestamps, session ID, name/metadata, and the usage and cost field shapes (names, units,
   nullability)
@@ -20,17 +24,18 @@ name/metadata, usage, and cost rather than assuming field names.
 
 #### Scenario: Time, usage, and cost semantics are validated as the primary AI source
 
-- **WHEN** non-sensitive pi and Claude Code traces are imported from the local stack
+- **WHEN** non-sensitive pi and Claude Code traces are imported from the configured Langfuse project
 - **THEN** trace time, usage, and cost values are validated as sufficient to serve as the primary
   AI time/usage/cost source where traces are valid
 - **AND** the absence of a trace is never interpreted as zero usage or zero cost.
 
 ### Requirement: REST import flow with pagination, deduplication, and per-environment cursors
 
-The spike SHALL design and prove the REST import flow against the local stack: query by
-`environment` and time window, paginate to window completion, deduplicate by trace ID scoped to
-environment/project, and define per-environment import cursors/checkpoints. Durable persistence of
-cursors is deferred to the TASK-007 MVP.
+The spike SHALL design and prove the REST import flow against the **configured Langfuse API**
+(configurable base URL, cloud-first per DEC-018; proven with mocked HTTP fixtures and the optional
+local Docker stack offline): query by `environment` and a **date/time window**, paginate to window
+completion, deduplicate by trace ID scoped to environment/project, and define per-environment import
+cursors/checkpoints. Durable persistence of cursors is deferred to the TASK-007 MVP.
 
 #### Scenario: Pagination completes a time window
 
@@ -92,23 +97,27 @@ This change SHALL NOT create or migrate durable product schema.
 
 ### Requirement: Network and credential boundary is preserved
 
-The importer SHALL communicate only with the configured Langfuse API base URL / trace endpoints
-(the local stack `http://localhost:3000` for the spike), SHALL NOT egress raw macOS activity, and
-SHALL NOT place credentials in SQLite rows, logs, exports, test fixtures, PR output, or
-screenshots. Configuration examples SHALL use redacted placeholders only.
+The importer SHALL communicate only with the **configured Langfuse API base URL / trace endpoints**
+(Langfuse Cloud or an optional local stack per DEC-018; no other endpoint), SHALL import only
+existing AI traces, SHALL NOT egress raw macOS activity, prompts, command bodies, or environment
+dumps to Langfuse, and SHALL NOT place credentials in SQLite rows, logs, exports, test fixtures, PR
+output, or screenshots. Configuration examples SHALL use redacted placeholders only.
 
 #### Scenario: Only the configured Langfuse endpoint is contacted
 
 - **WHEN** the importer makes network requests
-- **THEN** requests target only the configured Langfuse API base URL and trace endpoints
-- **AND** no raw macOS activity, window titles, prompt/response text, or command bodies are sent.
+- **THEN** requests target only the configured Langfuse API base URL and trace endpoints (cloud or
+  optional local), and only to import existing AI traces
+- **AND** no raw macOS activity, window titles, prompt/response text, command bodies, or environment
+  dumps are sent to Langfuse.
 
 #### Scenario: Credentials never appear in evidence, logs, or output
 
 - **WHEN** the importer is configured and run, and when artifacts are produced
-- **THEN** credentials are loaded only from local secure configuration and never written to SQLite
-  rows, logs, exports, fixtures, PR output, or screenshots
-- **AND** documented configuration uses redacted placeholders (e.g. `LANGFUSE_PUBLIC_KEY=...`).
+- **THEN** project-scoped credentials are loaded only from local secure configuration, kept local,
+  and never written to SQLite rows, logs, exports, fixtures, PR output, or screenshots
+- **AND** documented configuration uses redacted placeholders (e.g. `LANGFUSE_HOST=...`,
+  `LANGFUSE_PUBLIC_KEY=...`, `LANGFUSE_SECRET_KEY=...`).
 
 ### Requirement: Spike outputs are isolated; emitter and legacy code stay reference-only
 

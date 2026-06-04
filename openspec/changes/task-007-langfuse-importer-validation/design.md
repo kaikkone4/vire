@@ -10,20 +10,28 @@ delayed/duplicate traces). `04_technical_plan.md` §14 and `05_project_plan_epic
 primary AI-evidence risks to retire **before** any AI summary is relied upon. This spike retires
 them.
 
-The repo already contains a **local-only Langfuse stack** (`observability/langfuse/`, pinned
-`langfuse/langfuse:3.63.0`, loopback-bound) and the **`pi-observe`** metadata-only emitter, with
-`scripts/langfuse-up.sh`, `scripts/langfuse-smoke-test.sh`, and `scripts/langfuse-down.sh`. This is
-exactly the non-sensitive validation environment the BA asks for ("validate API shape using
-local/dev or non-sensitive real data where possible") — so the spike can proceed **without probing
-Janne's production secrets**.
+Per **DEC-018** (accepted addendum to DEC-017), the MVP canonical AI usage/cost source is **Janne's
+configured Langfuse API project**, and TASK-007 validation is **cloud-first** where pi/Claude
+instrumentation already writes to Langfuse Cloud. Vire's local-only posture means **raw macOS
+activity/evidence stays local**; it does **not** require the Langfuse *service* to be local, because
+the only allowed network path is configured trace import and the observability data already exists
+in Langfuse outside Vire. The repo's **local Docker Langfuse stack** (`observability/langfuse/`,
+pinned `langfuse/langfuse:3.63.0`, loopback-bound) plus the **`pi-observe`** metadata-only emitter
+and `scripts/langfuse-*.sh` are therefore retained as an **optional offline/dev contract-test
+fixture and self-host evaluation harness — not the blocking validation gate**. The spike proceeds
+**without probing Janne's production secrets**: live cloud confirmation uses project-scoped
+credentials from local secure config, and if they are not yet configured the implementer returns
+`needs_input` to request them via a secure local `.env`.
 
 ## Goals / Non-goals
 
-- **Goals:** validate the public-API trace schema/time/usage/cost actually served by the pinned
-  Langfuse version; design and prove pagination, deduplication, and per-environment cursors;
-  define and validate the source-health state model; assess project-mapping signal quality;
-  specify the normalized AI-evidence and `langfuse_import_runs` shapes as inputs to TASK-004;
-  produce the importer host-runtime friction signal for TASK-003.
+- **Goals:** validate the public-API trace schema/time/usage/cost served by the **configured
+  Langfuse API (cloud-first, DEC-018)** via a configurable base URL and project-scoped credentials,
+  with environment/date filtering; design and prove pagination, deduplication, and per-environment
+  cursors (mocked/contract fixtures, optional local Docker); define and validate the source-health
+  state model; assess project-mapping signal quality; specify the normalized AI-evidence and
+  `langfuse_import_runs` shapes as inputs to TASK-004; produce the importer host-runtime friction
+  signal for TASK-003.
 - **Non-goals:** shipping the durable importer; choosing the host runtime (TASK-003); creating or
   migrating durable SQLite schema (TASK-004); building a new pi/Claude Code extension/adapter or
   modifying the `pi-observe` emitter (out of MVP per DEC-017); runtime reconciliation
@@ -44,14 +52,19 @@ MVP** follow-up. This change delivers everything that is safely doable in Phase 
 gate, while the MVP inherits a validated schema and a finished import design. See `arch-review.md`
 §verdict.
 
-### Decision: validate against the local Langfuse stack, not production secrets
+### Decision: validate cloud-first against the configured Langfuse API; local Docker is optional fallback (DEC-018)
 
-The spike runs against `observability/langfuse/` (`http://localhost:3000`) with traces emitted
-locally by `pi-observe` for pi + Claude Code. This keeps validation inside the L2 privacy posture,
-exercises the real pinned server schema, and avoids probing Janne's production keys. If validating
-against Janne's **actual** environments/keys later proves necessary (e.g. to confirm production
-cost fields), the implementer returns `needs_input` to request keys via secure local `.env` rather
-than embedding or printing any secret.
+The spike's primary validation target is the **configured Langfuse API** (configurable base URL,
+e.g. Langfuse Cloud) using **project-scoped Basic-auth credentials** loaded from local secure
+config, with **environment + date/time filtering**. This is the MVP canonical source under DEC-018
+where Janne's pi/Claude traces already live in Langfuse. A **local Docker Langfuse stack is NOT a
+blocking dependency** — it is an optional developer fallback, an offline contract-test fixture, and
+a self-host evaluation harness. The spike's import-flow logic (pagination, dedup, cursor, health
+detection) is therefore proven with **mocked HTTP fixtures** (and optionally the local Docker stack)
+so it does **not** depend on either the cloud creds or a running container; the **live cloud
+round-trip** (real field names/units/nullability against Janne's project) uses local-secure-config
+credentials, and if those are not configured the implementer returns `needs_input` to request them
+via secure local `.env` rather than embedding, printing, or probing any secret.
 
 ### Decision: record the observed schema; never hard-code assumed field names
 
@@ -90,6 +103,8 @@ a silent default. Full classification logic is TASK-008; this spike only assesse
   TASK-003's.
 - **Durable cursor/health persistence.** The `langfuse_import_runs` and normalized AI-evidence table
   shapes are proposed here as inputs to TASK-004, which owns the migrations.
-- **Real-environment cost confirmation.** If local-stack cost fields differ from Janne's production
-  configuration, the TASK-007 MVP re-confirms against real keys via `needs_input`, never by probing
-  secrets in this spike.
+- **Configured-cloud cost confirmation (DEC-018).** Live confirmation runs **cloud-first** against
+  Janne's configured Langfuse project using project-scoped credentials from local secure config. If
+  those credentials are not yet configured, the implementer returns `needs_input` to request them
+  via secure local `.env`, never by probing or printing secrets. The optional local Docker stack /
+  mocked fixtures cover the import-flow logic offline regardless.
