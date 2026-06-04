@@ -1,0 +1,6 @@
+# Ephemeral probe output — never commit captured samples (may contain real titles).
+*.log
+out/
+# Compiled probe binary — build locally, do not commit.
+probe/probe
+*.o
