@@ -1,0 +1,5 @@
+# Ephemeral probe output — never commit. May contain environment names / counts
+# from a live stack. Shape-only by design, but treat as local-only anyway.
+*.local.log
+*.log
+out/
