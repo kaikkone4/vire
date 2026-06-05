@@ -5,16 +5,23 @@
 - **Branch:** `feat/task-003-implementation-path-decision` · **PR:** #9
 - **Tier:** L2 · **Gate:** SW-4 craft/consistency/traceability review (∥ SW-5 Security)
 - **Date:** 2026-06-05
-- **Verdict:** **PASS** (with one non-blocking merge-ordering condition for SW-6)
+- **Verdict:** **PASS** (the prior merge-ordering condition is now resolved — see §5)
 
 ## 0. Review method
 
 This is a **docs/OpenSpec/ADR decision package** — no product runtime. Craft review therefore
-covers: Markdown/OpenSpec validity, internal consistency across the five artifacts, traceability of
+covers: Markdown/OpenSpec validity, internal consistency across the artifacts, traceability of
 cross-references, no-runtime-drift, data safety, and merge readiness. Security boundary correctness
 is SW-5's gate and is not re-adjudicated here.
 
 Verified mechanically against the diff and feeder branches; not taken from the QA report.
+
+**Re-review note (post-packaging + post-feeder-merge, 2026-06-05):** re-run after commits `0c877ff`
+(SW-4/SW-5/docs/release gate artifacts) and `7fdda47` (SW-3 QA re-run). The branch diff against
+`main` is now **10 files**, all docs/spec under `openspec/changes/`; no product-runtime file was
+introduced. `openspec validate … --strict` still valid. The three feeder branches (TASK-001/002/007)
+are now **merged into `origin/main`**, so the §5 merge-ordering condition is **resolved**. Verdict
+unchanged: **PASS**.
 
 ## 1. Craft & conventions — PASS
 
@@ -66,32 +73,34 @@ Verified mechanically against the diff and feeder branches; not taken from the Q
 
 ## 4. No runtime drift / data safety — PASS
 
-- **No-build / no-drift (verified):** `git diff --name-only main...HEAD` = exactly 6 files, all under
-  the change dir. `git diff --name-only main...HEAD -- src/ src-tauri/src/ observability/` → empty.
-  No `tauri.conf.json`, `Cargo.toml`, `package.json`, or `capabilities/` touched. (The 6th file vs.
-  QA's 5 is `qa.md` itself, added after the QA snapshot — still in-scope, docs-only.)
+- **No-build / no-drift (verified):** `git diff --name-only main...HEAD` = exactly 10 files
+  (post-packaging), all under the change dir. `git diff --name-only main...HEAD -- src/
+  src-tauri/src/ observability/` → empty. No `tauri.conf.json`, `Cargo.toml`, `package.json`, or
+  `capabilities/` touched. (The growth from the original 6 to 10 is the later gate artifacts
+  themselves — `review.md`, `sec.md`, `docs.md`, `RELEASE.md` — each still in-scope, docs-only.)
 - **Data safety (independently re-scanned):** leak-pattern scan
   (`github_pat_|ghp_|gho_|ghu_|ghr_|sk-ant-|sk-proj-|AKIA…|xox[abprs]-|PRIVATE KEY`) over the change
-  dir → clean. The sole textual hit is qa.md *describing* its own scan, not a secret. No real
+  dir → clean. The only textual hits are `sec.md`/`review.md` *describing* their own scan patterns,
+  not secrets. No real
   window/app titles, prompt/response text, command bodies, or env dumps.
 
-## 5. Merge readiness — non-blocking condition for SW-6 (Release Manager)
+## 5. Merge readiness — prior merge-ordering condition now RESOLVED
 
-**Finding (merge ordering):** TASK-003's cross-references to TASK-001/002/007 resolve **only on the
-feeder branches**; those three branches are **not yet merged to `main`** (verified:
-`git merge-base --is-ancestor origin/feat/task-00{1,2,7}-… main` → all NOT MERGED). On `main` /
-this branch in isolation, the referenced spike files are absent, so the citations would not resolve
-until the feeders land.
+**Original finding (merge ordering):** TASK-003's cross-references to TASK-001/002/007 resolved
+**only on the feeder branches**, which were not yet merged to `main` at first-review time, so PR #9
+had to merge after/with the three feeder PRs for the citations to resolve on `main`.
 
-- **Why this is NOT a craft FAIL:** the references are *correct* — accurate paths and section
-  anchors that resolve against the right artifacts. This is a repository merge-ordering dependency,
+- **Why this was never a craft FAIL:** the references are *correct* — accurate paths and section
+  anchors that resolve against the right artifacts. This was a repository merge-ordering dependency,
   not a defect in TASK-003's content or a broken link authored in error. TASK-003 is by design the
   decision gate that consumes the three completed spikes.
-- **Condition for SW-6:** merge PR #9 **after (or in the same train as)** the three feeder PRs
-  (TASK-001, TASK-002, TASK-007) so the cross-references resolve in `main`. If PR #9 were to merge
-  first, the links would temporarily dangle on `main` until the feeders catch up.
-- **No action required from the Developer (SW-2)** — this is a release-sequencing note, not a
-  rework item.
+- **Status at re-review (verified 2026-06-05, post-`git fetch`):** all three feeders are now
+  **merged into `origin/main`** — `git merge-base --is-ancestor origin/feat/task-00{1,2,7}-…
+  origin/main` → all MERGED. The cited files (`salvage-reuse-inventory.md`,
+  `capture-feasibility-report.md`, `arch-review.md`) are present on `origin/main`
+  (`git cat-file -e` → all OK). Every cross-reference therefore resolves on `main`. **Condition
+  satisfied; no merge-ordering blocker remains.** (Matches `RELEASE.md` §6.)
+- **No action required from the Developer (SW-2)** — this was a release-sequencing note, now closed.
 
 ## 6. Escalations
 
@@ -101,7 +110,7 @@ None. The decision unit, scope, and abstraction boundaries are correct for a Pha
 ## 7. Verdict
 
 **PASS.** Craft and conventions pass; OpenSpec strict-valid; artifacts are internally consistent and
-fully traceable; no runtime drift; data-safe. The only open item is a **non-blocking merge-ordering
-condition** (§5): PR #9 must merge after the TASK-001/002/007 feeder PRs for cross-references to
-resolve in `main`. Hand to **SW-6 (Release Manager)** once **SW-5 (Security)** also passes, carrying
-that ordering condition forward.
+fully traceable; no runtime drift; data-safe. The prior **non-blocking merge-ordering condition**
+(§5) is now **resolved** — the TASK-001/002/007 feeders are merged into `main` and every
+cross-reference resolves there. No open blocker remains. Both SW-4 and SW-5 PASS; cleared for **SW-6
+(Release Manager)**.
