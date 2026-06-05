@@ -20,6 +20,12 @@ TASK-005 / TASK-007-MVP, which the decision explicitly defers.
 `openspec validate task-003-implementation-path-decision --strict` → **valid** (run from `code/`,
 2026-06-05).
 
+**Re-run note (post-packaging, 2026-06-05):** re-verified after commit `0c877ff`, which adds only the
+SW-4/SW-5/docs/release gate artifacts (`review.md`, `sec.md`, `docs.md`, `RELEASE.md`) under the
+change dir. The branch diff grew from 5 to 10 files, all still docs/spec under
+`openspec/changes/`; no product-runtime file was introduced. Strict validation still valid; PR #9
+OPEN, non-draft, MERGEABLE. Verdict unchanged: **PASS**.
+
 ## 1. Scenario coverage matrix
 
 All 6 scenarios across the 4 ADDED requirements in
@@ -32,7 +38,7 @@ All 6 scenarios across the 4 ADDED requirements in
 | 3 | **Every named technology verified** → *Technology register records verification status* | `design.md` §"Technology verification register" marks Tauri v2 sidecar/IPC/HTTP-client, TCC/AX, Swift/AppKit, ActivityWatch, SQLite as **verified (source URL)**; nested-binary codesign+notarization marked **assumption + TASK-005 packaging-spike follow-up**. No load-bearing claim asserted as fact. | **PASS** |
 | 4 | **Downstream constraints fixed** → *Capture and credential boundaries bound to helper and core* | `design.md` DEC-019 constraints 1–3: AX grant on the signed helper (TCC-trusted binary), raw titles flow helper→Rust core only (never webview/network; `connect-src ipc:` stays locked), importer is a read-only Rust-core REST client scoped to the configured Langfuse base URL, no raw-activity egress (SEC-002, DEC-018). | **PASS** |
 | 5 | **Downstream constraints fixed** → *Reuse stays evidence-driven and excludes legacy capture surface* | `design.md` DEC-019 constraint 4: carries only `reuse-as-is`/`reuse-with-changes` assets (CSP, capabilities, CSV escaping/formula-neutralization, validation/error patterns — matches TASK-001 inventory: `csv_formula_neutralized` lib.rs:133, `csv_escape` lib.rs:142, adversarial.rs); legacy `time_entries`/manual-entry/stopwatch **not** re-admitted as capture, migrate-vs-retire deferred to TASK-004. | **PASS** |
-| 6 | **Ships no product runtime and no MVP** → *No product-runtime change made by the decision* | `git diff --name-only main...HEAD` = 5 files, all under the change dir; none under `src/`, `src-tauri/src/`, `observability/`; no build target / `tauri.conf.json` / `Cargo.toml` / `package.json` / `capabilities/` touched. Schema/capture/importer/observer remain unbuilt; legacy left reference-only. | **PASS** |
+| 6 | **Ships no product runtime and no MVP** → *No product-runtime change made by the decision* | `git diff --name-only main...HEAD` = 10 files (post-packaging), all under the change dir; none under `src/`, `src-tauri/src/`, `observability/`; no build target / `tauri.conf.json` / `Cargo.toml` / `package.json` / `capabilities/` touched. Schema/capture/importer/observer remain unbuilt; legacy left reference-only. | **PASS** |
 
 ## 2. Mandatory QA checks (arch-review §7)
 
