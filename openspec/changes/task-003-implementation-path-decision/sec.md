@@ -9,10 +9,13 @@
 
 ## 0. Scope and method
 
-TASK-003 is a **decision/spike** change. The diff against `main` is **docs-only** — 6
-Markdown files, all under `openspec/changes/task-003-implementation-path-decision/`, 569
-insertions, 0 deletions. No source, schema, dependency manifest, container image, build
-target, or configuration is touched. There is no executable artifact and no new network,
+TASK-003 is a **decision/spike** change. The diff against `main` is **docs-only** — 10
+Markdown files, all under `openspec/changes/task-003-implementation-path-decision/`, 1044
+insertions, 0 deletions. (Re-audited 2026-06-05 after commits `0c877ff` and `7fdda47`, which
+added only the SW-4/SW-5/docs/release gate artifacts — `review.md`, `sec.md`, `docs.md`,
+`RELEASE.md` — and a QA re-run note; the branch grew 6→10 files, all still docs/spec, no
+boundary-defining content changed.) No source, schema, dependency manifest, container image,
+build target, or configuration is touched. There is no executable artifact and no new network,
 credential, or capture surface to attack; the change only **fixes forward constraints** for
 downstream tasks (TASK-004/005/006/007-MVP).
 
@@ -84,9 +87,9 @@ Canonical definitions verified against the BA artifacts, then checked against DE
 DEC-019 cites these boundaries faithfully — it does not invent, widen, or relax any of them.
 
 ### 2.6 No-build / scope confinement — PASS
-- `git diff --name-only main...HEAD`: all 6 files under the change dir; **none** under
+- `git diff --name-only main...HEAD`: all 10 files under the change dir; **none** under
   `src/`, `src-tauri/src/`, `observability/`; no `tauri.conf.json` / `Cargo.toml` /
-  `package.json` / `capabilities/` touched.
+  `package.json` / `capabilities/` / `Dockerfile` touched.
 - Legacy generic-tracker CRUD surface (`time_entries`, manual-entry view, stopwatch) is
   **not** re-admitted as a capture path and is **not** wiped — migrate-vs-retire is
   explicitly deferred to TASK-004 (`design.md` constraint 4; `proposal.md` Impact).
