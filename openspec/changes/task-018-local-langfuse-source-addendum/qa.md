@@ -6,6 +6,7 @@
 - **Tier:** L2
 - **Date (initial pass):** 2026-06-11
 - **Date (re-run after fix commit):** 2026-06-11
+- **Date (final re-run after SW-2 fix commit `21f5fdd`):** 2026-06-11
 - **Verdict:** **PASS**
 
 ---
@@ -98,6 +99,27 @@ None.
 
 ---
 
+## Final re-run after SW-2 fix commit `21f5fdd` (SW-3)
+
+Trigger: SW-2 fix commit `21f5fdd` ("close SW-4 final blockers: arch §8 spec-delta truth + active
+10-file scope") — replaced stale "No spec delta / no openspec validate gate" text in `arch-review.md`
+§8 with current truth; synced `sec.md` active header summary from 9 → 10 PR-diff files; committed the
+previously-uncommitted SW-5 §9 final re-check. Changeset: `arch-review.md` + `sec.md` only — 2 files,
+59 insertions, docs/OpenSpec text exclusively.
+
+| Check | Criterion | Result | Notes |
+| --- | --- | --- | --- |
+| F-01 | `openspec validate task-018-local-langfuse-source-addendum --strict` passes | PASS | "Change 'task-018-local-langfuse-source-addendum' is valid" |
+| F-02 | `arch-review.md` §8 no longer says "no spec delta / no validate gate"; correctly references minimal ADDED delta | PASS | §8 bullet "Spec delta (minimal, ADDED). A minimal ADDED delta now exists at `specs/langfuse-trace-source/spec.md` … `openspec validate --strict` passes (verified 2026-06-11)." Stale text gone |
+| F-03 | `sec.md` active/current intro says 10 PR-diff files; no active 9-file claim remains misleading | PASS | Header intro "Review covers the **10 PR-diff files**"; §9 "PR #10 diff is now **10 docs/OpenSpec files**"; §8 historical 9-file figure clearly scoped "as of `70f677e`" in its bounded scoping note |
+| F-04 | SW-5 §9 final re-check present and committed | PASS | `sec.md` §9 "Final re-check after OpenSpec validation / spec-delta commit `1955eb4`" present with full scanner table + seven-point posture re-confirmation; committed in `21f5fdd` |
+| F-05 | Diff is docs/OpenSpec only; no runtime source changes (`src/`, `src-tauri/src/`, `observability/`) | PASS | `git diff main...HEAD --stat` = 18 files all docs/OpenSpec; no `src/` or `src-tauri/src/` entries. Task-003 gate-history files appear because commit `e12e88b` (task-003 SW-4 re-review PASS) landed on this branch post-merge; still docs-only |
+| F-06 | No secrets; DEC-020/TASK-007 guidance coherent across arch-review + sec + spec delta | PASS | gitleaks/semgrep/OSV/Trivy all clean per §9; spec delta codifies loopback default, Cloud explicit-override, Docker-down ≠ zero cost, MinIO private — consistent with arch-review §5 and sec.md |
+
+All six final checks pass.
+
+---
+
 ## Verdict
 
-**PASS.** All re-run checks (R-01–R-13) pass. All original scenario checks (C-01–C-16) hold. Fix commit `bdada81` correctly resolves the SW-4 blocking finding (stale branch/move-recommendation text in `arch-review.md` and `proposal.md`) and both SEC advisories (SEC-ADV-01: existing compose now referenced; SEC-ADV-02: MinIO documented as internal/unpublished). DEC-020 direction is fully preserved. No blockers. Routes to SW-4 (Code Reviewer) and SW-5 (Security Agent) in parallel.
+**PASS.** All re-run checks (R-01–R-13) pass. All original scenario checks (C-01–C-16) hold. Final re-run checks (F-01–F-06) confirm the `21f5fdd` fixes are correct and complete: arch-review.md §8 accurately references the spec delta, sec.md reports 10 PR-diff files in current-state context, SW-5 §9 is committed, diff is docs/OpenSpec-only, and DEC-020/TASK-007 guidance is coherent. No blockers. Routes to SW-4 (Code Reviewer) and SW-5 (Security Agent) in parallel.
