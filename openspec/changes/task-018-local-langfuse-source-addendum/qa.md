@@ -16,9 +16,9 @@ Fix commit resolves:
 - SW-4 blocking finding: stale "current branch is task-003 / move to dedicated branch" text in `arch-review.md` and `proposal.md`.
 - SEC-ADV-01: false "no compose file exists in this repo" claim in `README.md` and `docs/langfuse-local-setup.md`.
 - SEC-ADV-02: incorrect `127.0.0.1:9090` host-port claim for MinIO in `README.md` and `docs/langfuse-local-setup.md`.
-- Adds `sec.md` gate artifact to the change package (8 scope files total, up from 7).
+- Adds `sec.md` gate artifact to the change package (9 scope files total, up from 8).
 
-Re-run checks R-01 through R-07 below cover the fixed items specifically. Original checks C-01–C-16 are re-confirmed valid; only C-01 count is updated (7 → 8 files).
+Re-run checks R-01 through R-07 below cover the fixed items specifically. Original checks C-01–C-16 are re-confirmed valid; only C-01 count is updated (8 → 9 files).
 
 ---
 
@@ -27,8 +27,8 @@ Re-run checks R-01 through R-07 below cover the fixed items specifically. Origin
 | Check | Criterion | Result | Notes |
 | --- | --- | --- | --- |
 | R-01 | Docs-only: no runtime files changed (src/, src-tauri/src/, observability/) | PASS | `git diff main...HEAD -- src/ src-tauri/src/ observability/` = 0 lines |
-| R-02 | Stale "move to dedicated branch" recommendation gone from `arch-review.md` | PASS | §8 now reads "done. Committed on feat/task-018-local-langfuse-source-addendum… draft PR #10. Merge-order caveat: task-003 merges first." Old "recommend moving" text absent |
-| R-03 | Stale "move to dedicated branch" recommendation gone from `proposal.md` | PASS | "Branch recommendation: move…" replaced with "Branch: done. Committed on feat/task-018-local-langfuse-source-addendum… PR #10 stacked on feat/task-003…" |
+| R-02 | Stale "move to dedicated branch" recommendation gone from `arch-review.md` | PASS | §8 now reads "done. Committed on feat/task-018-local-langfuse-source-addendum… draft PR #10, base `main` (retargeted after TASK-003 landed via PR #9; no merge-order dependency)." Old "recommend moving" text absent |
+| R-03 | Stale "move to dedicated branch" recommendation gone from `proposal.md` | PASS | "Branch recommendation: move…" replaced with "Branch: done. Committed on feat/task-018-local-langfuse-source-addendum… TASK-003 landed on main (PR #9); PR #10 retargeted to base main…" |
 | R-04 | README §Setup: no longer claims compose file absent; references existing `observability/langfuse/` | PASS | "Existing local stack: A loopback-bound… stack already exists at observability/langfuse/…" present; old "does not exist in this repo yet" gone |
 | R-05 | `docs/langfuse-local-setup.md` §Prerequisites: references existing loopback-bound stack | PASS | "Existing stack" callout present pointing to `observability/langfuse/docker-compose.yml`; "does not exist" gone |
 | R-06 | README component table: MinIO shows `internal (not host-published)`, not `127.0.0.1:9090` | PASS | Table row updated; `127.0.0.1:9090` absent from README |
@@ -46,8 +46,8 @@ Re-run checks R-01 through R-07 below cover the fixed items specifically. Origin
 
 | Check | Criterion | Result | Notes |
 | --- | --- | --- | --- |
-| C-01 | All 8 scope files present and non-empty (updated from 7; `sec.md` added in fix commit) | PASS | arch-review.md, proposal.md, qa.md, sec.md in task-018 dir; README.md, docs/langfuse-local-setup.md, docs/backup-restore.md; task-003/design.md and task-003/arch-review.md banners — all confirmed |
-| C-02 | Task-018 commits touch only declared scope files | PASS | `7c7a663` (package) + `bdada81` (fix) combined touch: README.md, docs/langfuse-local-setup.md, openspec/changes/task-018-* (arch-review, proposal, qa, sec), and task-003 banners only |
+| C-01 | All 9 scope files present and non-empty (updated from 8; `sec.md` added in fix commit) | PASS | arch-review.md, proposal.md, qa.md, sec.md in task-018 dir; README.md, docs/langfuse-local-setup.md, docs/backup-restore.md; task-003/design.md and task-003/arch-review.md banners — all confirmed |
+| C-02 | Task-018 commits touch only declared scope files | PASS | The task-018 commits — `7c7a663` (package), `a0d08b0` (QA gate report), `bdada81` (SW-2 fix), `7526a0e` (QA re-run + SEC re-audit), plus the metadata-hygiene fix commit (this PR-state realignment) — touch only: README.md, docs/langfuse-local-setup.md, docs/backup-restore.md, openspec/changes/task-018-* (arch-review, proposal, qa, sec), and the two task-003 banners |
 | C-03 | No product runtime source changed (`src/`, `src-tauri/src/`, `observability/`) | PASS | `git diff main...HEAD -- src/ src-tauri/src/ observability/` = 0 lines (re-verified) |
 | C-04 | TASK-003 / DEC-019 remains valid in full | PASS | Unchanged |
 | C-05 | DEC-018 cloud-first default-source posture clearly superseded by DEC-020 | PASS | Unchanged |

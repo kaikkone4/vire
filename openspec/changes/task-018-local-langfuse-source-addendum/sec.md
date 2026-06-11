@@ -2,7 +2,7 @@
 
 - **Security Agent:** SW-5
 - **Change:** `task-018-local-langfuse-source-addendum`
-- **PR:** #10 — base `feat/task-003-implementation-path-decision` → head `feat/task-018-local-langfuse-source-addendum`
+- **PR:** #10 — base `main` → head `feat/task-018-local-langfuse-source-addendum` (retargeted to `main` after TASK-003 landed via PR #9; previously stacked on `feat/task-003-implementation-path-decision`)
 - **Tier:** L2 (secrets + CVE ≥ 7 + Trivy HIGH/CRITICAL + semgrep ERROR)
 - **Date (initial pass):** 2026-06-11
 - **Date (re-check after fix commit `bdada81`):** 2026-06-11
@@ -10,19 +10,19 @@
 
 This is a docs/OpenSpec realignment change. No product runtime is created or modified
 (`git diff main...HEAD -- src/ src-tauri/src/ observability/` is empty). Review covers the
-8 PR-diff files plus a manual cross-check against the pre-existing committed Langfuse stack the
+9 PR-diff files plus a manual cross-check against the pre-existing committed Langfuse stack the
 docs describe.
 
 ---
 
 ## 1. Scope reviewed
 
-PR #10 diff (base task-003 → head task-018), 8 files:
+PR #10 diff (base `main` → head task-018), 9 files:
 
 - `README.md` (+64/-2) — Local Langfuse stack, AI trace import, privacy sections
-- `docs/langfuse-local-setup.md` (new, 151 lines)
+- `docs/langfuse-local-setup.md` (new, 153 lines)
 - `docs/backup-restore.md` (new, 158 lines)
-- `openspec/changes/task-018-local-langfuse-source-addendum/{arch-review,proposal,qa}.md` (new)
+- `openspec/changes/task-018-local-langfuse-source-addendum/{arch-review,proposal,qa,sec}.md` (new)
 - `openspec/changes/task-003-implementation-path-decision/{arch-review,design}.md` (additive
   supersession banners only)
 
@@ -112,10 +112,18 @@ Re-ran the full L2 scanner stack and re-verified the two advisories against the 
 
 | Scanner | Scope | Result | Auto-fail? |
 |---|---|---|---|
-| **gitleaks** v8.30.1 | Full history (68 commits) + PR range (`main..HEAD`, 9 commits) | **no leaks found** | No |
+| **gitleaks** v8.30.1 | Full history (69 commits) + PR range (`main..HEAD`, 4 commits) | **no leaks found** | No |
 | **semgrep** v1.165.0 | `--config=auto`, 44 files scanned | **0 findings (0 ERROR)** | No |
 | **OSV-scanner** v2.3.8 | `package-lock.json` (106 packages) | **no issues** (0 CVE ≥ 7) | No |
 | **Trivy** v0.71.1 | `fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL` | **0 vuln / 0 secret / 0 misconfig** | No |
+
+> **Post-merge re-verification (2026-06-11):** TASK-003 has since landed on `main` via PR #9, so PR #10
+> was retargeted from the former `feat/task-003-implementation-path-decision` base to `main`. The
+> reviewable PR range therefore narrowed from 9 commits to the **4 task-018 docs commits** (`7c7a663`,
+> `a0d08b0`, `bdada81`, `7526a0e`); TASK-003's commits are now part of `main`. gitleaks was re-run on
+> the current tree post-merge: **69 commits scanned, no leaks** (the gitleaks row above reflects this).
+> The semgrep / OSV / Trivy figures are the SW-5 re-audit results on the same docs-only tree and are
+> unaffected by the merge (the task-018 commits are unchanged). The PASS verdict is unaffected.
 
 Advisory resolution verified (fix commit `bdada81`):
 
@@ -138,8 +146,9 @@ Advisory resolution verified (fix commit `bdada81`):
 
 No new security issue introduced by the fix commit; the doc changes only **strengthen** the stated
 posture (loopback default, MinIO internal-only, Cloud explicit-override, Docker-down ≠ zero cost,
-honest trace-content boundary all intact and re-confirmed). The lone uncommitted working-tree change
-(`task-018/qa.md`, the SW-3 re-run report) is docs-only and carries no secrets or posture change.
+honest trace-content boundary all intact and re-confirmed). The SW-3 re-run report
+(`task-018/qa.md`) is committed (`7526a0e`) and the working tree is clean; it is docs-only and
+carries no secrets or posture change.
 
 ## 7. Verdict
 
