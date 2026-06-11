@@ -6,7 +6,8 @@
 - **Tier:** L2 (secrets + CVE ≥ 7 + Trivy HIGH/CRITICAL + semgrep ERROR)
 - **Date (initial pass):** 2026-06-11
 - **Date (re-check after fix commit `bdada81`):** 2026-06-11
-- **Verdict:** **PASS** — no auto-fail condition hit. Both prior advisories (SEC-ADV-01, SEC-ADV-02) now **RESOLVED** by fix commit `bdada81`; re-scan clean.
+- **Date (final re-check after metadata-hygiene commit `70f677e` + PR-body edit):** 2026-06-11
+- **Verdict:** **PASS** — no auto-fail condition hit. Both prior advisories (SEC-ADV-01, SEC-ADV-02) **RESOLVED** by fix commit `bdada81`; re-scan clean. Final re-check (§8) confirms the metadata-hygiene commit and PR-body edit are docs/metadata-only and change no security posture.
 
 This is a docs/OpenSpec realignment change. No product runtime is created or modified
 (`git diff main...HEAD -- src/ src-tauri/src/ observability/` is empty). Review covers the
@@ -17,12 +18,15 @@ docs describe.
 
 ## 1. Scope reviewed
 
-PR #10 diff (base `main` → head task-018), 9 files:
+PR #10 diff (base `main` → head task-018), 10 files:
 
 - `README.md` (+64/-2) — Local Langfuse stack, AI trace import, privacy sections
 - `docs/langfuse-local-setup.md` (new, 153 lines)
 - `docs/backup-restore.md` (new, 158 lines)
 - `openspec/changes/task-018-local-langfuse-source-addendum/{arch-review,proposal,qa,sec}.md` (new)
+- `openspec/changes/task-018-local-langfuse-source-addendum/specs/langfuse-trace-source/spec.md`
+  (new — minimal ADDED spec delta recording the downstream default-source requirement; docs/OpenSpec
+  text only, no runtime)
 - `openspec/changes/task-003-implementation-path-decision/{arch-review,design}.md` (additive
   supersession banners only)
 
@@ -34,7 +38,7 @@ Cross-checked (not in PR diff, but the docs make security claims about it): the 
 
 | Scanner | Scope | Result | Auto-fail? |
 |---|---|---|---|
-| **gitleaks** v8.30.1 | Full history (67 commits) + PR range (`task-003..HEAD`, 2 commits) | **no leaks** | No |
+| **gitleaks** v8.30.1 | Full history + PR range (`origin/main..HEAD`, task-018 docs commits — base retargeted to `main` after TASK-003 merged via PR #9; current set enumerated in §6 post-merge note) | **no leaks** | No |
 | **semgrep** v1.165.0 | `--config=auto`, 478 rules on 43 git-tracked files | **0 findings** (0 ERROR) | No |
 | **OSV-scanner** v2.3.8 | `package-lock.json` (106 packages), recursive | **no issues** (0 CVE ≥ 7) | No |
 | **Trivy** v0.71.1 | `fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL` | **0 HIGH/CRITICAL** | No |
@@ -112,18 +116,21 @@ Re-ran the full L2 scanner stack and re-verified the two advisories against the 
 
 | Scanner | Scope | Result | Auto-fail? |
 |---|---|---|---|
-| **gitleaks** v8.30.1 | Full history (69 commits) + PR range (`main..HEAD`, 4 commits) | **no leaks found** | No |
+| **gitleaks** v8.30.1 | Full history + PR range (`origin/main..HEAD`, all task-018 docs commits — see post-merge note below for the current set) | **no leaks found** | No |
 | **semgrep** v1.165.0 | `--config=auto`, 44 files scanned | **0 findings (0 ERROR)** | No |
 | **OSV-scanner** v2.3.8 | `package-lock.json` (106 packages) | **no issues** (0 CVE ≥ 7) | No |
 | **Trivy** v0.71.1 | `fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL` | **0 vuln / 0 secret / 0 misconfig** | No |
 
 > **Post-merge re-verification (2026-06-11):** TASK-003 has since landed on `main` via PR #9, so PR #10
 > was retargeted from the former `feat/task-003-implementation-path-decision` base to `main`. The
-> reviewable PR range therefore narrowed from 9 commits to the **4 task-018 docs commits** (`7c7a663`,
-> `a0d08b0`, `bdada81`, `7526a0e`); TASK-003's commits are now part of `main`. gitleaks was re-run on
-> the current tree post-merge: **69 commits scanned, no leaks** (the gitleaks row above reflects this).
-> The semgrep / OSV / Trivy figures are the SW-5 re-audit results on the same docs-only tree and are
-> unaffected by the merge (the task-018 commits are unchanged). The PASS verdict is unaffected.
+> reviewable PR range is therefore `origin/main..HEAD` — the task-018 docs/OpenSpec commits only;
+> TASK-003's commits are now part of `main`. That set has grown as gate evidence and metadata fixes
+> landed: it is **6 task-018 commits** as of this validity/metadata-fix commit — `7c7a663` (package),
+> `a0d08b0` (QA gate), `bdada81` (SW-2 fix), `7526a0e` (QA re-run + SEC re-audit), `70f677e`
+> (metadata hygiene), and this fix (spec delta + stale PR-range/scanner-scope sync). gitleaks was
+> re-run on the current tree post-merge: **no leaks** (the gitleaks row above reflects this). The
+> semgrep / OSV / Trivy figures are the SW-5 re-audit results on the same docs-only tree and are
+> unaffected by the merge or by these docs-only commits. The PASS verdict is unaffected.
 
 Advisory resolution verified (fix commit `bdada81`):
 
@@ -158,3 +165,68 @@ strengthened by the loopback-default posture. Both prior documentation-accuracy 
 (SEC-ADV-01, SEC-ADV-02) are now **RESOLVED** by fix commit `bdada81` — no open advisories remain.
 
 Handoff: wait for SW-4 (Code Review); on both PASS, route to SW-6 (Release Manager).
+
+## 8. Final re-check after metadata-hygiene commit `70f677e` + PR-body edit (SW-5)
+
+Trigger: SW-2 metadata-hygiene commit `70f677e` ("sync stale PR-state after TASK-003 merged to
+main") and a PR-body edit removing stale merge-order text. Confirming the security posture still
+holds with no file-content change since the SW-3 QA re-run.
+
+**Changeset character.** PR #10 diff is still docs/OpenSpec-only — `git diff --stat origin/main...HEAD`
+= `README.md`, `docs/{backup-restore,langfuse-local-setup}.md`, and the task-003 supersession banners
++ task-018 `{proposal,arch-review,qa,sec}.md` (9 files, 935 insertions). No runtime source, no
+dependency manifest, no container/Compose file, no lockfile in the diff
+(`git diff --name-only origin/main...HEAD | grep -E 'package.*json|cargo|Dockerfile|docker-compose|\.lock'`
+→ empty). `70f677e` touches documentation/metadata only.
+
+**PR body re-verified.** The updated body's "Merge status" now reads "TASK-003 has already landed on
+`main` via PR #9 … No merge-order dependency remains" — the former stale stacked-branch / merge-order
+text is gone. Base `main`, head `feat/task-018-local-langfuse-source-addendum`, draft. No security
+claim (loopback default, no-LAN-exposure, MinIO private, Cloud explicit-override, Docker-down ≠ zero
+cost) is weakened by the edit; the body still states "No product runtime source changed. No
+credentials introduced (secret-pattern scan clean)."
+
+| Scanner | Scope | Result | Auto-fail? |
+|---|---|---|---|
+| **gitleaks** | Full history (70 commits, incl. `70f677e`) + working tree | **no leaks found** | No |
+| **semgrep** | `--config=auto --severity=ERROR` on `README.md`, `docs/`, task-018 change dir | **0 ERROR findings** | No |
+| **OSV-scanner** (CVE ≥ 7) | n/a — no dependency manifest changed in PR | unchanged from §6 (0 CVE ≥ 7) | No |
+| **Trivy** (HIGH/CRITICAL) | n/a — no container image / Compose / IaC changed in PR | unchanged from §6 (0 HIGH/CRITICAL) | No |
+
+Supplementary diff grep for literal credential values (`github_pat_`/`ghp_`/`sk-ant-`/`AKIA…`/`xox?-`/
+inline `password=`/`secret=`/`api_key=`) over added lines: **none** — the only match is sec.md
+describing its own scan patterns, not a real value. Docs continue to use placeholders / env-var
+substitution only.
+
+**Seven-point posture re-confirmation (all hold):**
+
+1. No secrets / credential values / sensitive paths — gitleaks + semgrep + diff-grep clean. **PASS**
+2. Loopback default, no LAN-exposure recommendation — `langfuse-local-setup.md:42,63`, README "All
+   service ports must be bound to `127.0.0.1` … Do not expose services on LAN interfaces". **PASS**
+3. MinIO internal/private + backup consistency visible — `langfuse-local-setup.md:61,94,100`
+   (internal-only, "must not be set to public"); `backup-restore.md:9` three-store consistency +
+   divergence table. **PASS**
+4. Docker/Langfuse down never zero cost — `langfuse-local-setup.md:119` "**Vire never interprets
+   Docker down … as zero AI usage or cost**"; README §Availability and UX. **PASS**
+5. Cloud override explicit-only — `langfuse-local-setup.md:153`, README "Langfuse Cloud is supported
+   only as an explicit non-default override". **PASS**
+6. Trace-content boundary honest — `langfuse-local-setup.md:123-129`, README §Privacy status; local
+   boundary accepted for MVP, redaction/retention scoped as follow-up, raw macOS activity kept in
+   local SQLite and never mixed into traces. **PASS**
+7. Docs/OpenSpec only, no runtime source changes — diff `--stat` confirms 9 docs/spec files only.
+   **PASS**
+
+**Verdict unchanged: PASS.** No auto-fail condition reached. No open advisories. The metadata-hygiene
+commit and PR-body edit are non-code, non-posture changes; the loopback-default security posture is
+intact and re-confirmed. No design-level issue → no BA-flow Architect escalation.
+
+> **Scoping note (SW-2, post-§8 validity/metadata-fix commit).** The §8 figures above (9 docs/OpenSpec
+> files, full-history commit count, "diff `--stat` confirms 9 files") describe the tree **as of
+> `70f677e`**, the commit SW-5's final re-check ran against. A subsequent SW-2 commit then closed the
+> SW-4 final-review blockers: it adds the minimal `specs/langfuse-trace-source/spec.md` ADDED spec
+> delta (so `openspec validate --strict` passes) and syncs the stale §2/§6 PR-range and scanner-scope
+> text. That makes the PR **10 docs/OpenSpec files** across the task-018 commits on `origin/main..HEAD`
+> (enumerated in the §6 post-merge note). The fix commit is documentation/OpenSpec text only — no
+> runtime source, dependency manifest, container/Compose, or lockfile touched; the added spec delta
+> uses prose and placeholders only, introduces no credential values, and changes no security claim.
+> SW-5's PASS verdict and the seven-point posture re-confirmation above are unaffected.

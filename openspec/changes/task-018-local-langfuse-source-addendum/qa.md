@@ -46,8 +46,8 @@ Re-run checks R-01 through R-07 below cover the fixed items specifically. Origin
 
 | Check | Criterion | Result | Notes |
 | --- | --- | --- | --- |
-| C-01 | All 9 scope files present and non-empty (updated from 8; `sec.md` added in fix commit) | PASS | arch-review.md, proposal.md, qa.md, sec.md in task-018 dir; README.md, docs/langfuse-local-setup.md, docs/backup-restore.md; task-003/design.md and task-003/arch-review.md banners — all confirmed |
-| C-02 | Task-018 commits touch only declared scope files | PASS | The task-018 commits — `7c7a663` (package), `a0d08b0` (QA gate report), `bdada81` (SW-2 fix), `7526a0e` (QA re-run + SEC re-audit), plus the metadata-hygiene fix commit (this PR-state realignment) — touch only: README.md, docs/langfuse-local-setup.md, docs/backup-restore.md, openspec/changes/task-018-* (arch-review, proposal, qa, sec), and the two task-003 banners |
+| C-01 | All 10 scope files present and non-empty (8 → 9 when `sec.md` added; 9 → 10 when the `langfuse-trace-source` spec delta added) | PASS | arch-review.md, proposal.md, qa.md, sec.md, and specs/langfuse-trace-source/spec.md in task-018 dir; README.md, docs/langfuse-local-setup.md, docs/backup-restore.md; task-003/design.md and task-003/arch-review.md banners — all confirmed |
+| C-02 | Task-018 commits touch only declared scope files | PASS | The task-018 commits — `7c7a663` (package), `a0d08b0` (QA gate report), `bdada81` (SW-2 fix), `7526a0e` (QA re-run + SEC re-audit), the metadata-hygiene commit `70f677e` (PR-state realignment), plus the validity/metadata fix commit (adds the spec delta and syncs stale PR-range/scanner-scope text) — touch only: README.md, docs/langfuse-local-setup.md, docs/backup-restore.md, openspec/changes/task-018-* (arch-review, proposal, qa, sec, specs/langfuse-trace-source/spec.md), and the two task-003 banners |
 | C-03 | No product runtime source changed (`src/`, `src-tauri/src/`, `observability/`) | PASS | `git diff main...HEAD -- src/ src-tauri/src/ observability/` = 0 lines (re-verified) |
 | C-04 | TASK-003 / DEC-019 remains valid in full | PASS | Unchanged |
 | C-05 | DEC-018 cloud-first default-source posture clearly superseded by DEC-020 | PASS | Unchanged |
@@ -89,8 +89,11 @@ None.
 
 ## Scope confirmation
 
-- **No spec delta** — no `specs/**/spec.md` modified; no `openspec validate` gate required.
-- **No new requirement introduced** — DEC-020/DEC-022 already captured the posture at the BA layer.
+- **Spec delta present** — `specs/langfuse-trace-source/spec.md` (ADDED) records the downstream
+  default-source requirement (local Docker Langfuse default, Cloud explicit override, loopback
+  default, down-stack never zero cost, MinIO/S3 + backup risks documented). `openspec validate
+  --strict` passes (`task-018-local-langfuse-source-addendum is valid`). The requirement formalizes
+  the DEC-020/DEC-022 posture already captured at the BA layer; no existing requirement is modified.
 - **No build artifact, schema, or migration changed.**
 
 ---

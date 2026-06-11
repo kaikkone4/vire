@@ -32,9 +32,13 @@ runs.
 
 ## Impact
 
-- **Affected specs:** none. No new requirement is added; DEC-020/DEC-022 already capture the posture
-  at the BA layer and the code docs already implement the documentation side. No `specs/**/spec.md`
-  delta; no `openspec validate` gate required for this review-only change.
+- **Affected specs:** `langfuse-trace-source` (new capability, ADDED). A minimal spec delta records
+  the downstream default-source requirement this change realigns — local Docker self-hosted Langfuse
+  as the TASK-007 importer default, Cloud as explicit non-default override, loopback (`127.0.0.1`)
+  default, a down stack never read as zero usage/cost, and documented MinIO/S3 + backup-consistency
+  risks. DEC-020/DEC-022 capture the posture at the BA layer and the code docs implement the
+  documentation side; this delta makes the OpenSpec change carry the requirement explicitly so
+  `openspec validate --strict` passes. No existing requirement is modified or removed.
 - **Affected code:** none under product runtime. No file under `src/`, `src-tauri/src/`, or
   `observability/` is created, modified, or deleted; no build target is added. Deliverables are this
   addendum plus two additive banners on the task-003 architecture docs.
