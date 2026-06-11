@@ -4,8 +4,9 @@
 - **Change:** `task-018-local-langfuse-source-addendum`
 - **PR:** #10 — base `feat/task-003-implementation-path-decision` → head `feat/task-018-local-langfuse-source-addendum`
 - **Tier:** L2 (secrets + CVE ≥ 7 + Trivy HIGH/CRITICAL + semgrep ERROR)
-- **Date:** 2026-06-11
-- **Verdict:** **PASS** — no auto-fail condition hit. Two non-blocking advisories (documentation accuracy).
+- **Date (initial pass):** 2026-06-11
+- **Date (re-check after fix commit `bdada81`):** 2026-06-11
+- **Verdict:** **PASS** — no auto-fail condition hit. Both prior advisories (SEC-ADV-01, SEC-ADV-02) now **RESOLVED** by fix commit `bdada81`; re-scan clean.
 
 This is a docs/OpenSpec realignment change. No product runtime is created or modified
 (`git diff main...HEAD -- src/ src-tauri/src/ observability/` is empty). Review covers the
@@ -81,7 +82,10 @@ recommended by this PR.
 
 ## 5. Advisory findings (non-blocking — documentation accuracy)
 
-**SEC-ADV-01 — Docs claim no compose file exists, but a secure one already does.**
+> **Status after fix commit `bdada81`:** both advisories below are **RESOLVED**. Verification
+> recorded in §7. They are retained here for audit trail.
+
+**SEC-ADV-01 [RESOLVED] — Docs claim no compose file exists, but a secure one already does.**
 `README.md` (§Setup follow-up) and `docs/langfuse-local-setup.md:36` state a project-local
 `docker-compose.yml` "does not exist in this repo yet," directing readers to hand-build one from the
 upstream Langfuse guide. A loopback-bound, secret-safe Langfuse compose already exists at
@@ -92,7 +96,7 @@ the `127.0.0.1` binding instead of reusing the vetted stack. Recommend the docs 
 `observability/langfuse/` (or clarify the "Vire-product-bundled compose vs. existing dev stack"
 distinction). Owner: developer / code-reviewer.
 
-**SEC-ADV-02 — MinIO port table inaccurate.**
+**SEC-ADV-02 [RESOLVED] — MinIO port table inaccurate.**
 README and `langfuse-local-setup.md` list MinIO API at `127.0.0.1:9090` and console at `9001`. The
 committed compose publishes **neither** to the host (MinIO is internal-bridge-only; console is
 `--console-address ":9001"` inside the container, unpublished). Reality is stricter than documented,
@@ -102,11 +106,46 @@ implementer "fixing" the docs by exposing the port. Owner: developer / code-revi
 Both advisories are documentation-correctness items, not security auto-fails. They do not block this
 gate. No design-level boundary issue → no BA-flow Architect escalation.
 
-## 6. Verdict
+## 6. Re-check after fix commit `bdada81` (SW-5 re-audit)
 
-**PASS.** All four L2 scanners clean (no secrets, no CVE ≥ 7, no semgrep ERROR, no Trivy
+Re-ran the full L2 scanner stack and re-verified the two advisories against the post-fix tree.
+
+| Scanner | Scope | Result | Auto-fail? |
+|---|---|---|---|
+| **gitleaks** v8.30.1 | Full history (68 commits) + PR range (`main..HEAD`, 9 commits) | **no leaks found** | No |
+| **semgrep** v1.165.0 | `--config=auto`, 44 files scanned | **0 findings (0 ERROR)** | No |
+| **OSV-scanner** v2.3.8 | `package-lock.json` (106 packages) | **no issues** (0 CVE ≥ 7) | No |
+| **Trivy** v0.71.1 | `fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL` | **0 vuln / 0 secret / 0 misconfig** | No |
+
+Advisory resolution verified (fix commit `bdada81`):
+
+- **SEC-ADV-01 [RESOLVED]** — The false "compose file does not exist in this repo yet" claim is gone
+  from both `README.md` and `docs/langfuse-local-setup.md` (`grep "does not exist" README.md docs/` →
+  empty). Both now carry an "Existing local stack" callout pointing to
+  [`observability/langfuse/docker-compose.yml`](../../../observability/langfuse/docker-compose.yml)
+  and steer readers to reuse the vetted loopback-bound stack rather than hand-roll one (lowering the
+  earlier mis-binding risk). The product-bundled-compose question is correctly scoped as an open
+  TASK-007 follow-up with the same localhost-only / env-var-reference constraints.
+- **SEC-ADV-02 [RESOLVED]** — The inaccurate `127.0.0.1:9090` MinIO host-port claim is gone
+  (`grep "9090" README.md docs/` → empty). MinIO is now documented as **internal-only**: README
+  table row reads `internal (not host-published)`; `langfuse-local-setup.md` reads
+  `none (internal); API minio:9000, console :9001 inside the container — not host-published`, with an
+  explicit "do not add `ports:` entries for them" note. The lone remaining `9001` reference is the
+  negative statement "There is no `127.0.0.1:9001` mapping by default" — confirming absence, not
+  exposure. Cross-checked the committed `observability/langfuse/docker-compose.yml`: the only host
+  publication is `127.0.0.1:${LANGFUSE_PORT:-3000}:3000` (langfuse-web); MinIO has no `ports:` entry
+  and runs `--console-address ":9001"` in-container. **Docs now match the stricter reality.**
+
+No new security issue introduced by the fix commit; the doc changes only **strengthen** the stated
+posture (loopback default, MinIO internal-only, Cloud explicit-override, Docker-down ≠ zero cost,
+honest trace-content boundary all intact and re-confirmed). The lone uncommitted working-tree change
+(`task-018/qa.md`, the SW-3 re-run report) is docs-only and carries no secrets or posture change.
+
+## 7. Verdict
+
+**PASS.** All four L2 scanners clean on re-check (no secrets, no CVE ≥ 7, no semgrep ERROR, no Trivy
 HIGH/CRITICAL). All six stated security focus points hold. SEC-002/SEC-003 are preserved and
-strengthened by the loopback-default posture. Two non-blocking documentation-accuracy advisories
-(SEC-ADV-01, SEC-ADV-02) are routed to the developer/code-reviewer, not blockers.
+strengthened by the loopback-default posture. Both prior documentation-accuracy advisories
+(SEC-ADV-01, SEC-ADV-02) are now **RESOLVED** by fix commit `bdada81` — no open advisories remain.
 
 Handoff: wait for SW-4 (Code Review); on both PASS, route to SW-6 (Release Manager).
