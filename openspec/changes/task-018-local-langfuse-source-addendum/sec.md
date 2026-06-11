@@ -278,3 +278,47 @@ runtime-source diff empty. All **PASS**.
 **Verdict unchanged: PASS.** No auto-fail condition reached, no open advisories, no design-level
 boundary issue → no BA-flow Architect escalation. Handoff: wait for SW-4 (Code Review); on both
 PASS, route to SW-6 (Release Manager).
+
+## 10. Final re-check after SW-4 blocker-close commit `21f5fdd` + SW-3 QA re-run `dbb9c6f` (SW-5)
+
+Trigger: two commits landed after the §9 check — `21f5fdd` ("SW-2 fix — close SW-4 final blockers:
+arch §8 spec-delta truth + active 10-file scope") and `dbb9c6f` ("SW-3 final QA re-run after fix
+commit `21f5fdd` — PASS"). This is the final SW-5 re-check before SW-6.
+
+**Changeset character.** The two new commits touch documentation only — `arch-review.md` §8
+(replacing a stale "no spec delta" item with the current truth), `sec.md` (active header 9→10 files +
+committing the §9 re-check), and `qa.md` (F-01–F-06 verification matrix). No product runtime, no
+dependency manifest, no container/Compose, no lockfile:
+
+- `git diff --name-only main...HEAD -- src/ src-tauri/ observability/` → **empty**
+- `git diff --name-only main...HEAD | grep -E 'package.*json|cargo|Cargo|Dockerfile|docker-compose|\.lock'` → **empty**
+- `git diff --name-only main...HEAD | grep -vE '\.md$'` → **empty** (all 18 PR-diff files are `.md`)
+- Added-line credential grep over `1955eb4..HEAD` (`ghp_`/`github_pat_`/`sk-ant-`/`AKIA…`/`xox?-`/
+  PEM headers/`password=`/`secret=`/`api_key=`): the only match is sec.md text describing its own
+  scan patterns — **no real value**. No `/Users/`-`/home/`-`/Volumes/` paths in added lines.
+
+| Scanner | Scope | Result | Auto-fail? |
+|---|---|---|---|
+| **gitleaks** | Full history (73 commits, incl. `21f5fdd` + `dbb9c6f`) + working tree | **no leaks found** | No |
+| **semgrep** | `--config=auto --severity=ERROR` on tracked tree | **0 ERROR findings** | No |
+| **OSV-scanner** | `package-lock.json` (106 packages) | **no issues** (0 CVE ≥ 7) | No |
+| **Trivy** | `fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL` | **0 HIGH/CRITICAL** | No |
+
+**Spec delta — control-weakening re-check.** `specs/langfuse-trace-source/spec.md` is unchanged by
+these two commits and remains an **ADDED** requirement that codifies (does not relax) the loopback
+default, Cloud explicit-override-only, down-stack ≠ zero usage/cost, and MinIO internal/private +
+three-store backup-consistency controls. **Strengthens; weakens nothing.**
+
+**Seven-point posture re-confirmation (all hold):** (1) no secrets/paths — scanners + diff grep
+clean; (2) loopback default / no LAN — `langfuse-local-setup.md:42` ("All service ports must be bound
+to `127.0.0.1` … not reachable from the local network"), README §91; (3) MinIO internal/private +
+backup consistency — `langfuse-local-setup.md` (MinIO listed `none (internal)`, "must not be set to
+public"), `backup-restore.md:9` three-store-consistency + divergence table; (4) Docker-down ≠ zero
+cost — `langfuse-local-setup.md:119`; (5) Cloud explicit-only — README:91,
+`langfuse-local-setup.md:153`; (6) trace-content boundary honest — `langfuse-local-setup.md:123`,
+README §Privacy; (7) docs/OpenSpec only — runtime-source diff empty. All **PASS**.
+
+**Verdict unchanged: PASS.** No auto-fail condition reached, no open advisories, no design-level
+boundary issue → no BA-flow Architect escalation. The SW-4 blocker-close and SW-3 QA-re-run commits
+are documentation-only and change no security claim. Handoff: on SW-4 PASS, route to SW-6 (Release
+Manager).
