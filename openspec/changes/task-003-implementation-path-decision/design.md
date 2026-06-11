@@ -1,5 +1,17 @@
 # Design — TASK-003 implementation-path decision
 
+> **⚠ SUPERSESSION NOTE (DEC-020 / DEC-022 · TASK-018, 2026-06-11).** This package was authored
+> 2026-06-05 under **DEC-018 (cloud-first Langfuse source)**. DEC-018 is now **superseded by
+> DEC-020**: Vire's canonical/default Langfuse source is **local Docker self-hosted Langfuse** at
+> `http://127.0.0.1:3000`; Langfuse Cloud is an **explicit non-default override only**. The DEC-019
+> decision below — reuse Tauri + native Swift/AppKit capture helper + **read-only Rust-core Langfuse
+> REST importer behind the locked CSP + URL allowlist** — is **unaffected and remains valid in
+> full**; only the importer's *default base URL / source posture* changes (and the privacy boundary
+> is *strengthened*, since the default target is now on-host loopback). Wherever this file says
+> "cloud-first" / "DEC-018" (notably **constraint 3** below and the trace lists), read
+> "local-Docker-default per DEC-020; Cloud explicit override only". Authoritative realignment and the
+> binding TASK-007 direction: `openspec/changes/task-018-local-langfuse-source-addendum/arch-review.md`.
+
 ## Context
 
 TASK-003 is the Phase A **decision gate** (`05_project_plan_epics.md` §1 phase table; §4 chain:

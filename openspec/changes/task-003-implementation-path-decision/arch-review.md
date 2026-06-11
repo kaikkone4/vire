@@ -1,5 +1,15 @@
 # Architecture Review — TASK-003 implementation-path decision
 
+> **⚠ SUPERSESSION NOTE (DEC-020 / DEC-022 · TASK-018, 2026-06-11).** Reviewed 2026-06-05 under
+> **DEC-018 (cloud-first Langfuse source)**, now **superseded by DEC-020**: the canonical/default
+> Langfuse source is **local Docker self-hosted Langfuse** (`http://127.0.0.1:3000`); Cloud is an
+> **explicit non-default override only**. The DEC-019 decision and every boundary affirmed here
+> (read-only Rust-core REST importer, locked CSP, URL allowlist, no raw-activity egress, AX grant on
+> the helper, no new pi/Claude adapter) **remain valid**; only the importer's *default source posture*
+> moves cloud → loopback. Read every "cloud-first" / "DEC-018" mention below as
+> "local-Docker-default per DEC-020; Cloud explicit override only". Authoritative realignment:
+> `openspec/changes/task-018-local-langfuse-source-addendum/arch-review.md`.
+
 - **Reviewer:** SW Architect (SW-1)
 - **Change:** `task-003-implementation-path-decision`
 - **Branch (implementation):** `feat/task-003-implementation-path-decision`
