@@ -7,11 +7,12 @@
 - **Date (initial pass):** 2026-06-11
 - **Date (re-check after fix commit `bdada81`):** 2026-06-11
 - **Date (final re-check after metadata-hygiene commit `70f677e` + PR-body edit):** 2026-06-11
-- **Verdict:** **PASS** — no auto-fail condition hit. Both prior advisories (SEC-ADV-01, SEC-ADV-02) **RESOLVED** by fix commit `bdada81`; re-scan clean. Final re-check (§8) confirms the metadata-hygiene commit and PR-body edit are docs/metadata-only and change no security posture.
+- **Date (final re-check after OpenSpec validation/spec-delta commit `1955eb4`):** 2026-06-11
+- **Verdict:** **PASS** — no auto-fail condition hit. Both prior advisories (SEC-ADV-01, SEC-ADV-02) **RESOLVED** by fix commit `bdada81`; re-scan clean. Final re-check (§9) confirms the OpenSpec validation fix + new `specs/langfuse-trace-source/spec.md` ADDED spec delta are docs/OpenSpec-only and **strengthen, not weaken**, the loopback-default posture.
 
 This is a docs/OpenSpec realignment change. No product runtime is created or modified
 (`git diff main...HEAD -- src/ src-tauri/src/ observability/` is empty). Review covers the
-9 PR-diff files plus a manual cross-check against the pre-existing committed Langfuse stack the
+10 PR-diff files plus a manual cross-check against the pre-existing committed Langfuse stack the
 docs describe.
 
 ---
@@ -230,3 +231,50 @@ intact and re-confirmed. No design-level issue → no BA-flow Architect escalati
 > runtime source, dependency manifest, container/Compose, or lockfile touched; the added spec delta
 > uses prose and placeholders only, introduces no credential values, and changes no security claim.
 > SW-5's PASS verdict and the seven-point posture re-confirmation above are unaffected.
+
+## 9. Final re-check after OpenSpec validation / spec-delta commit `1955eb4` (SW-5)
+
+Trigger: SW-2 fix commit `1955eb4` ("add OpenSpec spec delta + sync stale PR-range/scanner-scope
+metadata"), which closed the last SW-4 blocker by adding the minimal
+`specs/langfuse-trace-source/spec.md` ADDED delta so `openspec validate --strict` passes, and synced
+the stale §2/§6 PR-range/scanner-scope text. This is the final SW-5 check before SW-6.
+
+**Changeset character.** PR #10 diff is now **10 docs/OpenSpec files** (`git diff --name-status
+main...HEAD`): `README.md`, `docs/{backup-restore,langfuse-local-setup}.md`, the task-003
+`{arch-review,design}.md` supersession banners, and task-018
+`{arch-review,proposal,qa,sec}.md` + `specs/langfuse-trace-source/spec.md`. **No runtime source**
+(`git diff --name-only main...HEAD -- src/ src-tauri/ observability/` → empty), no dependency
+manifest, no container/Compose, no lockfile.
+
+| Scanner | Scope | Result | Auto-fail? |
+|---|---|---|---|
+| **gitleaks** v8.30.1 | Full history (71 commits, incl. `1955eb4`) + working tree | **no leaks found** | No |
+| **semgrep** v1.165.0 | `--config=auto --severity=ERROR` on tracked tree | **0 ERROR findings** | No |
+| **OSV-scanner** v2.3.8 | `package-lock.json` (106 packages), recursive | **no issues** (0 CVE ≥ 7) | No |
+| **Trivy** v0.71.1 | `fs --scanners vuln,misconfig,secret --severity HIGH,CRITICAL` | **0 HIGH/CRITICAL** | No |
+
+Supplementary diff grep for literal credential values (`ghp_`/`github_pat_`/`sk-ant-`/`AKIA…`/`xox?-`/
+PEM private-key headers/inline `password=`/`secret=`) over added lines: the only matches are sec.md
+text describing its own scan patterns — **no real value**. Docs use placeholders / `${VAR}`
+substitution only.
+
+**New spec delta — control-weakening check.** `specs/langfuse-trace-source/spec.md` is an **ADDED**
+requirement (no existing requirement modified or removed). It *codifies* the controls rather than
+relaxing them: loopback (`127.0.0.1:3000`) default, Cloud as explicit non-default override only,
+a down/unreachable stack never read as zero usage/cost (evidence gap), and MinIO/S3 documented as
+internal/private (not host-published, not public) with three-store backup-consistency risk surfaced.
+Each scenario in the delta matches — and binds — the prose posture in the README and the two `docs/`
+files. **The delta strengthens controls; it weakens none.**
+
+**Seven-point posture re-confirmation (all hold):** (1) no secrets/paths — scanners + grep clean;
+(2) loopback default / no LAN exposure — `langfuse-local-setup.md:42,63`, spec-delta loopback
+scenario; (3) MinIO internal/private + backup consistency — `langfuse-local-setup.md:61,94`,
+`backup-restore.md:9` + divergence table, spec-delta MinIO scenario; (4) Docker-down ≠ zero cost —
+`langfuse-local-setup.md:119`, spec-delta down-stack scenario; (5) Cloud explicit-only —
+`langfuse-local-setup.md:153`, spec-delta default/override scenario; (6) trace-content boundary
+honest — `langfuse-local-setup.md:123-129`, README §Privacy status; (7) docs/OpenSpec only —
+runtime-source diff empty. All **PASS**.
+
+**Verdict unchanged: PASS.** No auto-fail condition reached, no open advisories, no design-level
+boundary issue → no BA-flow Architect escalation. Handoff: wait for SW-4 (Code Review); on both
+PASS, route to SW-6 (Release Manager).

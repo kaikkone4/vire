@@ -197,10 +197,15 @@ net-safer for egress because the default source is on-host loopback.
   under DEC-018. Its conclusions on REST fields/pagination/dedup/health remain useful, but its
   default-source posture must be read through this addendum (local-Docker default). The TASK-007 MVP
   should re-target validation at the local stack first. Flag for whoever owns the TASK-007 MVP branch.
-- **No spec delta.** TASK-018 adds no new requirement — DEC-020/DEC-022 already capture the posture in
-  the BA layer and the code docs already implement the documentation side. This addendum is a SW
-  architecture realignment + supersession record, so no `specs/**/spec.md` delta and no
-  `openspec validate` gate is required for it.
+- **Spec delta (minimal, ADDED).** A minimal ADDED delta now exists at
+  `specs/langfuse-trace-source/spec.md`. It carries the downstream default-source requirement
+  explicitly (local Docker self-hosted Langfuse as the TASK-007 importer default; Cloud as explicit
+  non-default override; loopback `127.0.0.1:3000` default; a down/unreachable stack never read as zero
+  usage/cost; MinIO/S3 internal/private with three-store backup-consistency risk surfaced) so that
+  `openspec validate --strict` passes for this change — it does (verified 2026-06-11). DEC-020/DEC-022
+  already capture the posture at the BA layer and the code docs implement the documentation side; this
+  delta codifies the same controls in OpenSpec. No existing requirement is modified or removed, so the
+  supersession remains additive.
 
 ### Recommendation (next role / branch / change)
 
