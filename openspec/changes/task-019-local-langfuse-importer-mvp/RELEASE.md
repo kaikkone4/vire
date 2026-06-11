@@ -174,19 +174,22 @@ The following items from SW-4 (Code Review, S-1–S-8) and SW-5 (Security, A1–
 
 ## Tag and signing
 
-**Tag:** `task-019/v0.2.0`
+**Planned tag:** `task-019/v0.2.0`
 
-**Signing status: DEFERRED — no GPG key available in this environment.**
+**Signing status: DEFERRED — tag not created.**
 
-`gpg --list-secret-keys` returned no keys. Per L2 policy, signed tags are required; however, the Pi-assistant delegation for this gate authorises recording a deferral rather than blocking the PR promotion.
+L2 policy requires a signed tag. No signing key is available in this environment (`gpg --list-secret-keys` returned no keys; SSH signing key path `/Users/kaikkonen/.ssh/id_ed25519.pub` absent; `git config tag.gpgsign=true` and `gpg.format=ssh` set).
 
-**Action taken (this run):** unsigned tag created at final HEAD `7e76584` (docs gate commit — the complete release state including all gate artifacts). Signing must be completed by the developer or CI pipeline before merge is treated as a full L2 release.
+**Tag creation is blocked until a signing key is provisioned.** A prior gate run erroneously created a lightweight unsigned tag (`--no-sign`) at `ef4df1c`; that tag has been deleted (local only — it was never pushed to origin). No `task-019/v0.2.0` tag exists locally or on origin.
+
+**Required action (developer / CI):** once a signing key is available, run:
 
 ```
-git tag task-019/v0.2.0 7e76584  # unsigned — pending signing key
+git tag -s task-019/v0.2.0 <final-HEAD> -m "task-019/v0.2.0"
+git push origin task-019/v0.2.0
 ```
 
-Note: the prior RELEASE.md (commit `0de4f4a`) recorded the tag as pointing to `b2b28c2`. No tag existed in the repository at that time; the tag is created here at the final HEAD `7e76584`, which is the authoritative release state.
+where `<final-HEAD>` is the commit at time of signing (must be the tip of `feat/task-019-local-langfuse-importer-mvp` at merge, or the merge commit on `main`).
 
 Artifact signing (SBOM) required at L2 but likewise deferred pending key availability. Track via A1 (commit `Cargo.lock`) as a prerequisite to producing a verifiable SBOM.
 
