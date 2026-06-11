@@ -47,5 +47,7 @@ runs.
   (reuse + native helper + Rust-core importer). DEC-018 cloud-first default is superseded by DEC-020.
 - **Carried `feedback_to_ba[]`:** DEC-019 is still not recorded in `07_decision_log.md`; ratify it
   there and note its importer posture now reads against DEC-020, not DEC-018.
-- **Branch recommendation:** move this addendum + the task-003 banners + the uncommitted DEC-020 doc
-  changes onto `feat/task-018-local-langfuse-source-addendum`.
+- **Branch:** done. This addendum, the task-003 banners, and the DEC-020 doc changes are committed on
+  `feat/task-018-local-langfuse-source-addendum` and surfaced as draft PR #10. PR #10 is stacked on
+  base `feat/task-003-implementation-path-decision`, so task-003 must merge to `main` first (or PR #10
+  is retargeted to `main` once task-003 lands).

@@ -51,16 +51,18 @@ Vire's canonical AI trace source is a **local, self-hosted Langfuse instance run
 | PostgreSQL | Application/transactional state | internal |
 | ClickHouse | Trace and event analytics store | internal |
 | Redis / Valkey | Worker queue and cache | internal |
-| MinIO (S3-compatible) | Event/media/export object storage | `127.0.0.1:9090` (API) |
+| MinIO (S3-compatible) | Event/media/export object storage | internal (not host-published) |
 
 All service ports must be bound to `127.0.0.1` by default. Do not expose services on LAN interfaces unless you have explicitly changed the compose port bindings and understand the security implications.
 
 ### Setup
 
-> **Implementation follow-up (TASK-007):** A local `docker-compose.yml` for the Vire development environment does not exist in this repo yet. Once the TASK-007 Langfuse importer spike is complete, a checked-in compose file with correct localhost bindings and environment variable references (no committed secrets) should be added. In the meantime, follow the [Langfuse self-hosting Docker Compose guide](https://langfuse.com/self-hosting/deployment/docker-compose) and apply the localhost binding requirements documented in [docs/langfuse-local-setup.md](docs/langfuse-local-setup.md).
+> **Existing local stack:** A loopback-bound, secret-safe Langfuse Compose stack already exists at [`observability/langfuse/`](observability/langfuse/) (the local Pi-Team/development observability stack). It binds Langfuse to `127.0.0.1:${LANGFUSE_PORT:-3000}`, publishes no other host ports, and injects every secret via required `.env` variables (no committed credentials). Reuse this vetted stack rather than hand-rolling a compose file and risking a misconfigured `127.0.0.1` binding.
+>
+> **Implementation follow-up (TASK-007):** Whether to add a separate *Vire-product-bundled* `docker-compose.yml` (distinct from the dev/observability stack above) is decided by the TASK-007 Langfuse importer spike. Any such file must keep the same localhost-only bindings and environment-variable references (no committed secrets). Until then, the `observability/langfuse/` stack is the reference; see [docs/langfuse-local-setup.md](docs/langfuse-local-setup.md) for binding requirements.
 
 1. Install Docker Desktop for macOS and ensure it is running.
-2. Follow the upstream Langfuse Docker Compose setup, overriding port bindings to use `127.0.0.1` (see [docs/langfuse-local-setup.md](docs/langfuse-local-setup.md)).
+2. Bring up the existing loopback-bound stack in [`observability/langfuse/`](observability/langfuse/) (see its README and [docs/langfuse-local-setup.md](docs/langfuse-local-setup.md)); it already restricts bindings to `127.0.0.1`.
 3. Configure Vire's Langfuse settings to point to `http://127.0.0.1:3000` with your local API key/secret. Do not commit credentials.
 4. In Vire, confirm the Langfuse health status shows `healthy` before relying on AI trace totals.
 

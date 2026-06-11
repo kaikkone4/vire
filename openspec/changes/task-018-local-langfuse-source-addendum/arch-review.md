@@ -4,8 +4,9 @@
 
 - **Reviewer:** SW Architect (SW-1)
 - **Change:** `task-018-local-langfuse-source-addendum`
-- **Branch (current):** `feat/task-003-implementation-path-decision` (recommend a dedicated
-  `feat/task-018-local-langfuse-source-addendum` — see §8)
+- **Branch (current):** `feat/task-018-local-langfuse-source-addendum` (dedicated branch; draft PR
+  **#10** open, base `feat/task-003-implementation-path-decision` — stacked on the task-003 branch, so
+  task-003 merges first or PR #10 is retargeted to `main` once task-003 lands; see §8)
 - **Tier:** L2 · **Gate context:** drift/realignment review before TASK-007 MVP continues. No
   product runtime is built or modified here; this fixes-forward the source posture the TASK-007
   importer inherits.
@@ -205,11 +206,13 @@ net-safer for egress because the default source is on-host loopback.
 
 - **Next role:** route TASK-007 MVP to the **integration-engineer** (Langfuse importer host-runtime
   fit) with **backend-developer (Rust/Tauri)** owning the read-only REST client in the Rust core.
-- **Branch:** the DEC-020 doc work (`README.md`, `docs/`) is currently **uncommitted on
-  `feat/task-003-implementation-path-decision`**. Recommend moving the TASK-018 addendum + the two
-  task-003 banners + the uncommitted DEC-020 docs onto a dedicated
-  **`feat/task-018-local-langfuse-source-addendum`** branch so the realignment lands as its own
-  reviewable unit rather than mixed into the merged task-003 branch.
+- **Branch:** done. The TASK-018 addendum, the two task-003 banners, and the DEC-020 doc work
+  (`README.md`, `docs/langfuse-local-setup.md`, `docs/backup-restore.md`) are committed on the
+  dedicated **`feat/task-018-local-langfuse-source-addendum`** branch, surfaced as draft **PR #10**.
+  The realignment lands as its own reviewable unit and is no longer mixed into the task-003 branch. **Merge-order caveat:** PR #10's base is `feat/task-003-implementation-path-decision`,
+  so it is stacked on task-003 — task-003 must merge to `main` first, then PR #10 merges (or PR #10 is
+  retargeted to `main` once task-003 has landed) to avoid pulling task-003's unmerged diff into this
+  review.
 - **Change:** `task-018-local-langfuse-source-addendum` (this dir). TASK-007 MVP is the next
   implementation change; it inherits §5 as binding direction.
 

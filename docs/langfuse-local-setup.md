@@ -13,7 +13,7 @@ The Langfuse self-hosted stack is a **stateful multi-component system**, not a s
 | PostgreSQL | `postgres` (official) | Application/auth/transactional state | none (internal) |
 | ClickHouse | `clickhouse/clickhouse-server` | Trace/event analytics store | none (internal) |
 | Redis / Valkey | `redis` or `valkey` | Worker queue and cache | none (internal) |
-| MinIO | `minio/minio` | S3-compatible object storage | `127.0.0.1:9090` (API) |
+| MinIO | `minio/minio` | S3-compatible object storage | none (internal); API `minio:9000`, console `:9001` inside the container — not host-published |
 
 Persistent Docker named volumes:
 
@@ -31,9 +31,11 @@ These volumes survive container restarts and upgrades. They are the primary back
 
 - Docker Desktop for macOS, installed and running.
 - Sufficient disk space for PostgreSQL, ClickHouse, and MinIO volumes (varies with trace volume; plan for several GB for active use).
-- The upstream [Langfuse Docker Compose file](https://langfuse.com/self-hosting/deployment/docker-compose) as a starting point.
+- The existing loopback-bound stack in [`observability/langfuse/`](../observability/langfuse/) (the local dev/observability Compose stack), which already applies the `127.0.0.1` bindings below. The upstream [Langfuse Docker Compose file](https://langfuse.com/self-hosting/deployment/docker-compose) is the reference it was derived from.
 
-> **Implementation follow-up (TASK-007):** A project-local `docker-compose.yml` with Vire-specific localhost bindings and environment variable references does not exist in this repo yet. It will be added after the TASK-007 Langfuse importer spike confirms the required stack configuration.
+> **Existing stack:** A loopback-bound `docker-compose.yml` with localhost bindings and `.env`-based secret references already exists at [`observability/langfuse/docker-compose.yml`](../observability/langfuse/docker-compose.yml) (the local dev/observability stack). It publishes only `127.0.0.1:${LANGFUSE_PORT:-3000}` for `langfuse-web` and no other host ports. Reuse it rather than authoring a new compose file.
+>
+> **Implementation follow-up (TASK-007):** Whether to add a separate *Vire-product-bundled* compose file (distinct from the dev/observability stack) is decided by the TASK-007 Langfuse importer spike. Any such file must keep the same localhost-only bindings and environment-variable references.
 
 ## Localhost binding
 
@@ -56,7 +58,7 @@ ports:
   - "127.0.0.1:3000:3000"
 ```
 
-Apply this pattern to every port that the `langfuse-web` and MinIO services expose. Internal service ports (PostgreSQL, ClickHouse, Redis/Valkey, the worker) should not be published at all in a local development compose — remove or comment out any `ports:` entries for those services.
+In the existing `observability/langfuse/` stack, `langfuse-web` is the only host-published service (`127.0.0.1:${LANGFUSE_PORT:-3000}:3000`); apply this pattern to it. Internal services (PostgreSQL, ClickHouse, Redis/Valkey, the worker, **and MinIO**) are not host-published at all — do not add `ports:` entries for them. MinIO is reachable only on the internal Compose network (`minio:9000`), which is the correct, stricter posture.
 
 Vire's default import endpoint is `http://127.0.0.1:3000`. Do not change this to a LAN address or Langfuse Cloud URL without an explicit configuration override in Vire settings.
 
@@ -69,7 +71,7 @@ Local Langfuse credentials include the PostgreSQL password, ClickHouse password,
 - never be committed to the repo, included in test fixtures, printed to logs, shown in diagnostic output, included in CSV exports, or exposed in support bundles;
 - use randomly generated values for all secrets (not short or guessable values).
 
-Reference credentials in `docker-compose.yml` via environment variable substitution (e.g. `${MINIO_ACCESS_KEY}`) so the compose file itself is safe to commit once the implementation follow-up above is resolved.
+Reference credentials in `docker-compose.yml` via environment variable substitution (e.g. `${MINIO_ROOT_PASSWORD}`) so the compose file itself is safe to commit. The committed `observability/langfuse/docker-compose.yml` already follows this pattern — every secret is injected from `.env` (which is gitignored), with no hardcoded values.
 
 ## MinIO / S3-compatible object storage — security and operations
 
@@ -95,7 +97,7 @@ Verify these values against your actual Langfuse environment variables (`LANGFUS
 
 ### MinIO console access
 
-The MinIO web console is available at `http://127.0.0.1:<console-port>` (typically `9001` in standard MinIO setups; verify in your compose). Use it only for local administration. Do not expose the console port to the network.
+In the committed `observability/langfuse/` stack the MinIO console runs on `:9001` **inside the container only** (`--console-address ":9001"`) and is **not** published to the host. There is no `127.0.0.1:9001` mapping by default, which is the correct, stricter posture. If you ever need console access for local administration, add a temporary `127.0.0.1`-bound port mapping and remove it afterwards — never expose the console on a LAN interface.
 
 ### Data scope
 
