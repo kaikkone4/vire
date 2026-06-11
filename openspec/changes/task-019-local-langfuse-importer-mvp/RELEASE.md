@@ -38,6 +38,16 @@
 - `docs/backup-restore.md` — MinIO in backup scope, divergence failure modes documented
 - `openspec/changes/task-019-local-langfuse-importer-mvp/design.md`, `proposal.md`, `tasks.md`, `arch-review.md`
 
+### Documentation drift fixes (SW-6 docs gate — commit `7e76584`)
+
+Three drift items found and corrected by the Documentation Engineer in the SW-6 gate pass:
+
+- **D-1** `README.md` — stale status line "in active development (TASK-005, TASK-007)" corrected to "local Docker Langfuse trace importer MVP is available (TASK-019)".
+- **D-2** `docs/langfuse-local-setup.md` — env var table expanded with all five `VIRE_LANGFUSE_*` environment variables (base URL, source posture, environments, public key, secret key) including credential fallback vars and `.env` guidance. Previously no env var names appeared in any documentation.
+- **D-3** `docs/langfuse-local-setup.md` — health states table completed: four previously missing states added (`auth_or_network_error`, `schema_changed`, `delayed`, `duplicate`). Table now covers all 10 states from `model.rs`.
+
+Gate artifacts committed at `7e76584`: `openspec/changes/task-019-local-langfuse-importer-mvp/review.md` (SW-4), `sec.md` (SW-5), `docs.md` (SW-6).
+
 ### Baseline-build remediation (behavior-preserving)
 
 - Added missing `src-tauri/icons/icon.png` (never committed; `generate_context!` panics without it)
@@ -56,8 +66,9 @@ Vire's first AI-evidence runtime path. A read-only Langfuse REST importer runs e
 | SW-3 | QA Engineer | PASS | `qa.md` | `b30025e`, `b2b28c2` |
 | SW-4 | Code Reviewer | PASS | `review.md` | `b30025e`, `b2b28c2` |
 | SW-5 | Security Agent | PASS | `sec.md` | `b2b28c2` |
+| SW-6 | Documentation Engineer | PASS | `docs.md` | `0de4f4a`, `7e76584` |
 
-No task is being released that did not pass both SW-4 and SW-5.
+All gate artifacts (`qa.md`, `review.md`, `sec.md`, `docs.md`) are committed at `7e76584`. No task is being released that did not pass both SW-4 and SW-5.
 
 ---
 
@@ -163,17 +174,19 @@ The following items from SW-4 (Code Review, S-1–S-8) and SW-5 (Security, A1–
 
 ## Tag and signing
 
-**Planned tag:** `task-019/v0.2.0`
+**Tag:** `task-019/v0.2.0`
 
 **Signing status: DEFERRED — no GPG key available in this environment.**
 
 `gpg --list-secret-keys` returned no keys. Per L2 policy, signed tags are required; however, the Pi-assistant delegation for this gate authorises recording a deferral rather than blocking the PR promotion.
 
-Action taken: unsigned tag created at `HEAD` (`b2b28c2`). Signing must be completed by the developer or CI pipeline before merge is treated as a full L2 release.
+**Action taken (this run):** unsigned tag created at final HEAD `7e76584` (docs gate commit — the complete release state including all gate artifacts). Signing must be completed by the developer or CI pipeline before merge is treated as a full L2 release.
 
 ```
-git tag task-019/v0.2.0 b2b28c2  # unsigned — pending signing key
+git tag task-019/v0.2.0 7e76584  # unsigned — pending signing key
 ```
+
+Note: the prior RELEASE.md (commit `0de4f4a`) recorded the tag as pointing to `b2b28c2`. No tag existed in the repository at that time; the tag is created here at the final HEAD `7e76584`, which is the authoritative release state.
 
 Artifact signing (SBOM) required at L2 but likewise deferred pending key availability. Track via A1 (commit `Cargo.lock`) as a prerequisite to producing a verifiable SBOM.
 
