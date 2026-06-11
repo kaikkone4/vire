@@ -171,7 +171,12 @@ does not fire — no distributable artifact is released.
   carries no product version increment.)
 - **Signing config:** `gpg.format=ssh`, `user.signingkey=/Users/kaikkonen/.ssh/id_ed25519.pub`,
   `tag.gpgsign=true` (verified in runner).
-- **Status:** see the STATUS report for the outcome of `git tag -s task-018/v0.1.0`.
+- **Status: DEFERRED — signing key not provisioned in this runner.** `user.signingkey` is set to
+  `/Users/kaikkonen/.ssh/id_ed25519.pub` but the file is not present; `git tag -s` cannot produce a
+  signed tag. Per L2 policy an unsigned fallback tag was deliberately **not** created. The tag is a
+  pending action for a signing-capable runner. This does not block the gate criterion (RELEASE.md
+  with all three declarations complete), but it is an open release-integrity item — identical
+  disposition to the TASK-003 release.
 
 ---
 
