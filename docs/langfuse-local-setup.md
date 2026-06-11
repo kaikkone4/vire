@@ -111,10 +111,14 @@ Vire checks local Langfuse availability before every import run. The following h
 |---|---|---|
 | `healthy` | Stack running; recent import; traces align with sessions | Normal import; AI totals displayed |
 | `unavailable` | Docker not running, or one or more stack components unreachable | Vire reports unavailable; offers to open/start Docker where safe; refuses to show AI totals |
-| `stale` | Stack reachable but latest trace/import older than expected | Warning displayed; AI totals shown with stale indicator |
+| `stale` | Stack reachable but latest trace/import older than expected threshold | Warning displayed; AI totals shown with stale indicator |
 | `unknown` | Cannot determine whether local Langfuse state is current or complete | AI totals shown with unknown-source flag; user prompted to check stack |
 | `missing` | Runtime session observed but no matching trace arrived | Warning; no cost inferred from runtime alone |
 | `wrong_env` | Traces arrived in `default` or an unexpected environment | Warning; traces excluded unless environment is mapped |
+| `auth_or_network_error` | 401/403/429 response or network failure (rate limiting folds here) | Vire reports error; AI totals withheld; check credentials and network reachability |
+| `schema_changed` | Expected usage/cost fields absent or wrong type in API response | AI totals withheld; likely caused by a Langfuse version change; inspect Langfuse worker logs |
+| `delayed` | A late-arriving trace predates the current import checkpoint | Trace reconciled and counted once; informational; no operator action needed |
+| `duplicate` | Trace already imported in a previous run (deduplicated by `(environment, trace_id)`) | Informational; trace counted once across re-imports; no operator action needed |
 
 **Vire never interprets Docker down, a missing stack component, or absent traces as zero AI usage or cost.** Absence of traces is an evidence gap that requires explicit review, not a zero-cost signal.
 
@@ -144,10 +148,14 @@ Langfuse environments are the primary mechanism for mapping traces to Vire proje
 
 ## Vire import endpoint configuration
 
-| Setting | Default | Notes |
-|---|---|---|
-| Base URL | `http://127.0.0.1:3000` | Local stack; change only for explicit Cloud override |
-| API credentials | Stored in local config / Keychain | Never committed, logged, or exported |
-| Environment filter | Per-project in Vire settings | Start with `vire`; add others as needed |
+The importer reads its settings from environment variables at startup. Store credentials in a local `.env` file (gitignored) or in macOS Keychain — never in code or committed files.
 
-Langfuse Cloud (`https://cloud.langfuse.com`) is supported as an explicit non-default override only. Do not set the base URL to a Cloud endpoint without understanding that this changes the data source for all AI trace imports.
+| Setting | Default | Env var | Notes |
+|---|---|---|---|
+| Base URL | `http://127.0.0.1:3000` | `VIRE_LANGFUSE_BASE_URL` | Local loopback; change only for an explicit Cloud override |
+| Source posture | `local` | `VIRE_LANGFUSE_SOURCE` | `local` (default) or `cloud` (explicit override — produces off-host egress) |
+| Allowed environments | `vire` | `VIRE_LANGFUSE_ENVIRONMENTS` | Comma-separated list; start with `vire`, add others as needed |
+| API public key | — | `VIRE_LANGFUSE_PUBLIC_KEY` (fallback: `LANGFUSE_PUBLIC_KEY`) | Never committed, logged, or exported |
+| API secret key | — | `VIRE_LANGFUSE_SECRET_KEY` (fallback: `LANGFUSE_SECRET_KEY`) | Never committed, logged, or exported |
+
+Langfuse Cloud (`https://cloud.langfuse.com`) is supported as an explicit non-default override only. Set `VIRE_LANGFUSE_SOURCE=cloud` and `VIRE_LANGFUSE_BASE_URL=https://cloud.langfuse.com` together; omitting either leaves the importer at the local Docker default.
