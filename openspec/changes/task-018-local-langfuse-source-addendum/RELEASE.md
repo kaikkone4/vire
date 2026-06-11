@@ -20,6 +20,7 @@ A single coherent addendum unit confined to:
 - `openspec/changes/task-018-local-langfuse-source-addendum/qa.md` (SW-3, PASS)
 - `openspec/changes/task-018-local-langfuse-source-addendum/review.md` (SW-4, PASS)
 - `openspec/changes/task-018-local-langfuse-source-addendum/sec.md` (SW-5, PASS)
+- `openspec/changes/task-018-local-langfuse-source-addendum/docs.md` (SW-6 docs gate, PASS — commit `74f8c85`, 2026-06-11)
 
 Plus additive supersession banners (no history rewrite) on two architecture-reference docs a TASK-007
 implementer reads for binding constraints:
@@ -67,6 +68,7 @@ DEC-019 (implementation path) is not reopened. The addendum is additive, not a h
 | SW-3 | QA Engineer | PASS (final re-run after fix commit `21f5fdd`, 2026-06-11) | `qa.md` |
 | SW-4 | Code/Doc Reviewer | PASS (commit `24e8279`, 2026-06-11) | `review.md` |
 | SW-5 | Security Agent | PASS (§10 re-check after `21f5fdd` + `dbb9c6f`, commit `96f910b`, 2026-06-11) | `sec.md` |
+| SW-6 docs | Documentation Engineer | PASS (no docs drift — all five DEC-020 dimensions verified; commit `74f8c85`, 2026-06-11) | `docs.md` |
 
 No task is being released that did not pass both SW-4 and SW-5.
 
@@ -160,7 +162,10 @@ pre-existing local stack committed in `observability/langfuse/docker-compose.yml
 
 Per `sec.md`, scanner stack (gitleaks, semgrep, OSV-scanner, Trivy) all passed at Tier 1/L2;
 zero findings across all four scanners (2026-06-11). APP-005 Gate D (release/distribution integrity)
-does not fire — no distributable artifact is released.
+does not fire — no distributable artifact is released. `docs.md` (SW-6 Documentation Engineer gate,
+commit `74f8c85`) confirms no docs drift: all five DEC-020 posture dimensions verified across
+`README.md`, `docs/langfuse-local-setup.md`, `docs/backup-restore.md`, the spec delta, and the
+task-003 supersession banners — audit trail complete.
 
 ---
 
