@@ -6,7 +6,8 @@
 - **Tier:** L2
 - **Release date:** 2026-06-12
 - **BA parent task:** TASK-006 (runtime reconciliation health)
-- **Gate chain:** SW-3 PASS (`a8fc11e`) · SW-4 PASS (`b9e6cef`) · SW-5 PASS (`be8029b`)
+- **Branch head:** `15429e9`
+- **Gate chain:** SW-3 PASS (`a8fc11e`) · SW-4 PASS (`b9e6cef`) · SW-5 PASS (`be8029b`) · SW-6 Docs PASS (`15429e9`)
 
 ---
 
