@@ -5,6 +5,7 @@
 - **Branch:** `fix/task-021-langfuse-persist-failure-ipc-surfacing` · **PR:** [kaikkone4/vire#13](https://github.com/kaikkone4/vire/pull/13)
 - **Release unit:** Hotfix to TASK-020 — make persist-failure surfacing authoritative in-band and marker-independent
 - **Date:** 2026-06-12
+- **Final branch head:** `8c8146a` (docs gate artifacts committed)
 - **Product version baseline:** `0.1.0` (from `src-tauri/Cargo.toml`) · **Release tag:** `task-021/v0.2.2` (PATCH hotfix)
 - **Verdict:** RELEASE-READY (all three required declarations complete)
 
@@ -44,8 +45,9 @@ Root cause: `run_blocking_import` discarded `run_import`'s `Vec<ImportSummary>` 
 | SW-3 | QA Engineer | PASS | `qa.md` | `99e1118` |
 | SW-4 | Code Reviewer | PASS | `review.md` | `99e1118` |
 | SW-5 | Security Agent | PASS | `sec.md` | `99e1118` |
+| SW-6 Docs | Documentation Engineer | PASS | `docs.md` | `99e1118` |
 
-All gate artifacts present in the change directory. No documentation drift expected — this hotfix touches only internal Rust implementation files and adds no new user-facing surface. Documentation gate (SW-6 Docs) is not required at L1/L2 for a patch hotfix with zero docs-surface change; `docs.md` is omitted per scope.
+All four gate artifacts present in the change directory (`qa.md`, `review.md`, `sec.md`, `docs.md`). `docs.md` confirms no drift — the single user-observable behavioral change (non-healthy error under total DB unwritability) is covered by the pre-existing `unknown` health state documentation; no documentation update was required or made.
 
 ---
 
