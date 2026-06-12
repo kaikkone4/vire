@@ -234,6 +234,10 @@ impl Observation {
 pub struct AiEvidence {
     pub trace_id: String,
     pub environment: String,
+    /// Hashed `session-<hash>` id from the trace, surfaced (privacy-positive) so the runtime
+    /// observer (TASK-022) matches against this normalized row instead of the prompt-bearing raw
+    /// payload. Opaque, not content; `None` when the trace carried no session id.
+    pub session_id: Option<String>,
     pub ai_start_ts: Option<String>,
     pub ai_end_ts: Option<String>,
     pub prompt_tokens: Option<i64>,

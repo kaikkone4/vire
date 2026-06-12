@@ -286,6 +286,7 @@ fn normalize_trace(api: &dyn LangfuseApi, env: &str, trace: &Trace) -> (AiEviden
         AiEvidence {
             trace_id: trace.id.clone(),
             environment: env.to_string(),
+            session_id: trace.session_id.clone(),
             ai_start_ts,
             ai_end_ts,
             prompt_tokens,
