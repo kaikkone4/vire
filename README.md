@@ -94,10 +94,60 @@ Vire imports AI traces from local Langfuse by Langfuse environment. Environments
 
 For full import configuration, health states, and operational guidance, see [docs/langfuse-local-setup.md](docs/langfuse-local-setup.md).
 
+## Runtime reconciliation
+
+Vire cross-checks locally observed pi/Claude Code agent runs against imported Langfuse traces. This is **reconciliation and health-gap detection only** — it is never a duplicate AI time or cost ledger, and absence of the runtime log or a down import is always `unknown`, never zero AI usage or cost.
+
+### Source
+
+The observer reads a local coarse session log produced by `pi-observe`. No processes are scanned, no command-lines are read, and no network calls are made.
+
+| Config | Default | Override env var |
+|---|---|---|
+| Runtime log path | `~/.local/state/pi-observe/events.jsonl` | `VIRE_RUNTIME_LOG_PATH` (explicit file path) |
+| State directory | `$HOME/.local/state/pi-observe/` | `PI_OBSERVE_STATE_DIR` (directory; `events.jsonl` appended) |
+
+If the log is absent, empty, a symlink, or larger than 8 MB the observer has no runtime evidence. All otherwise-importable traces reconcile to `reconciliation_unknown`. Absence is a state — never a zero-cost conclusion.
+
+### Privacy boundary
+
+Each log record is filtered through a **strict ingest allowlist** before anything is stored. Only coarse metadata is kept: event type, project token, tool label, opaque run/session id (a hash), timestamps, and terminal status. The following are **always dropped and never persisted or logged**, even if a hostile log injects them:
+
+- Prompt or response text
+- Terminal command bodies or shell history
+- Environment variables or secret-shaped strings
+- Free-text summaries and path/repository identifiers beyond the safe project token
+
+The allowlist is enforced at the type level — serde discards all non-listed keys — not as a runtime filter that could be bypassed. The observer makes no network calls and no new macOS permission is required.
+
+### Reconciliation states
+
+| State | Meaning |
+|---|---|
+| `matched` | Runtime session aligns with an imported trace (session id match, or same environment + overlapping time window) |
+| `observed_no_trace` | Session observed **and** the Langfuse import for its window+environment was `healthy`, but no trace arrived — a confirmed trace-health gap |
+| `reconciliation_unknown` | Import was `unavailable`/`unknown`/`auth_or_network_error` for the session's window, or no runtime log exists — absence is never zero |
+| `unmatched_runtime` | Session cannot be mapped to any Langfuse environment (no project→environment mapping); needs manual review |
+| `unmatched_trace` | An imported trace has no corresponding runtime session |
+
+`observed_no_trace` is only asserted when the Langfuse import for the session's window and environment was `healthy`. A missing trace under a down or uncertain import resolves to `reconciliation_unknown`.
+
+### Settings panel
+
+The Settings AI evidence panel shows a live reconciliation summary beneath the Langfuse source status:
+
+> Observed agent runs: **N** · without a matching trace: **M** · unknown: **K**. A down or absent import is reported as unknown, never zero.
+
+If no runtime log is found: "Runtime reconciliation: **unknown** — no runtime session log found."
+
+The full per-session review and approval UI is out of scope for this release (TASK-009).
+
 ## Privacy status
 
 Vire stores data in a local SQLite database on this Mac. It has no accounts, cloud sync, hosted API, or automatic data upload. It does not capture active windows, idle state, screenshots, keystrokes, browser contents, full URLs, terminal commands, screen pixels, or file contents in the current v0.1 shell.
 
 The AI trace import feature (in development) queries your **local Docker self-hosted Langfuse instance** only. No macOS activity, prompts, command bodies, or raw local evidence is sent to Langfuse Cloud. Local Langfuse traces may contain prompt/session/metadata from existing instrumentation; stricter redaction and retention limits are planned as a follow-up after the local import flow is validated.
+
+The runtime reconciliation observer reads a local coarse session log (metadata only) through a strict ingest allowlist. No prompts, command bodies, shell history, environment variables, secrets, or free-text summaries are stored. It makes no network calls and is entirely local.
 
 Langfuse API keys and local stack credentials are stored in local configuration only and must not be printed, logged, committed, exported, or included in support output.
