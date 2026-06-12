@@ -3,7 +3,7 @@ mod langfuse;
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::{Path, PathBuf}, sync::{Mutex, MutexGuard}};
+use std::{fs, path::{Path, PathBuf}, sync::{mpsc, Mutex, MutexGuard}, time::Duration};
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
@@ -178,14 +178,40 @@ fn get_langfuse_source_health(state: State<AppState>) -> CmdResult<SourceHealthS
     langfuse::health_snapshot(&db)
 }
 
+/// Ceiling for a manual import, comfortably above the reqwest 15s request / 5s connect ceilings so a
+/// normal slow import is not cut off, but an indefinite hang (dependency deadlock, lock contention)
+/// cannot block the UI forever (S-6).
+const IMPORT_TIMEOUT_SECS: u64 = 30;
+const IMPORT_TIMEOUT_MSG: &str =
+    "Langfuse import did not complete within the time limit — AI usage and cost are unknown, not zero";
+
+/// Run blocking `work` on a dedicated OS thread (off the Tauri runtime) and wait at most `timeout`.
+/// Returns the work's result, or a secret-free timeout error if it does not finish in time. An
+/// orphaned worker that finishes late just fails to send (the receiver is gone) and is bounded by
+/// the reqwest ceilings; it persists atomically (S-3) if it completes. No new health state is added.
+fn run_bounded<F>(timeout: Duration, work: F) -> CmdResult<()>
+where
+    F: FnOnce() -> CmdResult<()> + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => Err(IMPORT_TIMEOUT_MSG.to_string()),
+    }
+}
+
 #[tauri::command]
 fn import_langfuse_now(state: State<AppState>) -> CmdResult<SourceHealthSnapshot> {
-    // Run the blocking REST import on a dedicated OS thread (off the Tauri runtime and off the
-    // UI's database lock); it uses its own SQLite connection. Then read the resulting snapshot.
+    // Run the blocking REST import on a dedicated OS thread (off the Tauri runtime and off the UI's
+    // database lock); it uses its own SQLite connection. Bound the wait so a hung import returns a
+    // secret-free error instead of blocking the UI. Then read the resulting snapshot.
     let db_path = state.db_path.clone();
-    std::thread::spawn(move || langfuse::run_blocking_import(&db_path))
-        .join()
-        .map_err(|_| "Langfuse import thread terminated unexpectedly".to_string())??;
+    run_bounded(Duration::from_secs(IMPORT_TIMEOUT_SECS), move || {
+        langfuse::run_blocking_import(&db_path)
+    })?;
     let db = db_conn(&state)?;
     langfuse::health_snapshot(&db)
 }
@@ -214,5 +240,30 @@ mod tests {
     #[test] fn new_entries_reject_archived_projects_but_existing_can_keep_same_project() { let c=conn(); let p=create_project_repo(&c,ProjectInput{name:"Archived".into(),notes:None}).unwrap(); let e=create_entry_repo(&c,TimeEntryInput{project_id:p.id.clone(),date:"2026-01-01".into(),start_time:"09:00".into(),end_time:"10:00".into(),note:None}).unwrap(); archive_project_repo(&c,p.id.clone()).unwrap(); assert!(create_entry_repo(&c,TimeEntryInput{project_id:p.id.clone(),date:"2026-01-02".into(),start_time:"09:00".into(),end_time:"10:00".into(),note:None}).is_err()); assert!(update_entry_repo(&c,e.id,TimeEntryInput{project_id:p.id,date:"2026-01-01".into(),start_time:"09:00".into(),end_time:"10:30".into(),note:None}).is_ok()); }
     #[test] fn delete_missing_entry_returns_error() { let c=conn(); assert!(delete_entry_repo(&c,"missing".into()).unwrap_err().contains("not found")); }
     #[test] fn csv_cells_neutralize_formula_prefixes_and_escape_control_prefixes() { assert_eq!(csv_escape("=SUM(1,2)"), "\"'=SUM(1,2)\""); assert_eq!(csv_escape("  @cmd"), "'  @cmd"); assert_eq!(csv_escape("\nplain"), "\"'\nplain\""); assert_eq!(csv_escape("line\rbreak"), "\"line\rbreak\""); }
+
+    // ----- S-6: the manual import command is bounded ---------------------------------------
+
+    #[test]
+    fn run_bounded_times_out_promptly_with_a_secret_free_error() {
+        let start = std::time::Instant::now();
+        let err = run_bounded(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(1500));
+            Ok(())
+        })
+        .unwrap_err();
+        // The command returned well within the ceiling rather than blocking on the 1.5s worker.
+        assert!(start.elapsed() < Duration::from_secs(1), "must not block past the ceiling");
+        assert!(!err.is_empty());
+        for needle in ["sk-", "pk-", "password", "token", "Bearer", "Authorization"] {
+            assert!(!err.contains(needle), "timeout error must be secret-free, found {needle}");
+        }
+    }
+
+    #[test]
+    fn run_bounded_returns_the_works_result_within_the_ceiling() {
+        assert!(run_bounded(Duration::from_secs(5), || Ok(())).is_ok());
+        let err = run_bounded(Duration::from_secs(5), || Err("import failed".to_string())).unwrap_err();
+        assert_eq!(err, "import failed", "a normal failure is surfaced verbatim, not masked as a timeout");
+    }
 }
 

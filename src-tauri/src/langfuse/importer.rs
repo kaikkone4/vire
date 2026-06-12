@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -42,8 +42,13 @@ struct EnvImport {
     is_allowed: bool,
 }
 
+/// Every importer-emitted timestamp (`started_at`/`finished_at`/`imported_at`) is UTC RFC3339, so a
+/// run record is internally comparable with its RFC3339 `cursor_ts`/window/observation timestamps.
+/// `finished_at` is the `ORDER BY … DESC` sort key for "latest run": an RFC3339 `…T…Z` value always
+/// out-sorts a legacy space-separated row because `'T'` (0x54) > `' '` (0x20), so new rows stay
+/// latest across the format transition with no data migration.
 fn now() -> String {
-    Local::now().naive_local().format("%Y-%m-%d %H:%M:%S").to_string()
+    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 /// Run an import across the configured environments. Always probes availability first; a down or
@@ -62,8 +67,8 @@ pub fn run_import(
             .allowed_environments
             .iter()
             .map(|env| {
-                let summary = unavailable_summary(conn, env, &err);
-                persist_run(conn, &summary, &[], window);
+                let mut summary = unavailable_summary(conn, env, &err);
+                persist_run(conn, &mut summary, &[], window);
                 summary
             })
             .collect();
@@ -81,12 +86,12 @@ pub fn run_import(
 
     let mut out = Vec::new();
     for (env, is_allowed) in targets {
-        let imported = import_environment(api, conn, config, window, &env, is_allowed);
+        let mut imported = import_environment(api, conn, config, window, &env, is_allowed);
         // Don't record the synthetic `default` probe when it found nothing to surface.
         if !imported.is_allowed && !should_surface(&imported.summary) {
             continue;
         }
-        persist_run(conn, &imported.summary, &imported.raw, window);
+        persist_run(conn, &mut imported.summary, &imported.raw, window);
         out.push(imported.summary);
     }
     out
@@ -381,29 +386,29 @@ fn is_stale(cursor_ts: &Option<String>, window_to: &str) -> bool {
     cur < to - ChronoDuration::hours(STALE_AFTER_HOURS)
 }
 
+/// Fixed, secret-free message recorded when a run cannot be persisted. rusqlite driver errors carry
+/// no credential material; we surface only this stable string and never interpolate config or
+/// credential text (SEC-003).
+const PERSIST_FAILURE_MSG: &str =
+    "importer could not persist this run to the local store; recorded state is unknown";
+
+/// Persist one import run **atomically** (S-3): the raw-trace rows, AI-evidence rows, and run record
+/// commit together or not at all (`store::persist_import_run` wraps them in one transaction).
+///
+/// On a persistence failure the error is **surfaced, never swallowed** (S-4): the in-memory summary
+/// degrades to a non-healthy `unknown` state with a secret-free warning, and a separate marker run
+/// (its own id, so the failed run's id stays fully rolled back) records that non-healthy state into
+/// the snapshot. A persistence failure therefore never reads as `healthy` and never contributes a
+/// zero usage/cost total.
 fn persist_run(
     conn: &Connection,
-    summary: &ImportSummary,
+    summary: &mut ImportSummary,
     raw: &[(String, String)],
     window: &ImportWindow,
 ) {
-    let run_id = Uuid::new_v4().to_string();
     let stamp = now();
-    for (trace_id, payload) in raw {
-        let _ = store::upsert_raw_trace(
-            conn,
-            &summary.environment,
-            trace_id,
-            payload,
-            &stamp,
-            &run_id,
-        );
-    }
-    for evidence in &summary.evidence {
-        let _ = store::upsert_ai_evidence(conn, evidence, &run_id);
-    }
     let record = ImportRunRecord {
-        id: run_id,
+        id: Uuid::new_v4().to_string(),
         environment: summary.environment.clone(),
         window_from: Some(window.from.clone()),
         window_to: Some(window.to.clone()),
@@ -414,7 +419,19 @@ fn persist_run(
         duplicates_suppressed: summary.duplicates as u32,
         warnings: summary.warnings.clone(),
         started_at: stamp.clone(),
-        finished_at: stamp,
+        finished_at: stamp.clone(),
     };
-    let _ = store::insert_import_run(conn, &record);
+    if store::persist_import_run(conn, &record, raw, &summary.evidence, &stamp).is_err() {
+        summary.health = HealthState::Unknown;
+        summary.warnings.push(PERSIST_FAILURE_MSG.to_string());
+        let marker = ImportRunRecord {
+            id: Uuid::new_v4().to_string(),
+            status: HealthState::Unknown,
+            // Nothing was persisted, so do not advance currency on the marker.
+            cursor_ts: None,
+            warnings: vec![PERSIST_FAILURE_MSG.to_string()],
+            ..record
+        };
+        let _ = store::insert_import_run(conn, &marker);
+    }
 }
