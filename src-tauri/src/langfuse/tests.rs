@@ -557,3 +557,155 @@ fn snapshot_is_unknown_before_any_import() {
     assert_eq!(snap.source, "local");
     assert!(snap.last_import_at.is_none());
 }
+
+// ----- S-3: atomic persistence -------------------------------------------------------------
+
+/// A mid-run write failure (forced via a SQLite trigger that aborts the AI-evidence insert *after*
+/// the raw-trace rows were written in the same transaction) must leave NO partial state: the
+/// transaction rolls back both the raw and evidence writes. (S-3 + S-4.)
+#[test]
+fn persistence_failure_mid_run_leaves_no_partial_state_and_is_surfaced() {
+    let c = conn();
+    c.execute_batch(
+        "CREATE TRIGGER force_evidence_failure BEFORE INSERT ON langfuse_ai_evidence \
+         BEGIN SELECT RAISE(ABORT, 'forced test failure'); END;",
+    )
+    .unwrap();
+    let api = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_with_generation("A", "vire", "2026-06-05T00:00:00Z", 1.5, 12)]],
+    );
+    let s = run_import(&api, &c, &local_vire(), &window());
+    let vire = s.iter().find(|x| x.environment == "vire").unwrap();
+
+    // S-3: the run's transaction rolled back — neither the raw row nor the evidence row survived.
+    let raw: i64 = c
+        .query_row("SELECT COUNT(*) FROM langfuse_raw_traces", [], |r| r.get(0))
+        .unwrap();
+    let ev: i64 = c
+        .query_row("SELECT COUNT(*) FROM langfuse_ai_evidence", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(raw, 0, "raw-trace rows must roll back with the failed run");
+    assert_eq!(ev, 0, "AI-evidence rows must never be committed for a failed run");
+
+    // S-4: the failure is surfaced (non-healthy + secret-free warning), never healthy, never zero.
+    assert_eq!(vire.health, HealthState::Unknown);
+    assert!(vire.warnings.iter().any(|w| w.contains("persist")));
+    assert!(
+        !vire.warnings.iter().any(|w| w.contains("sk-") || w.contains("forced test failure")),
+        "surfaced warning must be secret-free and must not echo the raw driver string"
+    );
+    let snap = store::source_health_snapshot(&c, &local_vire()).unwrap();
+    assert_ne!(snap.health, "healthy", "a failed persist must not read as healthy");
+}
+
+/// A run that persists without error commits its raw rows, evidence rows, and run record together,
+/// all keyed to one consistent `run_id`, and becomes visible to the read-only snapshot. (S-3.)
+#[test]
+fn successful_run_commits_as_one_consistent_unit() {
+    let c = conn();
+    let api = MockApi::with_pages(
+        "vire",
+        vec![vec![
+            trace_with_generation("A", "vire", "2026-06-05T00:00:00Z", 1.5, 12),
+            trace_with_generation("B", "vire", "2026-06-06T00:00:00Z", 2.0, 20),
+        ]],
+    );
+    let s = run_import(&api, &c, &local_vire(), &window());
+    assert_eq!(
+        s.iter().find(|x| x.environment == "vire").unwrap().health,
+        HealthState::Healthy
+    );
+    let raw: i64 = c
+        .query_row("SELECT COUNT(*) FROM langfuse_raw_traces", [], |r| r.get(0))
+        .unwrap();
+    let ev: i64 = c
+        .query_row("SELECT COUNT(*) FROM langfuse_ai_evidence", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(raw, 2);
+    assert_eq!(ev, 2);
+    // The raw rows, evidence rows, and run record all share one run id.
+    let run_id: String = c
+        .query_row(
+            "SELECT id FROM langfuse_import_runs WHERE status='healthy'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let raw_run: String = c
+        .query_row("SELECT DISTINCT import_run_id FROM langfuse_raw_traces", [], |r| r.get(0))
+        .unwrap();
+    let ev_run: String = c
+        .query_row("SELECT DISTINCT import_run_id FROM langfuse_ai_evidence", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(raw_run, run_id);
+    assert_eq!(ev_run, run_id);
+    let snap = store::source_health_snapshot(&c, &local_vire()).unwrap();
+    assert_eq!(snap.health, "healthy");
+}
+
+// ----- S-5: uniform UTC RFC3339 timestamps -------------------------------------------------
+
+#[test]
+fn importer_emitted_timestamps_are_utc_rfc3339() {
+    let c = conn();
+    let api = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_with_generation("A", "vire", "2026-06-05T00:00:00Z", 1.5, 12)]],
+    );
+    run_import(&api, &c, &local_vire(), &window());
+    let (started, finished): (String, String) = c
+        .query_row(
+            "SELECT started_at, finished_at FROM langfuse_import_runs LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let imported: String = c
+        .query_row("SELECT imported_at FROM langfuse_raw_traces LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    for ts in [&started, &finished, &imported] {
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(ts).is_ok(),
+            "importer timestamp {ts} must parse as RFC3339"
+        );
+        assert!(ts.ends_with('Z'), "importer timestamp {ts} must be UTC (trailing Z)");
+        assert!(!ts.contains(' '), "importer timestamp {ts} must not be a space-separated local time");
+    }
+}
+
+/// The documented ordering-key migration: an RFC3339 `…T…Z` row always out-sorts a legacy
+/// space-separated row of the *same day*, even when the legacy local time is numerically later,
+/// because `'T'` (0x54) > `' '` (0x20). So "latest run" stays correct across the format transition
+/// with no data migration. (S-5.)
+#[test]
+fn rfc3339_run_sorts_after_legacy_space_format_run_same_day() {
+    let c = conn();
+    let legacy = store::ImportRunRecord {
+        id: "legacy".into(),
+        environment: "vire".into(),
+        window_from: None,
+        window_to: None,
+        cursor_ts: None,
+        status: HealthState::Healthy,
+        pages_walked: 0,
+        traces_seen: 0,
+        duplicates_suppressed: 0,
+        warnings: vec![],
+        started_at: "2026-06-12 23:59:59".into(),
+        finished_at: "2026-06-12 23:59:59".into(),
+    };
+    let modern = store::ImportRunRecord {
+        id: "modern".into(),
+        started_at: "2026-06-12T00:00:01Z".into(),
+        finished_at: "2026-06-12T00:00:01Z".into(),
+        ..legacy.clone()
+    };
+    store::insert_import_run(&c, &legacy).unwrap();
+    store::insert_import_run(&c, &modern).unwrap();
+    let latest = store::latest_run(&c).unwrap().unwrap();
+    assert_eq!(
+        latest.id, "modern",
+        "an RFC3339 run must sort latest over a legacy space-format run even when the legacy local time is numerically later"
+    );
+}

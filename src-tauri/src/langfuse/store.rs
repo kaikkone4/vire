@@ -94,6 +94,29 @@ pub fn insert_import_run(conn: &Connection, run: &ImportRunRecord) -> rusqlite::
     Ok(())
 }
 
+/// Persist one import run's writes **atomically** (S-3): the raw-trace upserts, AI-evidence
+/// upserts, and run-record insert all commit together or not at all. The transaction is created
+/// from a shared `&Connection` via `unchecked_transaction`; on any error the `Transaction` is
+/// dropped without `commit`, so rusqlite rolls the whole run back — no partially-written run can
+/// survive a mid-run failure. The atomicity unit is one import run (one `run_id`) per environment.
+pub fn persist_import_run(
+    conn: &Connection,
+    run: &ImportRunRecord,
+    raw: &[(String, String)],
+    evidence: &[AiEvidence],
+    imported_at: &str,
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (trace_id, payload) in raw {
+        upsert_raw_trace(&tx, &run.environment, trace_id, payload, imported_at, &run.id)?;
+    }
+    for ev in evidence {
+        upsert_ai_evidence(&tx, ev, &run.id)?;
+    }
+    insert_import_run(&tx, run)?;
+    tx.commit()
+}
+
 /// Most-recent run for an environment (by `finished_at`), used to seed the next cursor/overlap.
 pub fn latest_run_for_env(
     conn: &Connection,
