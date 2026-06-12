@@ -39,7 +39,24 @@ pub fn run_blocking_import(db_path: &Path) -> Result<(), String> {
     let config = ImporterConfig::from_env();
     let api = ReqwestLangfuseApi::new(config.clone()).map_err(|e| e.message)?;
     let window = recent_window(7);
-    importer::run_import(&api, &conn, &config, &window);
+    let summaries = importer::run_import(&api, &conn, &config, &window);
+    import_result(&summaries)
+}
+
+/// Collapse the per-environment summaries into the manual-import command's in-band result. A run that
+/// could not be persisted carries the secret-free `PERSIST_FAILURE_MSG` sentinel in its warnings;
+/// when present, surface it as an `Err` so the IPC returns a non-healthy result and never falls back
+/// to a stale `healthy` snapshot (TASK-021 S-4). This is the fault-independent channel: when the
+/// store is unwritable, no durable failure-marker can be recorded, so correctness must come from the
+/// function return, not a database read. Keys on the exact sentinel — **not** `health == Unknown`,
+/// which is also produced by a legitimately-persisted indeterminate classification.
+fn import_result(summaries: &[importer::ImportSummary]) -> Result<(), String> {
+    let persist_failed = summaries
+        .iter()
+        .any(|s| s.warnings.iter().any(|w| w == importer::PERSIST_FAILURE_MSG));
+    if persist_failed {
+        return Err(importer::PERSIST_FAILURE_MSG.to_string());
+    }
     Ok(())
 }
 

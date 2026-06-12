@@ -599,6 +599,78 @@ fn persistence_failure_mid_run_leaves_no_partial_state_and_is_surfaced() {
     assert_ne!(snap.health, "healthy", "a failed persist must not read as healthy");
 }
 
+/// TASK-021 — the both-writes-fail gap. When the run transaction fails **and** the durable
+/// failure-marker insert fails under the same fault (a trigger aborts every write to
+/// `langfuse_import_runs`), the persist failure must still surface to the import command **in-band**,
+/// never as the prior, durably-persisted `healthy` snapshot. The marker-only S-4 channel could not
+/// cover this because the marker write is precisely what the fault breaks.
+#[test]
+fn persist_failure_surfaces_in_band_even_when_marker_write_also_fails() {
+    let c = conn();
+
+    // Seed a prior, durably-persisted healthy run. If the failed import fell back to the DB snapshot,
+    // it would read this stale `healthy` — the exact false-healthy the fix must prevent.
+    let seed = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_with_generation("SEED", "vire", "2026-06-09T00:00:00Z", 1.0, 8)]],
+    );
+    run_import(&seed, &c, &local_vire(), &window());
+    assert_eq!(
+        store::source_health_snapshot(&c, &local_vire()).unwrap().health,
+        "healthy",
+        "precondition: a prior healthy run is durably persisted"
+    );
+
+    // Make EVERY insert into langfuse_import_runs abort, so both persist_import_run's run-record
+    // insert AND the best-effort marker insert fail under one fault. The RAISE message embeds a
+    // secret-shaped token to prove the surfaced error never echoes the raw driver string.
+    c.execute_batch(
+        "CREATE TRIGGER force_import_run_failure BEFORE INSERT ON langfuse_import_runs \
+         BEGIN SELECT RAISE(ABORT, 'forced failure sk-leak-canary token'); END;",
+    )
+    .unwrap();
+
+    let api = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_with_generation("A", "vire", "2026-06-10T00:00:00Z", 1.5, 12)]],
+    );
+    let summaries = run_import(&api, &c, &local_vire(), &window());
+    let vire = summaries.iter().find(|s| s.environment == "vire").unwrap();
+
+    // The in-memory summary degraded to a non-healthy Unknown carrying the persist sentinel.
+    assert_eq!(vire.health, HealthState::Unknown);
+    assert!(
+        vire.warnings.iter().any(|w| w == super::importer::PERSIST_FAILURE_MSG),
+        "the persist-failure sentinel must be present so the in-band path can key on it"
+    );
+
+    // In-band surfacing: the import command's result is a secret-free Err — the fault-independent
+    // channel — NOT the stale healthy snapshot.
+    let result = super::import_result(&summaries);
+    assert!(
+        result.is_err(),
+        "the manual import command must surface the failure in-band, never return the stale-healthy snapshot"
+    );
+    let err = result.expect_err("a persist failure must surface as Err, never Ok(stale snapshot)");
+    for needle in [
+        "sk-", "Bearer", "Authorization", "password", "token", "canary", "forced", "RAISE", "ABORT",
+    ] {
+        assert!(
+            !err.contains(needle),
+            "in-band persist error must be secret-free and not echo the driver string, found {needle}"
+        );
+    }
+
+    // The durable snapshot still reads the prior healthy run — by definition, an unwritable store
+    // cannot record a durable `unknown`. That is exactly why the in-band Err, not the snapshot, is
+    // the authoritative surfacing channel here.
+    let after = store::source_health_snapshot(&c, &local_vire()).unwrap();
+    assert_eq!(
+        after.health, "healthy",
+        "the DB snapshot is stale-healthy under an unwritable store — proving it is NOT the surfacing channel"
+    );
+}
+
 /// A run that persists without error commits its raw rows, evidence rows, and run record together,
 /// all keyed to one consistent `run_id`, and becomes visible to the read-only snapshot. (S-3.)
 #[test]

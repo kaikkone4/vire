@@ -388,18 +388,25 @@ fn is_stale(cursor_ts: &Option<String>, window_to: &str) -> bool {
 
 /// Fixed, secret-free message recorded when a run cannot be persisted. rusqlite driver errors carry
 /// no credential material; we surface only this stable string and never interpolate config or
-/// credential text (SEC-003).
-const PERSIST_FAILURE_MSG: &str =
+/// credential text (SEC-003). `run_blocking_import` (mod.rs) keys on this exact string to surface a
+/// persist failure to the import IPC **in-band**, so correctness does not depend on a durable DB
+/// write that the same fault may make impossible (TASK-021 S-4).
+pub const PERSIST_FAILURE_MSG: &str =
     "importer could not persist this run to the local store; recorded state is unknown";
 
 /// Persist one import run **atomically** (S-3): the raw-trace rows, AI-evidence rows, and run record
 /// commit together or not at all (`store::persist_import_run` wraps them in one transaction).
 ///
 /// On a persistence failure the error is **surfaced, never swallowed** (S-4): the in-memory summary
-/// degrades to a non-healthy `unknown` state with a secret-free warning, and a separate marker run
-/// (its own id, so the failed run's id stays fully rolled back) records that non-healthy state into
-/// the snapshot. A persistence failure therefore never reads as `healthy` and never contributes a
-/// zero usage/cost total.
+/// degrades to a non-healthy `unknown` state with the secret-free `PERSIST_FAILURE_MSG` sentinel in
+/// its warnings. That sentinel is the authoritative signal — `run_blocking_import` keys on it to
+/// return an in-band `Err`, so the manual-import IPC surfaces the failure even when the store is
+/// broadly unwritable and never reads a stale `healthy` snapshot (TASK-021). The separate marker run
+/// below (its own id, so the failed run's id stays fully rolled back) is **best-effort**
+/// defense-in-depth for the on-demand `get_langfuse_source_health` snapshot when the small insert can
+/// still succeed; it is no longer load-bearing for correctness, so its error stays discarded
+/// (`let _`). A persistence failure therefore never reads as `healthy` and never contributes a zero
+/// usage/cost total.
 fn persist_run(
     conn: &Connection,
     summary: &mut ImportSummary,
@@ -432,6 +439,9 @@ fn persist_run(
             warnings: vec![PERSIST_FAILURE_MSG.to_string()],
             ..record
         };
+        // Best-effort durable marker (defense-in-depth for the on-demand snapshot). Correctness is
+        // guaranteed by the in-band `Err` in `run_blocking_import`, so a marker insert that fails
+        // under the same fault that broke the run transaction is fine — error stays discarded.
         let _ = store::insert_import_run(conn, &marker);
     }
 }
