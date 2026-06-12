@@ -38,6 +38,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS langfuse_ai_evidence (
             environment TEXT NOT NULL,
             trace_id TEXT NOT NULL,
+            session_id TEXT,
             ai_start_ts TEXT,
             ai_end_ts TEXT,
             prompt_tokens INTEGER,
@@ -49,7 +50,32 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             import_run_id TEXT,
             PRIMARY KEY (environment, trace_id)
         );",
-    )
+    )?;
+    // Additive, idempotent: surface `session_id` on installs whose evidence table predates the
+    // TASK-022 column. Duplicate-column on a fresh install is expected and ignored; any other
+    // error propagates. The column is nullable and privacy-positive (opaque hashed id, never
+    // prompt/content), letting the runtime observer match the normalized row not the raw payload.
+    add_column_if_absent(conn, "langfuse_ai_evidence", "session_id", "TEXT")
+}
+
+/// `ALTER TABLE … ADD COLUMN` that treats an already-present column as success. SQLite has no
+/// `ADD COLUMN IF NOT EXISTS`, so a duplicate-column error is the expected "already migrated" path.
+fn add_column_if_absent(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> rusqlite::Result<()> {
+    match conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+        [],
+    ) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column name") => {
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// A row of `langfuse_import_runs`, used both for writing a run and reading prior cursor/state.
@@ -210,10 +236,11 @@ pub fn upsert_ai_evidence(
 ) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO langfuse_ai_evidence
-            (environment, trace_id, ai_start_ts, ai_end_ts, prompt_tokens, completion_tokens,
-             total_tokens, cost_total, cost_currency, health, import_run_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+            (environment, trace_id, session_id, ai_start_ts, ai_end_ts, prompt_tokens,
+             completion_tokens, total_tokens, cost_total, cost_currency, health, import_run_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
          ON CONFLICT(environment, trace_id) DO UPDATE SET
+            session_id = excluded.session_id,
             ai_start_ts = excluded.ai_start_ts,
             ai_end_ts = excluded.ai_end_ts,
             prompt_tokens = excluded.prompt_tokens,
@@ -226,6 +253,7 @@ pub fn upsert_ai_evidence(
         params![
             evidence.environment,
             evidence.trace_id,
+            evidence.session_id,
             evidence.ai_start_ts,
             evidence.ai_end_ts,
             evidence.prompt_tokens,

@@ -546,6 +546,43 @@ fn non_http_scheme_is_refused() {
     assert!(config.build_url(&ApiPath::Health).is_err());
 }
 
+// ----- TASK-022 interface extension: session_id on evidence --------------------------------
+
+/// The privacy-positive importer extension: a trace's hashed `sessionId` is surfaced onto the
+/// normalized `langfuse_ai_evidence` row so the runtime observer matches the normalized row, never
+/// the prompt-bearing raw payload. Absent on a trace ⇒ `NULL`, never a fabricated value.
+#[test]
+fn session_id_is_surfaced_onto_normalized_evidence() {
+    let c = conn();
+    let with_session = json!({
+        "id": "WS", "environment": "vire", "timestamp": "2026-06-05T00:00:00Z",
+        "sessionId": "session-abc123", "metadata": {},
+        "observations": [{"type": "GENERATION", "startTime": "2026-06-05T00:00:00Z",
+            "endTime": "2026-06-05T00:01:00Z", "totalTokens": 10, "calculatedTotalCost": 1.0}]
+    });
+    let api = MockApi::with_pages(
+        "vire",
+        vec![vec![with_session, trace_time_only("NS", "vire", "2026-06-05T00:02:00Z")]],
+    );
+    run_import(&api, &c, &local_vire(), &window());
+    let ws: Option<String> = c
+        .query_row(
+            "SELECT session_id FROM langfuse_ai_evidence WHERE trace_id='WS'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let ns: Option<String> = c
+        .query_row(
+            "SELECT session_id FROM langfuse_ai_evidence WHERE trace_id='NS'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ws.as_deref(), Some("session-abc123"), "present sessionId is surfaced");
+    assert_eq!(ns, None, "absent sessionId stays NULL, never fabricated");
+}
+
 // ----- snapshot ----------------------------------------------------------------------------
 
 #[test]

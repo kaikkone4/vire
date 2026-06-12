@@ -146,6 +146,18 @@ Langfuse environments are the primary mechanism for mapping traces to Vire proje
 - pi-langfuse v1.4.3 requires a local environment propagation patch (including REST fallback) to emit traces with the correct environment. Verify traces are not landing in `default` after each workspace setup change.
 - The Claude Code Langfuse observability plugin can silently emit no traces if the Python SDK or plugin is missing or misconfigured. Vire detects missing/stale Claude Code traces and surfaces them as `missing` health state rather than zero cost.
 
+## Runtime reconciliation and import health
+
+The runtime observer (TASK-022) reads a local coarse session log and reconciles observed pi/Claude Code runs against the imported traces. It uses the import health states from the table above to gate its conclusions:
+
+- **Import `healthy`** and no matching trace exists → `observed_no_trace` (a confirmed trace-health gap worth reviewing).
+- **Import `unavailable`, `unknown`, or `auth_or_network_error`** → `reconciliation_unknown` — Vire cannot determine whether the gap is real. This is never interpreted as zero AI usage or cost.
+- **Runtime log absent, unreadable, or over the size cap** → `reconciliation_unknown` for all sessions. Absence is a state, not a zero-cost conclusion.
+
+The observer is local-only: it reads the session log and the importer's normalized evidence rows from local SQLite, makes no network calls, and stores no token, cost, or duration values. Reconciliation is health/gap detection only; AI time and cost continue to come from the Langfuse importer.
+
+For the runtime log source path, privacy boundary, configuration env vars, and full reconciliation state reference, see [README.md — Runtime reconciliation](../README.md#runtime-reconciliation).
+
 ## Vire import endpoint configuration
 
 The importer reads its settings from environment variables at startup. Store credentials in a local `.env` file (gitignored) or in macOS Keychain — never in code or committed files.

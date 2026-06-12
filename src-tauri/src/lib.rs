@@ -1,4 +1,5 @@
 mod langfuse;
+mod runtime_observer;
 
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -9,6 +10,7 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use langfuse::store::SourceHealthSnapshot;
+use runtime_observer::model::RuntimeReconciliationSnapshot;
 
 struct AppState { db: Mutex<Connection>, db_path: PathBuf }
 
@@ -51,7 +53,8 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         INSERT OR IGNORE INTO settings(key, value) VALUES ('capture_status', 'manual_mode_deferred');
         CREATE INDEX IF NOT EXISTS idx_entries_date_project ON time_entries(date, project_id);")?;
-    langfuse::store::migrate(conn)
+    langfuse::store::migrate(conn)?;
+    runtime_observer::store::migrate(conn)
 }
 
 fn clean_opt(s: Option<String>) -> Option<String> { s.and_then(|v| { let t = v.trim().to_string(); if t.is_empty() { None } else { Some(t) } }) }
@@ -178,6 +181,16 @@ fn get_langfuse_source_health(state: State<AppState>) -> CmdResult<SourceHealthS
     langfuse::health_snapshot(&db)
 }
 
+/// Read-only runtime-reconciliation surface (TASK-022). Ingests the local coarse session log,
+/// reconciles it against the importer's evidence read-only, persists the observer-owned
+/// `ai_runtime_sessions` rows, and returns coarse per-state counts only — no secrets, session
+/// content, command bodies, or raw log lines. The observer makes no network call.
+#[tauri::command]
+fn get_runtime_reconciliation(state: State<AppState>) -> CmdResult<RuntimeReconciliationSnapshot> {
+    let db = db_conn(&state)?;
+    runtime_observer::observe_and_reconcile(&db)
+}
+
 /// Ceiling for a manual import, comfortably above the reqwest 15s request / 5s connect ceilings so a
 /// normal slow import is not cut off, but an indefinite hang (dependency deadlock, lock contention)
 /// cannot block the UI forever (S-6).
@@ -224,7 +237,7 @@ fn validate_csv_destination(path: &Path) -> Result<(), String> {
 fn db_path(app: &tauri::App) -> Result<PathBuf, std::io::Error> { let dir = app.path().app_data_dir().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Could not resolve Vire app data directory: {e}")))?; fs::create_dir_all(&dir)?; Ok(dir.join("vire.sqlite")) }
 pub fn run() {
     tauri::Builder::default().plugin(tauri_plugin_dialog::init()).setup(|app| { let path = db_path(app)?; let conn = Connection::open(&path)?; init_db(&conn)?; app.manage(AppState { db: Mutex::new(conn), db_path: path }); Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_capture_status,list_projects,create_project,update_project,archive_project,list_time_entries,create_time_entry,update_time_entry,delete_time_entry,get_summary,export_report_csv,get_langfuse_source_health,import_langfuse_now])
+        .invoke_handler(tauri::generate_handler![get_capture_status,list_projects,create_project,update_project,archive_project,list_time_entries,create_time_entry,update_time_entry,delete_time_entry,get_summary,export_report_csv,get_langfuse_source_health,import_langfuse_now,get_runtime_reconciliation])
         .run(tauri::generate_context!()).expect("error while running Vire");
 }
 
