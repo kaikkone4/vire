@@ -40,8 +40,9 @@ This is a hardening-only release over TASK-019's MVP importer. No new user-visib
 | SW-3 | QA Engineer | PASS | `qa.md` | `f8fd591`, `22ad72b`, `b4f0f3d` |
 | SW-4 | Code Reviewer | PASS | `review.md` | `f8fd591`, `22ad72b`, `b4f0f3d` |
 | SW-5 | Security Agent | PASS | `sec.md` | `f8fd591`, `22ad72b`, `b4f0f3d` |
+| SW-6 Docs | Documentation Engineer | PASS | `docs.md` | `d75c3cd` |
 
-All gate artifacts (`qa.md`, `review.md`, `sec.md`) are present in the change directory. No task is being released that did not pass both SW-4 and SW-5.
+All gate artifacts (`qa.md`, `review.md`, `sec.md`, `docs.md`) are present in the change directory. No task is being released that did not pass both SW-4 and SW-5. `docs.md` confirms no documentation drift (committed at `d75c3cd`, the final branch head).
 
 ---
 
@@ -152,11 +153,11 @@ L2 policy requires a signed tag. SSH signing is configured (`git config gpg.form
 **Required action (developer / CI):** once the SSH private key is available, run:
 
 ```
-git tag -s task-020/v0.2.1 b4f0f3d -m "task-020/v0.2.1"
+git tag -s task-020/v0.2.1 d75c3cd -m "task-020/v0.2.1"
 git push origin task-020/v0.2.1
 ```
 
-where `b4f0f3d` is the current branch tip; substitute the merge commit SHA if tagging post-merge on `main`.
+where `d75c3cd` is the final branch head (docs gate artifacts committed); substitute the merge commit SHA if tagging post-merge on `main`.
 
 Artifact signing (SBOM via `cargo audit --json` + `cargo deny`) required at L2; likewise deferred pending key availability. `Cargo.lock` is now committed and ready as the SBOM input.
 
@@ -165,7 +166,7 @@ Artifact signing (SBOM via `cargo audit --json` + `cargo deny`) required at L2; 
 ## Handoff
 
 - **Verification flow (Flow 3):** stubbed — deployed artifacts for environment testing.
-- **Documentation Engineer:** L2 required — route SW-6 docs gate after PR merge.
+- **Documentation Engineer:** COMPLETE — `docs.md` PASS at `d75c3cd`; no documentation drift found.
 - **Tag/signing follow-up:** provision SSH signing key; create and push `task-020/v0.2.1` per the instructions above.
 - **SW-4 S1–S3 suggestions:** minor code-comment improvements; low-priority follow-up.
 - **A2/A3 carry-forward advisories:** address at next Tauri bump and next tier milestone respectively.
