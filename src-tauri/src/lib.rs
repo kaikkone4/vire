@@ -1,3 +1,5 @@
+mod langfuse;
+
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -6,11 +8,13 @@ use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
-struct AppState { db: Mutex<Connection> }
+use langfuse::store::SourceHealthSnapshot;
+
+struct AppState { db: Mutex<Connection>, db_path: PathBuf }
 
 type CmdResult<T> = Result<T, String>;
 
-fn db_conn(state: &State<AppState>) -> CmdResult<MutexGuard<'_, Connection>> {
+fn db_conn<'a>(state: &'a State<'a, AppState>) -> CmdResult<MutexGuard<'a, Connection>> {
     state.db.lock().map_err(|_| "Database lock is unavailable after an internal error; please restart Vire".to_string())
 }
 
@@ -46,7 +50,8 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         INSERT OR IGNORE INTO settings(key, value) VALUES ('capture_status', 'manual_mode_deferred');
-        CREATE INDEX IF NOT EXISTS idx_entries_date_project ON time_entries(date, project_id);")
+        CREATE INDEX IF NOT EXISTS idx_entries_date_project ON time_entries(date, project_id);")?;
+    langfuse::store::migrate(conn)
 }
 
 fn clean_opt(s: Option<String>) -> Option<String> { s.and_then(|v| { let t = v.trim().to_string(); if t.is_empty() { None } else { Some(t) } }) }
@@ -90,8 +95,9 @@ pub fn archive_project_repo(conn: &Connection, id: String) -> Result<Project, St
 pub fn list_projects_repo(conn: &Connection, include_archived: bool) -> Result<Vec<Project>, String> {
     let sql = if include_archived { "SELECT id,name,notes,archived,created_at,updated_at FROM projects ORDER BY archived,name" } else { "SELECT id,name,notes,archived,created_at,updated_at FROM projects WHERE archived=0 ORDER BY name" };
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-    stmt.query_map([], |r| Ok(Project { id:r.get(0)?, name:r.get(1)?, notes:r.get(2)?, archived:r.get::<_,i64>(3)? != 0, created_at:r.get(4)?, updated_at:r.get(5)? }))
-        .map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())
+    let rows = stmt.query_map([], |r| Ok(Project { id:r.get(0)?, name:r.get(1)?, notes:r.get(2)?, archived:r.get::<_,i64>(3)? != 0, created_at:r.get(4)?, updated_at:r.get(5)? }))
+        .map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string());
+    rows
 }
 
 pub fn create_entry_repo(conn: &Connection, input: TimeEntryInput) -> Result<TimeEntry, String> {
@@ -118,7 +124,7 @@ pub fn list_entries_repo(conn: &Connection, start: String, end: String, project_
     let mut sql = "SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2".to_string();
     if project_id.is_some() { sql.push_str(" AND e.project_id=?3"); } sql.push_str(" ORDER BY e.date DESC,e.start_time DESC");
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows = if let Some(pid)=project_id { stmt.query_map(params![start,end,pid], row_to_entry).map_err(|e| e.to_string())?.collect() } else { stmt.query_map(params![start,end], row_to_entry).map_err(|e| e.to_string())?.collect() };
+    let rows: Result<Vec<_>, _> = if let Some(pid)=project_id { stmt.query_map(params![start,end,pid], row_to_entry).map_err(|e| e.to_string())?.collect() } else { stmt.query_map(params![start,end], row_to_entry).map_err(|e| e.to_string())?.collect() };
     rows.map_err(|e| e.to_string())
 }
 pub fn summary_repo(conn: &Connection, start: String, end: String, project_id: Option<String>) -> Result<Vec<SummaryRow>, String> {
@@ -127,7 +133,7 @@ pub fn summary_repo(conn: &Connection, start: String, end: String, project_id: O
     if project_id.is_some() { sql.push_str(" AND e.project_id=?3"); } sql.push_str(" GROUP BY p.id,p.name ORDER BY p.name");
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let mapper = |r: &rusqlite::Row| Ok(SummaryRow { project_id:r.get(0)?, project_name:r.get(1)?, duration_minutes:r.get(2)? });
-    let rows = if let Some(pid)=project_id { stmt.query_map(params![start,end,pid], mapper).map_err(|e| e.to_string())?.collect() } else { stmt.query_map(params![start,end], mapper).map_err(|e| e.to_string())?.collect() };
+    let rows: Result<Vec<_>, _> = if let Some(pid)=project_id { stmt.query_map(params![start,end,pid], mapper).map_err(|e| e.to_string())?.collect() } else { stmt.query_map(params![start,end], mapper).map_err(|e| e.to_string())?.collect() };
     rows.map_err(|e| e.to_string())
 }
 fn csv_formula_neutralized(v: &str) -> String {
@@ -166,6 +172,24 @@ pub fn export_csv_repo(conn: &Connection, start: String, end: String, project_id
     export_csv_repo(&db, start_date, end_date, project_id, &path).map(Some)
 }
 
+#[tauri::command]
+fn get_langfuse_source_health(state: State<AppState>) -> CmdResult<SourceHealthSnapshot> {
+    let db = db_conn(&state)?;
+    langfuse::health_snapshot(&db)
+}
+
+#[tauri::command]
+fn import_langfuse_now(state: State<AppState>) -> CmdResult<SourceHealthSnapshot> {
+    // Run the blocking REST import on a dedicated OS thread (off the Tauri runtime and off the
+    // UI's database lock); it uses its own SQLite connection. Then read the resulting snapshot.
+    let db_path = state.db_path.clone();
+    std::thread::spawn(move || langfuse::run_blocking_import(&db_path))
+        .join()
+        .map_err(|_| "Langfuse import thread terminated unexpectedly".to_string())??;
+    let db = db_conn(&state)?;
+    langfuse::health_snapshot(&db)
+}
+
 fn validate_csv_destination(path: &Path) -> Result<(), String> {
     if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("csv")) != Some(true) { return Err("CSV export destination must use a .csv extension".into()); }
     if path.is_dir() { return Err("CSV export destination must be a file, not a directory".into()); }
@@ -173,8 +197,8 @@ fn validate_csv_destination(path: &Path) -> Result<(), String> {
 }
 fn db_path(app: &tauri::App) -> Result<PathBuf, std::io::Error> { let dir = app.path().app_data_dir().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Could not resolve Vire app data directory: {e}")))?; fs::create_dir_all(&dir)?; Ok(dir.join("vire.sqlite")) }
 pub fn run() {
-    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).setup(|app| { let conn = Connection::open(db_path(app)?)?; init_db(&conn)?; app.manage(AppState { db: Mutex::new(conn) }); Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_capture_status,list_projects,create_project,update_project,archive_project,list_time_entries,create_time_entry,update_time_entry,delete_time_entry,get_summary,export_report_csv])
+    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).setup(|app| { let path = db_path(app)?; let conn = Connection::open(&path)?; init_db(&conn)?; app.manage(AppState { db: Mutex::new(conn), db_path: path }); Ok(()) })
+        .invoke_handler(tauri::generate_handler![get_capture_status,list_projects,create_project,update_project,archive_project,list_time_entries,create_time_entry,update_time_entry,delete_time_entry,get_summary,export_report_csv,get_langfuse_source_health,import_langfuse_now])
         .run(tauri::generate_context!()).expect("error while running Vire");
 }
 

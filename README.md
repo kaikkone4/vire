@@ -2,7 +2,7 @@
 
 Vire is a local-only macOS desktop app for project time tracking, AI usage evidence, and billing review. It imports AI traces (pi, Claude Code) from a **local Docker self-hosted Langfuse stack** as the primary AI time/usage/cost evidence source and requires human approval before any billable or profitability total is computed.
 
-Current state: v0.1 Tauri v2 shell with manual time entries, projects, summaries, and CSV export. Automatic macOS activity capture and Langfuse trace import are in active development (TASK-005, TASK-007).
+Current state: v0.1 Tauri v2 shell with manual time entries, projects, summaries, and CSV export. The local Docker Langfuse trace importer MVP is available (TASK-019); automatic macOS activity capture is in active development (TASK-005).
 
 ## Run locally
 
