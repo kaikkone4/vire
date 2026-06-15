@@ -165,12 +165,24 @@ pub fn export_csv_repo(conn: &Connection, start: String, end: String, project_id
 #[tauri::command] fn update_time_entry(state: State<AppState>, id: String, input: TimeEntryInput) -> CmdResult<TimeEntry> { let db = db_conn(&state)?; update_entry_repo(&db, id, input) }
 #[tauri::command] fn delete_time_entry(state: State<AppState>, id: String) -> CmdResult<()> { let db = db_conn(&state)?; delete_entry_repo(&db, id) }
 #[tauri::command] fn get_summary(state: State<AppState>, start_date: String, end_date: String, project_id: Option<String>) -> CmdResult<Vec<SummaryRow>> { let db = db_conn(&state)?; summary_repo(&db, start_date, end_date, project_id) }
-#[tauri::command] fn export_report_csv(app: tauri::AppHandle, state: State<AppState>, start_date: String, end_date: String, project_id: Option<String>) -> CmdResult<Option<usize>> {
+#[tauri::command]
+async fn export_report_csv(app: tauri::AppHandle, state: State<'_, AppState>, start_date: String, end_date: String, project_id: Option<String>) -> CmdResult<Option<usize>> {
     validate_date_range(&start_date, &end_date)?;
-    let destination = app.dialog().file().add_filter("CSV", &["csv"]).set_file_name("vire-report.csv").blocking_save_file();
+    // Present the save dialog off the UI main thread. `blocking_save_file()` parks the calling thread
+    // on a channel that its completion callback feeds via the main run loop; called on the main thread
+    // (a sync command) that callback can never be delivered and the IPC promise hangs (the macOS
+    // deadlock this fix targets). Running it on the blocking pool keeps the main run loop free, so the
+    // dialog resolves and the command always returns.
+    let dialog_app = app.clone();
+    let destination = tauri::async_runtime::spawn_blocking(move || {
+        dialog_app.dialog().file().add_filter("CSV", &["csv"]).set_file_name("vire-report.csv").blocking_save_file()
+    })
+    .await
+    .map_err(|_| "CSV export save dialog could not be presented".to_string())?;
     let Some(destination) = destination else { return Ok(None); };
     let path = destination.into_path().map_err(|_| "CSV export destination must be a local file path".to_string())?;
     validate_csv_destination(&path)?;
+    // Lock the DB only after the dialog resolves — never hold the MutexGuard across the `.await` above.
     let db = db_conn(&state)?;
     export_csv_repo(&db, start_date, end_date, project_id, &path).map(Some)
 }
@@ -254,6 +266,36 @@ mod tests {
     #[test] fn delete_missing_entry_returns_error() { let c=conn(); assert!(delete_entry_repo(&c,"missing".into()).unwrap_err().contains("not found")); }
     #[test] fn csv_cells_neutralize_formula_prefixes_and_escape_control_prefixes() { assert_eq!(csv_escape("=SUM(1,2)"), "\"'=SUM(1,2)\""); assert_eq!(csv_escape("  @cmd"), "'  @cmd"); assert_eq!(csv_escape("\nplain"), "\"'\nplain\""); assert_eq!(csv_escape("line\rbreak"), "\"line\rbreak\""); assert_eq!(csv_escape(" +SUM(1,2)"), "\"' +SUM(1,2)\""); }
     #[test] fn clean_opt_preserves_nonempty_value_and_collapses_whitespace_only() { assert_eq!(clean_opt(Some(" +SUM".into())), Some(" +SUM".to_string())); assert_eq!(clean_opt(Some("  done  ".into())), Some("  done  ".to_string())); assert_eq!(clean_opt(Some("   ".into())), None); assert_eq!(clean_opt(Some("".into())), None); assert_eq!(clean_opt(None), None); }
+
+    // ----- TASK-024: the export command resolves deterministically (non-dialog logic) ---------
+    // The GUI deadlock fix (save dialog off the main thread) is validated by manual macOS smoke; the
+    // destination validation and write-failure paths the command relies on to *always resolve* are
+    // unit-testable and asserted here.
+
+    #[test]
+    fn validate_csv_destination_requires_csv_file_and_rejects_directories() {
+        // Wrong / missing extension → Err (surfaced to the user, never a hang).
+        assert!(validate_csv_destination(Path::new("/tmp/report.txt")).unwrap_err().contains(".csv"));
+        assert!(validate_csv_destination(Path::new("/tmp/report")).is_err());
+        // A directory whose name ends in .csv is rejected as a directory, not treated as a file.
+        let dir = tempfile::tempdir().unwrap();
+        let csv_named_dir = dir.path().join("bundle.csv");
+        std::fs::create_dir(&csv_named_dir).unwrap();
+        assert!(validate_csv_destination(&csv_named_dir).unwrap_err().contains("directory"));
+        // A plain .csv file path (extension ok, not a directory) is accepted.
+        assert!(validate_csv_destination(&dir.path().join("out.csv")).is_ok());
+    }
+
+    #[test]
+    fn export_csv_repo_surfaces_write_failure_as_error_not_a_hang() {
+        let c = conn();
+        let p = create_project_repo(&c, ProjectInput { name: "P".into(), notes: None }).unwrap();
+        create_entry_repo(&c, TimeEntryInput { project_id: p.id.clone(), date: "2026-03-01".into(), start_time: "09:00".into(), end_time: "10:00".into(), note: None }).unwrap();
+        // Destination under a directory that does not exist → fs::write fails; the error is returned
+        // (Err), proving a write failure resolves deterministically rather than hanging or panicking.
+        let bad = Path::new("/vire-nonexistent-dir-xyz/never/out.csv");
+        assert!(!export_csv_repo(&c, "2026-03-01".into(), "2026-03-01".into(), Some(p.id), bad).unwrap_err().is_empty());
+    }
 
     // ----- S-6: the manual import command is bounded ---------------------------------------
 
