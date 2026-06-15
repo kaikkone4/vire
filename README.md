@@ -13,6 +13,45 @@ npm install
 npm run tauri:dev
 ```
 
+## App runtime configuration (env)
+
+Vire reads its runtime configuration from **process environment variables** using `std::env::var`. It does **not** auto-load a `.env` file — you must export the variables into the shell that launches the app.
+
+### Quick start
+
+```sh
+cp .env.example .env
+# Edit .env: fill in VIRE_LANGFUSE_PUBLIC_KEY and VIRE_LANGFUSE_SECRET_KEY
+# (create keys in the Langfuse UI under Project settings → API keys)
+set -a; . ./.env; set +a
+npm run tauri:dev
+```
+
+### Variables
+
+| Variable | Default | Notes |
+|---|---|---|
+| `VIRE_LANGFUSE_BASE_URL` | `http://127.0.0.1:3000` | Local Docker loopback (DEC-020). Must be loopback when source is `local`. |
+| `VIRE_LANGFUSE_SOURCE` | `local` | `local` (Docker self-hosted) or `cloud` (explicit override only). |
+| `VIRE_LANGFUSE_ENVIRONMENTS` | `vire` | CSV list of Langfuse environments to import from. |
+| `VIRE_LANGFUSE_PUBLIC_KEY` | — | Required for import. Empty = no credentials. |
+| `VIRE_LANGFUSE_SECRET_KEY` | — | Required for import. Never commit. |
+| `VIRE_RUNTIME_LOG_PATH` | `~/.local/state/pi-observe/events.jsonl` | Optional. Explicit path to pi-observe session log. |
+| `VIRE_RUNTIME_ENV_MAP` | (empty) | Optional. CSV map of project token → Langfuse environment. |
+| `VIRE_RUNTIME_MATCH_SLOP_SECS` | `300` | Optional. Time-window slop for session/trace matching. |
+
+The app also accepts the bare `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` names as a fallback when the `VIRE_*` names are not set.
+
+### Two env files — different purposes
+
+| File | Configures | Tracks |
+|---|---|---|
+| `.env` (root, gitignored) | **Vire desktop app** — Langfuse URL, source, credentials, runtime observer | No (gitignored) |
+| `.env.example` (root) | Template for the above — safe defaults, empty secrets | Yes (tracked) |
+| `observability/langfuse/.env` | **Langfuse Docker server stack** — Postgres, ClickHouse, Redis, MinIO bootstrap, NextAuth secrets | No (gitignored) |
+
+Do not merge these files. The root `.env` holds settings the Vire app queries Langfuse with; the Docker-stack `.env` holds secrets the Langfuse server containers need to start.
+
 ## Build and run the packaged app
 
 Vire ships as a self-contained macOS application bundle that runs **without** a Vite dev server or
@@ -190,7 +229,7 @@ All service ports must be bound to `127.0.0.1` by default. Do not expose service
 
 1. Install Docker Desktop for macOS and ensure it is running.
 2. Bring up the existing loopback-bound stack in [`observability/langfuse/`](observability/langfuse/) (see its README and [docs/langfuse-local-setup.md](docs/langfuse-local-setup.md)); it already restricts bindings to `127.0.0.1`.
-3. Configure Vire's Langfuse settings to point to `http://127.0.0.1:3000` with your local API key/secret. Do not commit credentials.
+3. Copy `.env.example` → `.env`, fill in `VIRE_LANGFUSE_PUBLIC_KEY` and `VIRE_LANGFUSE_SECRET_KEY` with keys from the Langfuse UI (Project settings → API keys), then source into the shell: `set -a; . ./.env; set +a`. See [App runtime configuration (env)](#app-runtime-configuration-env). Do not commit `.env` or credentials.
 4. In Vire, confirm the Langfuse health status shows `healthy` before relying on AI trace totals.
 
 ### Availability and UX

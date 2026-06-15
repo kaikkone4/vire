@@ -5,6 +5,10 @@ src-tauri/gen/
 .DS_Store
 *.sqlite
 *.db
+# Local Vire app runtime env (root) — real values never committed
+/.env
+/.env.*
+!/.env.example
 # Local observability secrets/state
 observability/langfuse/.env
 observability/langfuse/.env.*
