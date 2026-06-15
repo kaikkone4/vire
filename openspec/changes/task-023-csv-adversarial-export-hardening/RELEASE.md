@@ -7,6 +7,7 @@
 - **Date:** 2026-06-15
 - **Product version baseline:** `0.1.0` (from `src-tauri/Cargo.toml`) · **Release tag:** `task-023/v0.1.1` (PATCH bugfix)
 - **Verdict:** RELEASE-READY (all three required declarations complete; signed tag deferred per L2 key policy)
+- **Gate chain:** SW-3 PASS (`a3d1a6a`) · SW-4 PASS (`63f5e10`) · SW-5 PASS (`63f5e10`) · SW-6 Docs PASS (`3730a50`) · SW-6 Release PASS (`274f71e`)
 
 ---
 
@@ -17,8 +18,9 @@
 | SW-3 | QA Engineer | **PASS** | `qa.md` | `a3d1a6a` (+ `63f5e10` docs) |
 | SW-4 | Code Reviewer | **PASS** | `review.md` | `63f5e10` |
 | SW-5 | Security Agent | **PASS** | `sec.md` | `63f5e10` |
+| SW-6 Docs | Documentation Engineer | **PASS** | `docs.md` | `3730a50` |
 
-SW-4 code review artifact committed at `63f5e10`. SW-3 QA and SW-5 security artifacts present in change directory. No L2 docs gate required for this change (behavioral delta is internal to the Rust core input layer; no user-visible command surface, IPC contract, or settings UI was altered).
+SW-4 code review artifact committed at `63f5e10`. SW-3 QA and SW-5 security artifacts present in change directory. SW-6 L2 docs gate committed at `3730a50`: README.md test description updated to include note-text fidelity coverage; `docs/` required no changes (formula neutralization and note verbatim storage are internal/security hardening behaviors with no operator action required).
 
 ---
 
