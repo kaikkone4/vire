@@ -36,7 +36,10 @@ The test suite covers project create/update/archive persistence and active filte
 3. Create a project, edit it, then archive it. Confirm archived projects disappear from active entry pickers but remain visible in all-project/report history.
 4. Add, edit, and delete a manual entry; deletion requires confirmation.
 5. Restart the app and confirm projects and entries persist.
-6. In Reports, choose a date range/project filter and export CSV to a selected local destination. Confirm the file contains only matching manual entries.
+6. In Reports, choose a date range/project filter and export CSV:
+   - **Success:** pick a writable `.csv` location and confirm — file is written, `Exported N entries.` alert appears, app stays responsive (no beachball).
+   - **Cancel:** open the save dialog and dismiss without choosing — no file is written, app returns to a fully responsive state with no endless loading.
+   - **Re-entry:** after a success or cancel, click Export CSV again — dialog opens and resolves normally (no stuck state from the prior run).
 
 ## Local Langfuse Docker stack
 
