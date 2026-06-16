@@ -583,6 +583,61 @@ fn session_id_is_surfaced_onto_normalized_evidence() {
     assert_eq!(ns, None, "absent sessionId stays NULL, never fabricated");
 }
 
+// ----- TASK-026: Test connection verdict is coarse and secret-free -------------------------
+
+fn assert_test_result_secret_free(result: &super::TestConnectionResult) {
+    let serialized = serde_json::to_string(result).unwrap();
+    for needle in ["sk-", "pk-", "canary", "Bearer", "Authorization", "password", "leak"] {
+        assert!(
+            !serialized.contains(needle),
+            "test-connection result must be secret-free, found {needle}"
+        );
+    }
+}
+
+#[test]
+fn test_connection_refuses_non_loopback_local_without_a_network_call() {
+    // local + off-host fails `validate_target` inside `ReqwestLangfuseApi::new`, so the verdict is
+    // produced with no socket opened (deterministic in CI).
+    let config = ImporterConfig::new(
+        "http://example.com:3000",
+        Source::Local,
+        vec!["vire".into()],
+        Some(Credentials {
+            public_key: "pk-canary".into(),
+            secret_key: Secret::new("sk-canary-secret"),
+        }),
+    );
+    let result = super::test_connection(config);
+    assert!(!result.ok);
+    assert_eq!(result.verdict, "invalid_config");
+    assert_test_result_secret_free(&result);
+}
+
+#[test]
+fn test_connection_verdicts_are_coarse_and_never_echo_the_error_message() {
+    use super::TestConnectionResult;
+    // The source ApiError message is deliberately secret-shaped; the verdict must NOT echo it.
+    let cases = [
+        (ApiErrorKind::Unavailable, "unavailable"),
+        (ApiErrorKind::Auth, "auth_or_network_error"),
+        (ApiErrorKind::RateLimited, "auth_or_network_error"),
+        (ApiErrorKind::Network, "auth_or_network_error"),
+        (ApiErrorKind::Indeterminate, "unknown"),
+    ];
+    for (kind, expected) in cases {
+        let error = ApiError::new(kind, "sk-leak-canary Authorization: Bearer pk-leak password");
+        let verdict = TestConnectionResult::from_api_error(&error);
+        assert!(!verdict.ok);
+        assert_eq!(verdict.verdict, expected);
+        assert_test_result_secret_free(&verdict);
+    }
+    let reachable = TestConnectionResult::reachable();
+    assert!(reachable.ok);
+    assert_eq!(reachable.verdict, "reachable");
+    assert_test_result_secret_free(&reachable);
+}
+
 // ----- snapshot ----------------------------------------------------------------------------
 
 #[test]

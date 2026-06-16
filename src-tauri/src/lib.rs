@@ -1,5 +1,6 @@
 mod langfuse;
 mod runtime_observer;
+mod settings;
 
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -190,7 +191,63 @@ async fn export_report_csv(app: tauri::AppHandle, state: State<'_, AppState>, st
 #[tauri::command]
 fn get_langfuse_source_health(state: State<AppState>) -> CmdResult<SourceHealthSnapshot> {
     let db = db_conn(&state)?;
-    langfuse::health_snapshot(&db)
+    // Settings-first; returns an explicit disabled snapshot (no probe, no Keychain) when off.
+    settings::source_health_snapshot(&db)
+}
+
+#[tauri::command]
+fn get_langfuse_settings(state: State<AppState>) -> CmdResult<settings::LangfuseSettings> {
+    let db = db_conn(&state)?;
+    settings::get_langfuse_settings_repo(&db, &settings::secret_store::KeyringSecretStore::new())
+}
+
+#[tauri::command]
+fn set_langfuse_settings(
+    state: State<AppState>,
+    input: settings::LangfuseSettingsInput,
+) -> CmdResult<settings::LangfuseSettings> {
+    let db = db_conn(&state)?;
+    settings::set_langfuse_settings_repo(
+        &db,
+        &settings::secret_store::KeyringSecretStore::new(),
+        input,
+    )
+}
+
+#[tauri::command]
+fn set_langfuse_secret(public_key: String, secret_key: String) -> CmdResult<()> {
+    settings::set_langfuse_secret_repo(
+        &settings::secret_store::KeyringSecretStore::new(),
+        public_key,
+        secret_key,
+    )
+}
+
+#[tauri::command]
+fn clear_langfuse_secret() -> CmdResult<()> {
+    settings::clear_langfuse_secret_repo(&settings::secret_store::KeyringSecretStore::new())
+}
+
+#[tauri::command]
+fn test_langfuse_connection(state: State<AppState>) -> CmdResult<langfuse::TestConnectionResult> {
+    // A disabled integration short-circuits to an explicit disabled verdict BEFORE any Keychain
+    // read or network probe (TASK-026): `test_connection_plan` only touches the secret store on the
+    // enabled `Probe` path. Resolve under the lock, then drop it before the bounded probe so the
+    // UI's DB is never held across the network call.
+    let config = {
+        let db = db_conn(&state)?;
+        match settings::test_connection_plan(&db, &settings::secret_store::KeyringSecretStore::new())? {
+            settings::TestConnectionPlan::Disabled => {
+                return Ok(langfuse::TestConnectionResult::disabled());
+            }
+            settings::TestConnectionPlan::Probe(config) => config,
+        }
+    };
+    run_bounded_result(
+        Duration::from_secs(TEST_CONNECTION_TIMEOUT_SECS),
+        TEST_CONNECTION_TIMEOUT_MSG,
+        move || Ok(langfuse::test_connection(config)),
+    )
 }
 
 /// Read-only runtime-reconciliation surface (TASK-022). Ingests the local coarse session log,
@@ -210,13 +267,20 @@ const IMPORT_TIMEOUT_SECS: u64 = 30;
 const IMPORT_TIMEOUT_MSG: &str =
     "Langfuse import did not complete within the time limit — AI usage and cost are unknown, not zero";
 
-/// Run blocking `work` on a dedicated OS thread (off the Tauri runtime) and wait at most `timeout`.
-/// Returns the work's result, or a secret-free timeout error if it does not finish in time. An
+/// Ceiling for the in-app Test connection probe (TASK-026), above the reqwest 15s request / 5s
+/// connect ceilings so a normal slow probe is not cut off, but a hang cannot freeze the UI.
+const TEST_CONNECTION_TIMEOUT_SECS: u64 = 20;
+const TEST_CONNECTION_TIMEOUT_MSG: &str =
+    "Langfuse test connection did not complete within the time limit";
+
+/// Run blocking `work` on a dedicated OS thread (off the Tauri runtime) and wait at most `timeout`,
+/// returning the work's result or a secret-free `timeout_msg` if it does not finish in time. An
 /// orphaned worker that finishes late just fails to send (the receiver is gone) and is bounded by
 /// the reqwest ceilings; it persists atomically (S-3) if it completes. No new health state is added.
-fn run_bounded<F>(timeout: Duration, work: F) -> CmdResult<()>
+fn run_bounded_result<T, F>(timeout: Duration, timeout_msg: &str, work: F) -> CmdResult<T>
 where
-    F: FnOnce() -> CmdResult<()> + Send + 'static,
+    F: FnOnce() -> CmdResult<T> + Send + 'static,
+    T: Send + 'static,
 {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -224,12 +288,28 @@ where
     });
     match rx.recv_timeout(timeout) {
         Ok(result) => result,
-        Err(_) => Err(IMPORT_TIMEOUT_MSG.to_string()),
+        Err(_) => Err(timeout_msg.to_string()),
     }
+}
+
+/// The unit-returning import wrapper: bound a manual import with the import timeout message.
+fn run_bounded<F>(timeout: Duration, work: F) -> CmdResult<()>
+where
+    F: FnOnce() -> CmdResult<()> + Send + 'static,
+{
+    run_bounded_result(timeout, IMPORT_TIMEOUT_MSG, work)
 }
 
 #[tauri::command]
 fn import_langfuse_now(state: State<AppState>) -> CmdResult<SourceHealthSnapshot> {
+    // Short-circuit a disabled integration before any network or Keychain access (TASK-026): no
+    // import runs and the snapshot reports an explicit disabled state, never zero.
+    {
+        let db = db_conn(&state)?;
+        if !settings::langfuse_enabled(&db) {
+            return settings::source_health_snapshot(&db);
+        }
+    }
     // Run the blocking REST import on a dedicated OS thread (off the Tauri runtime and off the UI's
     // database lock); it uses its own SQLite connection. Bound the wait so a hung import returns a
     // secret-free error instead of blocking the UI. Then read the resulting snapshot.
@@ -238,7 +318,7 @@ fn import_langfuse_now(state: State<AppState>) -> CmdResult<SourceHealthSnapshot
         langfuse::run_blocking_import(&db_path)
     })?;
     let db = db_conn(&state)?;
-    langfuse::health_snapshot(&db)
+    settings::source_health_snapshot(&db)
 }
 
 fn validate_csv_destination(path: &Path) -> Result<(), String> {
@@ -249,7 +329,7 @@ fn validate_csv_destination(path: &Path) -> Result<(), String> {
 fn db_path(app: &tauri::App) -> Result<PathBuf, std::io::Error> { let dir = app.path().app_data_dir().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Could not resolve Vire app data directory: {e}")))?; fs::create_dir_all(&dir)?; Ok(dir.join("vire.sqlite")) }
 pub fn run() {
     tauri::Builder::default().plugin(tauri_plugin_dialog::init()).setup(|app| { let path = db_path(app)?; let conn = Connection::open(&path)?; init_db(&conn)?; app.manage(AppState { db: Mutex::new(conn), db_path: path }); Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_capture_status,list_projects,create_project,update_project,archive_project,list_time_entries,create_time_entry,update_time_entry,delete_time_entry,get_summary,export_report_csv,get_langfuse_source_health,import_langfuse_now,get_runtime_reconciliation])
+        .invoke_handler(tauri::generate_handler![get_capture_status,list_projects,create_project,update_project,archive_project,list_time_entries,create_time_entry,update_time_entry,delete_time_entry,get_summary,export_report_csv,get_langfuse_source_health,import_langfuse_now,get_runtime_reconciliation,get_langfuse_settings,set_langfuse_settings,set_langfuse_secret,clear_langfuse_secret,test_langfuse_connection])
         .run(tauri::generate_context!()).expect("error while running Vire");
 }
 
@@ -320,6 +400,29 @@ mod tests {
         assert!(run_bounded(Duration::from_secs(5), || Ok(())).is_ok());
         let err = run_bounded(Duration::from_secs(5), || Err("import failed".to_string())).unwrap_err();
         assert_eq!(err, "import failed", "a normal failure is surfaced verbatim, not masked as a timeout");
+    }
+
+    // ----- TASK-026: the value-returning bounded wrapper backs test_langfuse_connection -------
+
+    #[test]
+    fn run_bounded_result_returns_a_value_within_the_ceiling() {
+        let v = run_bounded_result(Duration::from_secs(5), "unused", || Ok(42u32)).unwrap();
+        assert_eq!(v, 42);
+    }
+
+    #[test]
+    fn run_bounded_result_times_out_with_the_supplied_secret_free_message() {
+        let start = std::time::Instant::now();
+        let err = run_bounded_result::<u32, _>(Duration::from_millis(50), TEST_CONNECTION_TIMEOUT_MSG, || {
+            std::thread::sleep(Duration::from_millis(1500));
+            Ok(7)
+        })
+        .unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(1), "must not block past the ceiling");
+        assert_eq!(err, TEST_CONNECTION_TIMEOUT_MSG);
+        for needle in ["sk-", "pk-", "Bearer", "Authorization", "password"] {
+            assert!(!err.contains(needle), "timeout message must be secret-free");
+        }
     }
 }
 

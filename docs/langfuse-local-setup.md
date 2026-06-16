@@ -160,14 +160,22 @@ For the runtime log source path, privacy boundary, configuration env vars, and f
 
 ## Vire import endpoint configuration
 
-The importer reads its settings from environment variables at startup. Store credentials in a local `.env` file (gitignored) or in macOS Keychain — never in code or committed files.
+As of TASK-026 (DEC-026), the importer resolves its configuration **from the in-app Settings panel first**; process environment variables are retained only as a **clearly-marked developer fallback** for local dev / `.env`-sourced setups. The precedence order is:
+
+1. **In-app settings** (Settings → AI evidence import): base URL, source, environments, and `langfuse_enabled` are stored in the local SQLite `settings` table. The public key and secret key are stored in the **macOS Keychain** (service `dev.vire.app`) — never in SQLite, never in plaintext.
+2. **Process environment variables** (dev fallback — see table below): used only when the matching in-app setting is absent. Credentials from env are demoted to fallback; clear or replace them in-app once in-app settings are configured.
+3. **Code defaults**: loopback `http://127.0.0.1:3000`, `source=local`, `environments=vire`.
+
+The in-app Settings panel is the correct path for all normal usage. Env vars remain valid for local development workflows (e.g. `set -a; . ./.env; set +a` before `npm run tauri:dev`) but are not required once in-app settings are saved.
+
+**Developer fallback env vars** (used only when the in-app setting is absent):
 
 | Setting | Default | Env var | Notes |
 |---|---|---|---|
 | Base URL | `http://127.0.0.1:3000` | `VIRE_LANGFUSE_BASE_URL` | Local loopback; change only for an explicit Cloud override |
 | Source posture | `local` | `VIRE_LANGFUSE_SOURCE` | `local` (default) or `cloud` (explicit override — produces off-host egress) |
 | Allowed environments | `vire` | `VIRE_LANGFUSE_ENVIRONMENTS` | Comma-separated list; start with `vire`, add others as needed |
-| API public key | — | `VIRE_LANGFUSE_PUBLIC_KEY` (fallback: `LANGFUSE_PUBLIC_KEY`) | Never committed, logged, or exported |
-| API secret key | — | `VIRE_LANGFUSE_SECRET_KEY` (fallback: `LANGFUSE_SECRET_KEY`) | Never committed, logged, or exported |
+| API public key | — | `VIRE_LANGFUSE_PUBLIC_KEY` (fallback: `LANGFUSE_PUBLIC_KEY`) | Never committed, logged, or exported; overridden by Keychain when set in-app |
+| API secret key | — | `VIRE_LANGFUSE_SECRET_KEY` (fallback: `LANGFUSE_SECRET_KEY`) | Never committed, logged, or exported; overridden by Keychain when set in-app |
 
-Langfuse Cloud (`https://cloud.langfuse.com`) is supported as an explicit non-default override only. Set `VIRE_LANGFUSE_SOURCE=cloud` and `VIRE_LANGFUSE_BASE_URL=https://cloud.langfuse.com` together; omitting either leaves the importer at the local Docker default.
+Langfuse Cloud (`https://cloud.langfuse.com`) is supported as an explicit non-default override only. Set source to `cloud` and base URL to `https://cloud.langfuse.com` in the in-app settings (or via `VIRE_LANGFUSE_SOURCE=cloud` + `VIRE_LANGFUSE_BASE_URL=https://cloud.langfuse.com` as dev fallback); omitting either leaves the importer at the local Docker default.

@@ -13,10 +13,11 @@ use std::path::Path;
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
 use rusqlite::Connection;
 
-use api::ReqwestLangfuseApi;
+use api::{LangfuseApi, ReqwestLangfuseApi};
 use config::ImporterConfig;
-use model::ImportWindow;
-use store::SourceHealthSnapshot;
+use model::{ApiError, HealthState, ImportWindow};
+
+use crate::settings::secret_store::KeyringSecretStore;
 
 /// Default look-back window for a manual import (last 7 days, UTC, RFC3339).
 pub fn recent_window(days: i64) -> ImportWindow {
@@ -36,7 +37,11 @@ pub fn recent_window(days: i64) -> ImportWindow {
 pub fn run_blocking_import(db_path: &Path) -> Result<(), String> {
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     store::migrate(&conn).map_err(|e| e.to_string())?;
-    let config = ImporterConfig::from_env();
+    // Settings-first resolution (TASK-026): stored settings + Keychain credentials win; process env
+    // is the marked dev fallback. The Keychain read is on this dedicated import thread, off the UI.
+    // A genuine Keychain read failure propagates a coarse, secret-free error rather than silently
+    // resolving to no/partial credentials.
+    let config = crate::settings::resolve_config(&conn, &KeyringSecretStore::new())?;
     let api = ReqwestLangfuseApi::new(config.clone()).map_err(|e| e.message)?;
     let window = recent_window(7);
     let summaries = importer::run_import(&api, &conn, &config, &window);
@@ -60,10 +65,82 @@ fn import_result(summaries: &[importer::ImportSummary]) -> Result<(), String> {
     Ok(())
 }
 
-/// Read-only health snapshot from persisted state plus the public (non-secret) config.
-pub fn health_snapshot(conn: &Connection) -> Result<SourceHealthSnapshot, String> {
-    let config = ImporterConfig::public_from_env();
-    store::source_health_snapshot(conn, &config)
+/// Coarse, secret-free verdict for the in-app **Test connection** action (TASK-026). Reports only
+/// whether the configured endpoint is reachable and the credentials authenticate — never a secret,
+/// raw response body, or stack-internal detail.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TestConnectionResult {
+    pub ok: bool,
+    pub verdict: String,
+    pub message: String,
+}
+
+impl TestConnectionResult {
+    fn reachable() -> Self {
+        TestConnectionResult {
+            ok: true,
+            verdict: "reachable".into(),
+            message: "Langfuse is reachable and the credentials authenticated.".into(),
+        }
+    }
+
+    fn invalid_config(message: impl Into<String>) -> Self {
+        TestConnectionResult {
+            ok: false,
+            verdict: "invalid_config".into(),
+            message: message.into(),
+        }
+    }
+
+    /// The integration is disabled: report an explicit, secret-free `disabled` verdict. The caller
+    /// reaches this **without** resolving credentials or opening a socket, so no Keychain read or
+    /// network probe occurs while disabled. Mirrors the disabled health snapshot's posture — a
+    /// disabled integration is an explicit state, never "reachable" or zero.
+    pub fn disabled() -> Self {
+        TestConnectionResult {
+            ok: false,
+            verdict: "disabled".into(),
+            message: "Langfuse integration is disabled — enable it to test the connection.".into(),
+        }
+    }
+
+    /// Map a probe failure to a coarse verdict. The source `ApiError::message` is secret-free by
+    /// construction (`langfuse/api.rs`), but we emit our own stable strings here regardless.
+    fn from_api_error(error: &ApiError) -> Self {
+        let (verdict, message) = match error.health() {
+            HealthState::Unavailable => (
+                "unavailable",
+                "Could not reach Langfuse — the local stack appears to be down.",
+            ),
+            HealthState::AuthOrNetworkError => (
+                "auth_or_network_error",
+                "Langfuse rejected the credentials or could not be reached (auth or network).",
+            ),
+            _ => (
+                "unknown",
+                "Langfuse returned an unexpected response — connection state is unknown.",
+            ),
+        };
+        TestConnectionResult {
+            ok: false,
+            verdict: verdict.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Run a single read-only availability probe against the resolved config and return a coarse
+/// verdict. A non-loopback `local` target (SEC-002) is refused before any network call. Intended to
+/// be called inside the bounded `run_bounded` pattern so a hung probe cannot freeze the UI.
+pub fn test_connection(config: ImporterConfig) -> TestConnectionResult {
+    let api = match ReqwestLangfuseApi::new(config) {
+        Ok(api) => api,
+        Err(error) => return TestConnectionResult::invalid_config(error.message),
+    };
+    match api.probe() {
+        Ok(()) => TestConnectionResult::reachable(),
+        Err(error) => TestConnectionResult::from_api_error(&error),
+    }
 }
 
 #[cfg(test)]

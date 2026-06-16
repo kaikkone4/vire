@@ -306,6 +306,24 @@ pub fn source_health_snapshot(
     })
 }
 
+/// Snapshot for a disabled integration (TASK-026): no import runs and no probe fires when
+/// `langfuse_enabled = false`. Carries the non-secret config for display and an explicit `disabled`
+/// state — never a zero AI usage/cost (absence-≠-zero invariant). Built from public config only;
+/// no credentials are read.
+pub fn disabled_snapshot(config: &ImporterConfig) -> SourceHealthSnapshot {
+    SourceHealthSnapshot {
+        base_url: config.base_url.clone(),
+        source: config.source.as_str().to_string(),
+        environments: config.allowed_environments.clone(),
+        last_import_at: None,
+        latest_trace_ts: None,
+        health: "disabled".to_string(),
+        message: "Langfuse integration is turned off — enable it in Settings to import AI evidence. \
+                  Disabled is not zero AI usage or cost."
+            .to_string(),
+    }
+}
+
 fn snapshot_message(health: HealthState) -> String {
     match health {
         HealthState::Healthy => "Langfuse AI evidence is current.",
