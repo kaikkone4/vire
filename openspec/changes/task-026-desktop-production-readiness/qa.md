@@ -198,6 +198,75 @@ All three SW-4 blockers resolved. All 93 Rust tests pass. 39 frontend tests pass
 
 ---
 
+## SW-4 Blocker Recheck #2 — 2026-06-16 (atomic Keychain pair rollback)
+
+Re-run after commit `935877f` (atomic Keychain credential pair fix). Branch: `feat/task-026-desktop-production-readiness`.
+
+### Change verified
+
+**Remaining SW-4 blocker — failed replacement must restore prior pair, never mix env public key with old Keychain secret**
+
+Prior implementation on a failed secret write unconditionally `delete`d the public-key entry. On a *replacement* (both entries already present), this left the old secret surviving beside a deleted public key — `resolve_credentials` would then fill the missing public key from the `VIRE_LANGFUSE_PUBLIC_KEY` / `LANGFUSE_PUBLIC_KEY` env fallback, producing a mixed-source Keychain/env pair.
+
+Fix (`settings/mod.rs:295–313`):
+- Before writing the new public key, `prior_public_key = secrets.get(PUBLIC_KEY_ACCOUNT)` is captured.
+- On a failed secret write, the rollback branches on `prior_public_key`:
+  - `Some(prior)` → `secrets.set(PUBLIC_KEY_ACCOUNT, &prior)` reinstates the prior consistent pair.
+  - `None` → `secrets.delete(PUBLIC_KEY_ACCOUNT)` removes the just-written entry (back to both absent, original "first-write" path).
+- The pair is always left consistent: both new, or both prior — never one replaced and one stale.
+
+The original `secret_write_failure_rolls_back_the_public_key_write` test (first-write, no prior entry) continues to cover the `None` branch (still passes).
+
+New regression test covering the replacement path:
+
+| Test | File | Result |
+|---|---|---|
+| `failed_replacement_restores_the_prior_pair_and_never_mixes_keychain_with_env` | `settings/tests.rs:443` | ✅ PASS |
+
+Proof mechanism: the test seeds P_OLD/S_OLD directly in the store's backing map; calls `set_langfuse_secret_repo` with P_NEW/S_NEW (secret write always fails in `SecretWriteFailsStore`); asserts both entries remain P_OLD/S_OLD; then calls `resolve_config_with` with env containing `pk-env-must-not-be-used` and asserts `creds.public_key == P_OLD` and `creds.public_key != "pk-env-must-not-be-used"`. The env fallback is conclusively blocked.
+
+### Scenario coverage addition
+
+| Criterion | Test | Status |
+|---|---|---|
+| Failed replacement restores prior public key (prior pair, not first-write) | `failed_replacement_restores_the_prior_pair_and_never_mixes_keychain_with_env` | ✅ |
+| Resolver uses Keychain-restored public key, not env fallback, after failed replacement | (same test — decisive assertion) | ✅ |
+| Env public key cannot pair with surviving Keychain secret after failed replacement | (same test — `assert_ne!(creds.public_key, "pk-env-must-not-be-used")`) | ✅ |
+
+### Recheck test run results
+
+**Rust (`cargo test --manifest-path src-tauri/Cargo.toml`)**
+
+**94 passed / 0 failed** (was 93; +1 regression test: `failed_replacement_restores_the_prior_pair_and_never_mixes_keychain_with_env`).
+
+**Frontend (`npm run test:frontend`)**
+
+**39 passed / 2 failed** — identical to prior recheck. The 2 failures remain in `tests/pi-observe.security.test.mjs`, unchanged from main, classified pre-existing and out of TASK-026 scope.
+
+### Re-verification of all focus areas
+
+| Focus area | Test(s) | Status |
+|---|---|---|
+| Atomic pair: failed replacement restores prior public key | `failed_replacement_restores_the_prior_pair_and_never_mixes_keychain_with_env` | ✅ |
+| Atomic pair: cannot mix env public key with old Keychain secret | Same test — `assert_ne!(creds.public_key, "pk-env-must-not-be-used")` | ✅ |
+| Disabled Test connection: no Keychain/network access (tripwire) | `disabled_test_connection_plan_short_circuits_without_touching_the_secret_store` | ✅ |
+| Keychain read errors: coarse error, no env fallback | `keychain_read_failure_is_propagated_not_masked_as_missing_credentials` | ✅ |
+| Keychain read errors: test_connection_plan blocked before probe | `keychain_read_failure_blocks_the_test_connection_plan_before_a_probe` | ✅ |
+| SEC-009: no secret in settings table | `secret_is_never_written_to_the_settings_table` | ✅ |
+| SEC-009: Debug stays redacted | `settings_sourced_credentials_stay_redacted_in_debug` | ✅ |
+| SEC-009: malformed URL error is secret-free | `set_rejects_a_malformed_base_url_with_a_secret_free_error` | ✅ |
+| Package: icon set present (5 entries, icon.icns included) | `ls src-tauri/icons/` | ✅ |
+| Package: `bundle.icon` 5 entries in tauri.conf.json | `tauri.conf.json:19-25` | ✅ |
+| Package: capabilities/default.json unchanged (no new permissions) | `git diff main..HEAD -- capabilities/default.json` (empty diff) | ✅ |
+| Package: CSP unchanged | `tauri.conf.json:14` `connect-src ipc: http://ipc.localhost` | ✅ |
+| Docs: README packaging, icon replacement, rollback paths | `README.md:29-83` | ✅ |
+
+### Recheck verdict
+
+Remaining SW-4 blocker resolved. All 94 Rust tests pass (+1 regression test). 39 frontend tests pass. No new findings. Pre-existing `pi-observe` failures unchanged and out of scope.
+
+---
+
 ## Gate verdict
 
 **QA STATUS: pass** → route to SW-4 (Code Reviewer) and SW-5 (Security Agent) in parallel.
