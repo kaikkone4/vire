@@ -115,8 +115,8 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 impl ImporterConfig {
-    /// Construct from explicit values (used by tests and by `from_env`). Credentials are
-    /// optional so a not-yet-configured install still resolves a health state rather than
+    /// Construct from explicit values (used by tests and by the settings/env resolvers). Credentials
+    /// are optional so a not-yet-configured install still resolves a health state rather than
     /// crashing — a missing/invalid key surfaces as `auth_or_network_error`, never zero cost.
     pub fn new(
         base_url: impl Into<String>,
@@ -132,8 +132,10 @@ impl ImporterConfig {
         }
     }
 
-    /// Load public (non-secret) configuration: base URL, source, environments. Never reads or
-    /// returns credential material — safe to feed into the read-only health snapshot.
+    /// Load public (non-secret) configuration from env: base URL, source, environments. Never reads
+    /// or returns credential material. Retained for the runtime observer's environment list; the
+    /// importer itself now resolves config settings-first via `crate::settings` (TASK-026), with
+    /// these env vars demoted to the marked dev fallback.
     pub fn public_from_env() -> Self {
         let base_url =
             env_nonempty("VIRE_LANGFUSE_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
@@ -141,24 +143,6 @@ impl ImporterConfig {
             .map(|s| Source::parse(&s))
             .unwrap_or(Source::Local);
         Self::new(base_url, source, env_environments(), None)
-    }
-
-    /// Full configuration including credentials, for an actual import run. Credentials are read
-    /// from environment variables only (`VIRE_LANGFUSE_PUBLIC_KEY` / `_SECRET_KEY`, falling back
-    /// to `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`). No shell sourcing; values never logged.
-    pub fn from_env() -> Self {
-        let mut config = Self::public_from_env();
-        let public_key = env_nonempty("VIRE_LANGFUSE_PUBLIC_KEY")
-            .or_else(|| env_nonempty("LANGFUSE_PUBLIC_KEY"));
-        let secret_key = env_nonempty("VIRE_LANGFUSE_SECRET_KEY")
-            .or_else(|| env_nonempty("LANGFUSE_SECRET_KEY"));
-        if let (Some(public_key), Some(secret_key)) = (public_key, secret_key) {
-            config.credentials = Some(Credentials {
-                public_key,
-                secret_key: Secret::new(secret_key),
-            });
-        }
-        config
     }
 
     pub fn parsed_base(&self) -> Result<Url, ConfigError> {
