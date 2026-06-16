@@ -13,12 +13,73 @@ npm install
 npm run tauri:dev
 ```
 
-## Build
+## Build and run the packaged app
+
+Vire ships as a self-contained macOS application bundle that runs **without** a Vite dev server or
+`npm run tauri:dev` at runtime. The packaged app loads its frontend from the bundled production assets
+(`frontendDist: ../dist`, built by `beforeBuildCommand: npm run build`).
 
 ```sh
 npm install
 npm run tauri:build
 ```
+
+### Artifact location
+
+`npm run tauri:build` writes the bundle under `src-tauri/target/release/bundle/`:
+
+| Artifact | Path |
+|---|---|
+| App bundle | `src-tauri/target/release/bundle/macos/Vire.app` |
+| Disk image (where the toolchain supports it) | `src-tauri/target/release/bundle/dmg/Vire_0.1.0_<arch>.dmg` |
+
+### Install and run
+
+1. Build with `npm run tauri:build`.
+2. Open `src-tauri/target/release/bundle/macos/Vire.app` directly, or mount the `.dmg` and drag
+   `Vire.app` into `/Applications`, then launch it.
+3. **No dev server is required at runtime** — do not run `npm run dev` / `npm run tauri:dev` to use the
+   packaged app. The bundled assets are served from inside the `.app`.
+4. **Langfuse configuration comes from in-app settings** (Settings → AI evidence import): base URL,
+   source (local/cloud), environments, public/secret key, and the enable switch. The secret key is
+   stored in the macOS Keychain, never in plaintext. AI trace import additionally requires the local
+   Langfuse Docker stack to be running (see below); a down stack is reported as unavailable, never as
+   zero AI usage or cost.
+
+> The build is a local prototype: it is **not** code-signed or notarized. On first launch macOS
+> Gatekeeper may require right-click → Open (or *System Settings → Privacy & Security → Open Anyway*).
+> Signing/notarization is out of scope for v0.1.
+
+### Application icon
+
+The app ships a Vire icon (Dock and app switcher) generated into `src-tauri/icons/` and referenced by
+`bundle.icon` in `src-tauri/tauri.conf.json`. The current mark is a **temporary placeholder** — brand
+owns the final asset (`artifacts/brand/` is read-only to engineering).
+
+To replace it with a branded asset — **no code change required**:
+
+1. Drop a branded PNG (≥1024×1024, square) at `src-tauri/icons/source/vire-icon.png`.
+2. Regenerate the icon set: `npx tauri icon src-tauri/icons/source/vire-icon.png`.
+3. Rebuild: `npm run tauri:build`.
+
+The placeholder source PNG is produced by a dependency-free generator
+(`src-tauri/icons/source/generate-vire-mark.mjs`, run with `node`) so the temporary mark is
+reproducible until the branded asset lands.
+
+### Release compatibility and rollback (for SW-6 `RELEASE.md`)
+
+This build is forward/backward compatible with prior Vire builds on the same Mac:
+
+- **Data:** the packaged app uses the same local database, `app_data_dir()/vire.sqlite`, as the dev and
+  prior builds. `init_db` is idempotent (`CREATE TABLE IF NOT EXISTS` + `INSERT OR IGNORE`), and the new
+  Langfuse configuration persists as **additive rows in the existing key/value `settings` table** — no
+  schema change to `projects`/`time_entries`, no destructive migration.
+- **Secrets:** the Langfuse secret/public key live in app-scoped macOS Keychain entries (service
+  `dev.vire.app`). They persist across reinstall and are **not** bundled in the artifact.
+- **Rollback:** reverting to the immediately prior build opens the same `vire.sqlite` and ignores the
+  unknown additive `settings` rows (key/value table, no schema dependency) → **no data loss, no
+  destructive migration**. A prior build simply falls back to environment variables (`VIRE_LANGFUSE_*`)
+  for Langfuse config, which remain a marked dev fallback.
 
 ## Tests
 
