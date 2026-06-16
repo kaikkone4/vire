@@ -66,7 +66,7 @@ The placeholder source PNG is produced by a dependency-free generator
 (`src-tauri/icons/source/generate-vire-mark.mjs`, run with `node`) so the temporary mark is
 reproducible until the branded asset lands.
 
-### Release compatibility and rollback (for SW-6 `RELEASE.md`)
+### Release compatibility and rollback (see also [RELEASE.md](RELEASE.md))
 
 This build is forward/backward compatible with prior Vire builds on the same Mac:
 
@@ -92,6 +92,8 @@ The test suite covers project create/update/archive persistence and active filte
 
 ## Manual verification
 
+### Dev mode (quick sanity)
+
 1. Launch with `npm run tauri:dev` and confirm the sidebar includes Today, Projects, Manual Entry, Reports, and Settings.
 2. Confirm the Today/Settings capture status says `Manual Mode / Capture deferred` and there are no automatic capture controls.
 3. Create a project, edit it, then archive it. Confirm archived projects disappear from active entry pickers but remain visible in all-project/report history.
@@ -101,6 +103,22 @@ The test suite covers project create/update/archive persistence and active filte
    - **Success:** pick a writable `.csv` location and confirm — file is written, `Exported N entries.` alert appears, app stays responsive (no beachball).
    - **Cancel:** open the save dialog and dismiss without choosing — no file is written, app returns to a fully responsive state with no endless loading.
    - **Re-entry:** after a success or cancel, click Export CSV again — dialog opens and resolves normally (no stuck state from the prior run).
+
+### Packaged app and Langfuse settings (TASK-026 — required before release)
+
+These steps require a macOS build; Keychain-backed paths cannot be verified in CI.
+
+1. **Build the packaged app:** `npm run tauri:build` — confirm it completes without error.
+2. **Launch the `.app` directly** from `src-tauri/target/release/bundle/macos/Vire.app` (no `npm run tauri:dev`). Confirm the Vire icon appears in the Dock and app switcher — not the generic default.
+3. **Gatekeeper:** on first launch macOS may block the unsigned app — right-click → Open (or *System Settings → Privacy & Security → Open Anyway*).
+4. **Settings → Langfuse integration panel:** confirm the panel is visible with base URL, source, environments, and the enable toggle.
+5. **Save non-secret settings:** change the base URL / environments and click Save. Quit and relaunch — confirm the values persisted (SQLite round-trip).
+6. **Credentials (no read-back):** enter a public key and secret key, click Save credentials. Confirm the form shows `set` flags — it must never display the stored values back.
+7. **Keychain verify:** open macOS **Keychain Access.app** and confirm two entries exist under service `dev.vire.app` (accounts `langfuse_public_key`, `langfuse_secret_key`).
+8. **Test connection:** with integration enabled and credentials set, click **Test connection**. Confirm a coarse verdict appears (`reachable` / `auth_or_network_error`) — no secret value or raw error body in the result. If the local Langfuse stack is not running, expect `auth_or_network_error` or `unavailable` — never an empty/frozen UI.
+9. **Test connection disabled guard:** turn the integration toggle off and save. Confirm the Test connection button is disabled (with tooltip). Confirm "Import from Langfuse now" is also disabled.
+10. **Clear credentials:** click Clear credentials → confirm both keys show `not set`. A subsequent import attempt reports `auth_or_network_error`, never zero AI usage or cost.
+11. **Rollback smoke (if a prior build is available):** open a prior Vire build on the same Mac — confirm the DB loads, the unknown additive `settings` rows are silently ignored, and no crash or data loss occurs.
 
 ## Local Langfuse Docker stack
 
