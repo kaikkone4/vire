@@ -25,6 +25,12 @@ struct MockApi {
     pages: HashMap<String, Vec<Vec<Value>>>,
     observations: HashMap<String, Vec<Observation>>,
     traces_err: HashMap<String, ApiError>,
+    /// Pages returned by the discovery scan (`get_traces_any_env`) — the no-environment-filter
+    /// view that spans every environment. Independent of `pages` so a test can model a list that
+    /// crosses environments without the per-environment filter.
+    any_env_pages: Vec<Vec<Value>>,
+    /// Optional error for the discovery scan, to model a failed (best-effort) discovery.
+    any_env_err: Option<ApiError>,
     calls: RefCell<Vec<String>>,
 }
 
@@ -62,6 +68,36 @@ impl LangfuseApi for MockApi {
         let pages = self.pages.get(environment).cloned().unwrap_or_default();
         let total_pages = pages.len() as u32;
         let data = pages.get((page.saturating_sub(1)) as usize).cloned().unwrap_or_default();
+        Ok(TracePage {
+            data,
+            meta: super::model::PageMeta {
+                page,
+                limit,
+                total_items: 0,
+                total_pages,
+            },
+        })
+    }
+
+    fn get_traces_any_env(
+        &self,
+        _from: &str,
+        _to: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<TracePage, ApiError> {
+        self.calls
+            .borrow_mut()
+            .push(format!("get_traces_any_env:{page}"));
+        if let Some(e) = &self.any_env_err {
+            return Err(e.clone());
+        }
+        let total_pages = self.any_env_pages.len() as u32;
+        let data = self
+            .any_env_pages
+            .get((page.saturating_sub(1)) as usize)
+            .cloned()
+            .unwrap_or_default();
         Ok(TracePage {
             data,
             meta: super::model::PageMeta {
@@ -1098,4 +1134,96 @@ fn import_report_is_secret_free() {
             "import report must be secret-free (SEC-010), found {needle}"
         );
     }
+}
+
+// ----- TASK-027 C: environment discovery (read-only, distinct names, secret-free) -----------
+
+#[test]
+fn discovery_collects_distinct_non_empty_environments_across_pages() {
+    // A no-environment-filter scan that spans three environments across two pages, with one repeat
+    // and one empty-name trace. Discovery must return the sorted distinct non-empty set.
+    let mut api = MockApi::default();
+    api.any_env_pages = vec![
+        vec![
+            trace_with_generation("A", "vire", "2026-06-05T00:00:00Z", 1.0, 10),
+            trace_with_generation("B", "default", "2026-06-05T00:00:00Z", 1.0, 10),
+        ],
+        vec![
+            // `staging` is new; `vire` repeats (must dedup); the empty-name trace contributes nothing.
+            trace_with_generation("C", "staging", "2026-06-06T00:00:00Z", 1.0, 10),
+            trace_with_generation("D", "vire", "2026-06-06T00:00:00Z", 1.0, 10),
+            trace_with_generation("E", "", "2026-06-06T00:00:00Z", 1.0, 10),
+        ],
+    ];
+    let envs = super::discovery::discover_environments(&api, &window()).unwrap();
+    assert_eq!(
+        envs,
+        vec!["default".to_string(), "staging".to_string(), "vire".to_string()],
+        "distinct, non-empty, sorted environments"
+    );
+    // Discovery uses only the no-filter read path — never the per-environment `get_traces`.
+    assert!(api
+        .calls
+        .borrow()
+        .iter()
+        .all(|c| c.starts_with("get_traces_any_env:")));
+}
+
+#[test]
+fn discovery_returns_empty_when_no_traces_and_errors_propagate() {
+    // No pages → empty set (not an error, not a fabricated environment).
+    let api = MockApi::default();
+    assert!(super::discovery::discover_environments(&api, &window()).unwrap().is_empty());
+
+    // A transport/API failure aborts with Err so the caller can treat discovery as best-effort.
+    let mut failing = MockApi::default();
+    failing.any_env_err = Some(ApiError::new(ApiErrorKind::Unavailable, "down"));
+    assert!(super::discovery::discover_environments(&failing, &window()).is_err());
+}
+
+#[test]
+fn discovered_environments_persist_additively_with_last_seen() {
+    let c = conn();
+    store::upsert_discovered_environment(&c, "vire", "2026-06-05T00:00:00Z").unwrap();
+    store::upsert_discovered_environment(&c, "default", "2026-06-05T00:00:00Z").unwrap();
+    // Re-seeing `vire` later advances last_seen but never duplicates the row or moves first_seen.
+    store::upsert_discovered_environment(&c, "vire", "2026-06-07T00:00:00Z").unwrap();
+
+    let rows = store::list_discovered_environments(&c).unwrap();
+    assert_eq!(rows.len(), 2, "idempotent on environment — no duplicate row");
+    let vire = rows.iter().find(|r| r.environment == "vire").unwrap();
+    assert_eq!(vire.first_seen, "2026-06-05T00:00:00Z", "first_seen is preserved");
+    assert_eq!(vire.last_seen, "2026-06-07T00:00:00Z", "last_seen advances on re-discovery");
+}
+
+#[test]
+fn discovery_url_keeps_the_allowlist_and_loopback_gate_without_an_env_param() {
+    // The discovery path is still rooted under /api/public/traces on the loopback host, and carries
+    // NO `environment` query param (that filter is what discovery drops to span all environments).
+    let config = local_vire();
+    let url = config
+        .build_url(&ApiPath::TracesAllEnvironments {
+            from: "2026-06-01T00:00:00Z",
+            to: "2026-06-10T00:00:00Z",
+            page: 1,
+            limit: 50,
+        })
+        .unwrap();
+    assert_eq!(url.host_str(), Some("127.0.0.1"));
+    assert_eq!(url.scheme(), "http");
+    assert!(url.path().starts_with("/api/public/traces"));
+    let query = url.query().unwrap();
+    assert!(!query.contains("environment="), "discovery omits the environment filter");
+    assert!(query.contains("fromTimestamp="));
+
+    // A non-loopback `local` target is refused for discovery exactly as for trace import (SEC-002).
+    let off_host = ImporterConfig::new("http://example.com:3000", Source::Local, vec!["vire".into()], None);
+    assert!(off_host
+        .build_url(&ApiPath::TracesAllEnvironments {
+            from: "x",
+            to: "y",
+            page: 1,
+            limit: 50,
+        })
+        .is_err());
 }

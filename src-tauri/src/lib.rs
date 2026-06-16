@@ -1,3 +1,4 @@
+mod env_mapping;
 mod langfuse;
 mod runtime_observer;
 mod settings;
@@ -5,7 +6,7 @@ mod settings;
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::{Path, PathBuf}, sync::{mpsc, Mutex, MutexGuard}, time::Duration};
+use std::{fs, path::{Path, PathBuf}, sync::{mpsc, Arc, Mutex, MutexGuard, TryLockError}, time::Duration};
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
@@ -13,7 +14,7 @@ use uuid::Uuid;
 use langfuse::store::SourceHealthSnapshot;
 use runtime_observer::model::RuntimeReconciliationSnapshot;
 
-struct AppState { db: Mutex<Connection>, db_path: PathBuf }
+struct AppState { db: Mutex<Connection>, db_path: PathBuf, import_lock: Arc<Mutex<()>> }
 
 type CmdResult<T> = Result<T, String>;
 
@@ -55,6 +56,8 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         INSERT OR IGNORE INTO settings(key, value) VALUES ('capture_status', 'manual_mode_deferred');
         CREATE INDEX IF NOT EXISTS idx_entries_date_project ON time_entries(date, project_id);")?;
     langfuse::store::migrate(conn)?;
+    // Additive env→project map; created after `projects` exists so its FK resolves (TASK-027 D1).
+    env_mapping::migrate(conn)?;
     runtime_observer::store::migrate(conn)
 }
 
@@ -260,6 +263,44 @@ fn get_runtime_reconciliation(state: State<AppState>) -> CmdResult<RuntimeReconc
     runtime_observer::observe_and_reconcile(&db)
 }
 
+// ----- TASK-027 D: environment → project mapping (secret-free surfaces) ----------------------
+
+/// Discovered environments with their mapping state, so the UI can render mapped / unmapped /
+/// suggest-create per environment. Secret-free: env names + project refs + state only.
+#[tauri::command]
+fn list_discovered_environments(state: State<AppState>) -> CmdResult<Vec<env_mapping::DiscoveredEnvState>> {
+    let db = db_conn(&state)?;
+    env_mapping::list_discovered_environments_repo(&db)
+}
+
+#[tauri::command]
+fn list_env_mappings(state: State<AppState>) -> CmdResult<Vec<env_mapping::EnvMapping>> {
+    let db = db_conn(&state)?;
+    env_mapping::list_env_mappings_repo(&db)
+}
+
+/// Map an environment to an **existing** project. Never creates a project (DEC-006): the renderer
+/// calls `create_project` first when the user accepts the suggestion, then maps the new project here.
+#[tauri::command]
+fn set_env_mapping(state: State<AppState>, environment: String, project_id: String) -> CmdResult<env_mapping::EnvMapping> {
+    let db = db_conn(&state)?;
+    env_mapping::set_env_mapping_repo(&db, environment, project_id)
+}
+
+#[tauri::command]
+fn clear_env_mapping(state: State<AppState>, environment: String) -> CmdResult<()> {
+    let db = db_conn(&state)?;
+    env_mapping::clear_env_mapping_repo(&db, environment)
+}
+
+/// Imported AI evidence associated with its mapped project at read time (D3). The join is performed
+/// on read — no evidence row is rewritten. Secret-free: env names, trace ids, project refs only.
+#[tauri::command]
+fn list_evidence_projects(state: State<AppState>) -> CmdResult<Vec<env_mapping::EvidenceProject>> {
+    let db = db_conn(&state)?;
+    env_mapping::list_evidence_projects_repo(&db)
+}
+
 /// Ceiling for a manual import, comfortably above the reqwest 15s request / 5s connect ceilings so a
 /// normal slow import is not cut off, but an indefinite hang (dependency deadlock, lock contention)
 /// cannot block the UI forever (S-6).
@@ -272,6 +313,69 @@ const IMPORT_TIMEOUT_MSG: &str =
 const TEST_CONNECTION_TIMEOUT_SECS: u64 = 20;
 const TEST_CONNECTION_TIMEOUT_MSG: &str =
     "Langfuse test connection did not complete within the time limit";
+
+// ----- TASK-027 B: automatic import (startup + periodic), serialized with the manual path -------
+
+/// Default interval between background imports. Configurable via `VIRE_LANGFUSE_AUTO_IMPORT_INTERVAL_SECS`
+/// (a marked ops/dev override, floored at 30s so it can never hammer the source).
+const AUTO_IMPORT_INTERVAL_SECS: u64 = 900;
+const AUTO_IMPORT_MIN_INTERVAL_SECS: u64 = 30;
+
+fn auto_import_interval() -> Duration {
+    let secs = std::env::var("VIRE_LANGFUSE_AUTO_IMPORT_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|s| s.max(AUTO_IMPORT_MIN_INTERVAL_SECS))
+        .unwrap_or(AUTO_IMPORT_INTERVAL_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Acquire the single import slot **without blocking**. `None` means another import (manual or a
+/// prior automatic tick) holds it, so the caller skips this round — the serialization guard (B3)
+/// that keeps any two imports from running concurrently against the local store. A poisoned lock is
+/// recovered: the guarded `()` carries no invariant, so a panic in a prior import must not wedge all
+/// future imports.
+fn try_acquire_import_slot(lock: &Mutex<()>) -> Option<MutexGuard<'_, ()>> {
+    match lock.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::WouldBlock) => None,
+        Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+    }
+}
+
+/// Acquire the import slot, **waiting** if another import holds it. Used by the manual command's
+/// worker so a user click is honored after an in-flight automatic import finishes — never run
+/// concurrently with it. The wait is bounded by the manual command's own `run_bounded_result`
+/// ceiling, so a stuck prior import surfaces as a secret-free timeout, never a UI freeze.
+fn acquire_import_slot(lock: &Mutex<()>) -> MutexGuard<'_, ()> {
+    lock.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// One automatic-import cycle (startup or periodic), run on a dedicated OS thread off the UI/Tauri
+/// runtime. Serialized with the manual path and prior ticks via the shared slot (skips when busy),
+/// and honors the disabled switch + loopback boundary identically to `import_langfuse_now`: when the
+/// integration is disabled it runs nothing and probes nothing (no Keychain read, no socket). A
+/// reachable-but-failing import resolves into the health taxonomy via `run_blocking_import`, never to
+/// zero. No new capability/CSP — this is pure Rust-core scheduling; the renderer makes no call.
+fn run_auto_import_cycle(db_path: &Path, lock: &Mutex<()>) {
+    let Some(_slot) = try_acquire_import_slot(lock) else {
+        return; // another import is in progress — serialize by skipping this tick.
+    };
+    // Disabled short-circuit BEFORE any probe/Keychain, mirroring the manual command. Open a
+    // throwaway connection only to read the (non-secret) enable switch; a failure to open just skips.
+    match Connection::open(db_path) {
+        Ok(conn) => {
+            if !settings::langfuse_enabled(&conn) {
+                return;
+            }
+        }
+        Err(_) => return,
+    }
+    // Enabled: run the same blocking import the manual button uses. The slot is held for the whole
+    // run, so a concurrent manual click or next tick waits/skips. Errors are intentionally dropped
+    // here — they are already recorded in the health taxonomy + import report inside the importer.
+    let _ = langfuse::run_blocking_import(db_path);
+}
 
 /// Run blocking `work` on a dedicated OS thread (off the Tauri runtime) and wait at most `timeout`,
 /// returning the work's result or a secret-free `timeout_msg` if it does not finish in time. An
@@ -320,10 +424,16 @@ fn import_langfuse_now(state: State<AppState>) -> CmdResult<ImportOutcome> {
     // secret-free error instead of blocking the UI. The worker returns the secret-free import
     // report; then read the resulting snapshot.
     let db_path = state.db_path.clone();
+    let import_lock = state.import_lock.clone();
     let report = run_bounded_result(
         Duration::from_secs(IMPORT_TIMEOUT_SECS),
         IMPORT_TIMEOUT_MSG,
-        move || langfuse::run_blocking_import(&db_path),
+        move || {
+            // Serialize with any in-flight automatic import (B3): wait for the shared slot, then run
+            // the same path. The wait is bounded by the ceiling above, so the UI never freezes.
+            let _slot = acquire_import_slot(&import_lock);
+            langfuse::run_blocking_import(&db_path)
+        },
     )?;
     let db = db_conn(&state)?;
     let snapshot = settings::source_health_snapshot(&db)?;
@@ -340,8 +450,26 @@ fn validate_csv_destination(path: &Path) -> Result<(), String> {
 }
 fn db_path(app: &tauri::App) -> Result<PathBuf, std::io::Error> { let dir = app.path().app_data_dir().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Could not resolve Vire app data directory: {e}")))?; fs::create_dir_all(&dir)?; Ok(dir.join("vire.sqlite")) }
 pub fn run() {
-    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).setup(|app| { let path = db_path(app)?; let conn = Connection::open(&path)?; init_db(&conn)?; app.manage(AppState { db: Mutex::new(conn), db_path: path }); Ok(()) })
-        .invoke_handler(tauri::generate_handler![get_capture_status,list_projects,create_project,update_project,archive_project,list_time_entries,create_time_entry,update_time_entry,delete_time_entry,get_summary,export_report_csv,get_langfuse_source_health,import_langfuse_now,get_runtime_reconciliation,get_langfuse_settings,set_langfuse_settings,set_langfuse_secret,clear_langfuse_secret,test_langfuse_connection])
+    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).setup(|app| {
+        let path = db_path(app)?;
+        let conn = Connection::open(&path)?;
+        init_db(&conn)?;
+        let import_lock = Arc::new(Mutex::new(()));
+        app.manage(AppState { db: Mutex::new(conn), db_path: path.clone(), import_lock: import_lock.clone() });
+        // TASK-027 B: automatic import on a dedicated OS thread (off the UI/Tauri runtime). One import
+        // at startup, then a periodic tick. Each cycle serializes with the manual path via the shared
+        // slot and honors the disabled switch + loopback boundary inside `run_auto_import_cycle`. The
+        // thread sleeps between ticks and is reclaimed on process exit.
+        std::thread::spawn(move || {
+            let interval = auto_import_interval();
+            loop {
+                run_auto_import_cycle(&path, &import_lock);
+                std::thread::sleep(interval);
+            }
+        });
+        Ok(())
+    })
+        .invoke_handler(tauri::generate_handler![get_capture_status,list_projects,create_project,update_project,archive_project,list_time_entries,create_time_entry,update_time_entry,delete_time_entry,get_summary,export_report_csv,get_langfuse_source_health,import_langfuse_now,get_runtime_reconciliation,get_langfuse_settings,set_langfuse_settings,set_langfuse_secret,clear_langfuse_secret,test_langfuse_connection,list_discovered_environments,list_env_mappings,set_env_mapping,clear_env_mapping,list_evidence_projects])
         .run(tauri::generate_context!()).expect("error while running Vire");
 }
 
@@ -438,6 +566,76 @@ mod tests {
         for needle in ["sk-", "pk-", "Bearer", "Authorization", "password"] {
             assert!(!err.contains(needle), "timeout message must be secret-free");
         }
+    }
+
+    // ----- TASK-027 B: automatic import — serialization guard + disabled short-circuit ---------
+
+    #[test]
+    fn import_slot_serializes_concurrent_imports() {
+        let lock = Mutex::new(());
+        let first = try_acquire_import_slot(&lock).expect("the first import acquires the slot");
+        assert!(
+            try_acquire_import_slot(&lock).is_none(),
+            "a second import is refused (serialized) while one is in progress"
+        );
+        drop(first);
+        assert!(
+            try_acquire_import_slot(&lock).is_some(),
+            "the slot frees once the prior import finishes"
+        );
+    }
+
+    #[test]
+    fn auto_import_cycle_runs_nothing_when_disabled() {
+        // A disabled integration must run no import and fire no probe (no network, no Keychain): the
+        // cycle short-circuits before `run_blocking_import`, so nothing is recorded. Using a temp DB
+        // keeps this deterministic and offline.
+        let f = NamedTempFile::new().unwrap();
+        {
+            let c = Connection::open(f.path()).unwrap();
+            init_db(&c).unwrap();
+            c.execute(
+                "INSERT INTO settings(key, value) VALUES ('langfuse_enabled', 'false')
+                 ON CONFLICT(key) DO UPDATE SET value = 'false'",
+                [],
+            )
+            .unwrap();
+        }
+        let lock = Mutex::new(());
+        run_auto_import_cycle(f.path(), &lock);
+        let c = Connection::open(f.path()).unwrap();
+        let runs: i64 = c
+            .query_row("SELECT COUNT(*) FROM langfuse_import_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(runs, 0, "a disabled integration records no import run and probes nothing");
+    }
+
+    #[test]
+    fn auto_import_cycle_skips_when_an_import_is_already_in_progress() {
+        // Hold the slot, then invoke the cycle: it must return immediately without opening the DB or
+        // probing, because another import holds the slot (serialization, B3).
+        let f = NamedTempFile::new().unwrap();
+        {
+            let c = Connection::open(f.path()).unwrap();
+            init_db(&c).unwrap();
+        }
+        let lock = Mutex::new(());
+        let _held = try_acquire_import_slot(&lock).expect("hold the slot to simulate an in-flight import");
+        run_auto_import_cycle(f.path(), &lock); // must skip, not block on the held slot
+        let c = Connection::open(f.path()).unwrap();
+        let runs: i64 = c
+            .query_row("SELECT COUNT(*) FROM langfuse_import_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(runs, 0, "the cycle skips entirely while another import holds the slot");
+    }
+
+    #[test]
+    fn auto_import_interval_floors_and_defaults() {
+        // A pure check of the interval resolver's bounds (the env override is read process-wide, so
+        // this asserts only the default + floor constants the resolver applies).
+        assert_eq!(AUTO_IMPORT_INTERVAL_SECS, 900);
+        assert!(AUTO_IMPORT_MIN_INTERVAL_SECS <= AUTO_IMPORT_INTERVAL_SECS);
+        assert!(auto_import_interval() >= Duration::from_secs(AUTO_IMPORT_MIN_INTERVAL_SECS));
     }
 }
 

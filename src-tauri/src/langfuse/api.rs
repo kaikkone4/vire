@@ -26,6 +26,18 @@ pub trait LangfuseApi {
         limit: u32,
     ) -> Result<TracePage, ApiError>;
 
+    /// One page of `GET /api/public/traces` over a time window **without** the `environment`
+    /// filter, used only by environment discovery (TASK-027 C). The response spans every
+    /// environment; the caller reads the distinct `Trace.environment` values. Read-only and bound
+    /// by the same allowlist/loopback gate as [`get_traces`] (the URL is built under `/api/public/`).
+    fn get_traces_any_env(
+        &self,
+        from: &str,
+        to: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<TracePage, ApiError>;
+
     /// Generation observations for a trace (used only when the list payload did not already
     /// embed `observations[]`). Usage/cost are read from here, not the trace body.
     fn get_observations(&self, trace_id: &str) -> Result<Vec<Observation>, ApiError>;
@@ -94,6 +106,27 @@ impl LangfuseApi for ReqwestLangfuseApi {
     ) -> Result<TracePage, ApiError> {
         let value = self.get_json(ApiPath::Traces {
             environment,
+            from,
+            to,
+            page,
+            limit,
+        })?;
+        serde_json::from_value(value).map_err(|_| {
+            ApiError::new(
+                ApiErrorKind::Indeterminate,
+                "Langfuse traces page had an unexpected shape",
+            )
+        })
+    }
+
+    fn get_traces_any_env(
+        &self,
+        from: &str,
+        to: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<TracePage, ApiError> {
+        let value = self.get_json(ApiPath::TracesAllEnvironments {
             from,
             to,
             page,

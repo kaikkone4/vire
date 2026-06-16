@@ -88,6 +88,17 @@ pub enum ApiPath<'a> {
         page: u32,
         limit: u32,
     },
+    /// `GET /api/public/traces` over a time window **without** the `environment` filter, so the
+    /// page spans every environment (TASK-027 C, environment discovery). The `environment` query
+    /// param is a filter; omitting it returns the unfiltered superset. Same `/api/public/` root and
+    /// loopback gate as [`ApiPath::Traces`] — only the one filter param is dropped, no new host or
+    /// path. The `'a` lifetime is unused by this variant but shared with the enum.
+    TracesAllEnvironments {
+        from: &'a str,
+        to: &'a str,
+        page: u32,
+        limit: u32,
+    },
     /// `GET /api/public/observations?traceId=` (generation usage/cost lives here).
     Observations { trace_id: &'a str },
 }
@@ -206,7 +217,7 @@ impl ImporterConfig {
                 ApiPath::Health => {
                     segments.push("health");
                 }
-                ApiPath::Traces { .. } => {
+                ApiPath::Traces { .. } | ApiPath::TracesAllEnvironments { .. } => {
                     segments.push("traces");
                 }
                 ApiPath::Observations { .. } => {
@@ -224,6 +235,19 @@ impl ImporterConfig {
             } => {
                 let mut q = url.query_pairs_mut();
                 q.append_pair("environment", environment);
+                q.append_pair("fromTimestamp", from);
+                q.append_pair("toTimestamp", to);
+                q.append_pair("page", &page.to_string());
+                q.append_pair("limit", &limit.to_string());
+            }
+            ApiPath::TracesAllEnvironments {
+                from,
+                to,
+                page,
+                limit,
+            } => {
+                // Deliberately no `environment` pair — discovery scans across all environments.
+                let mut q = url.query_pairs_mut();
                 q.append_pair("fromTimestamp", from);
                 q.append_pair("toTimestamp", to);
                 q.append_pair("page", &page.to_string());

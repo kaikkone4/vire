@@ -49,6 +49,11 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             health TEXT NOT NULL,
             import_run_id TEXT,
             PRIMARY KEY (environment, trace_id)
+        );
+        CREATE TABLE IF NOT EXISTS langfuse_discovered_environments (
+            environment TEXT PRIMARY KEY,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL
         );",
     )?;
     // Additive, idempotent: surface `session_id` on installs whose evidence table predates the
@@ -203,6 +208,52 @@ pub fn seen_trace_ids(conn: &Connection, environment: &str) -> rusqlite::Result<
         .query_map(params![environment], |r| r.get::<_, String>(0))?
         .collect::<Result<HashSet<String>, _>>()?;
     Ok(ids)
+}
+
+/// A discovered Langfuse environment (TASK-027 C). Carries only the environment **name** and the
+/// first/last time it was seen — no credential, count, or trace content (SEC-010).
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct DiscoveredEnvironment {
+    pub environment: String,
+    pub first_seen: String,
+    pub last_seen: String,
+}
+
+/// Record a discovered environment **additively**: insert on first sight, otherwise advance only
+/// `last_seen`. Idempotent on `environment`; never deletes a previously discovered environment, so
+/// an environment that stops appearing in the recent window stays in the picker (its `last_seen`
+/// simply ages). No trace content or credential is stored — only the environment name + timestamp.
+pub fn upsert_discovered_environment(
+    conn: &Connection,
+    environment: &str,
+    seen_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO langfuse_discovered_environments (environment, first_seen, last_seen)
+         VALUES (?1, ?2, ?2)
+         ON CONFLICT(environment) DO UPDATE SET last_seen = excluded.last_seen",
+        params![environment, seen_at],
+    )?;
+    Ok(())
+}
+
+/// All discovered environments, ordered by name, for the Settings picker and the mapping surface.
+pub fn list_discovered_environments(conn: &Connection) -> rusqlite::Result<Vec<DiscoveredEnvironment>> {
+    let mut stmt = conn.prepare(
+        "SELECT environment, first_seen, last_seen
+           FROM langfuse_discovered_environments
+          ORDER BY environment",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(DiscoveredEnvironment {
+                environment: r.get(0)?,
+                first_seen: r.get(1)?,
+                last_seen: r.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 /// Persist a raw trace payload (local-only evidence; may include prompt/session/metadata per the
