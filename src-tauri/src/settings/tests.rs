@@ -432,3 +432,55 @@ fn secret_write_failure_rolls_back_the_public_key_write() {
     );
     assert!(store.get(SECRET_KEY_ACCOUNT).unwrap().is_none());
 }
+
+/// Regression: a failed **replacement** of an already-stored credential pair must not leave a
+/// deleted public key beside the surviving old secret, because the resolver would then fill the
+/// missing public key from the env dev fallback and combine it with that stale Keychain secret —
+/// a Keychain/env mixed-source pair. The credential pair must stay atomic: a failed replacement
+/// restores the prior pair, and the resolver keeps reading both fields from the Keychain (never the
+/// env public key beside the Keychain secret).
+#[test]
+fn failed_replacement_restores_the_prior_pair_and_never_mixes_keychain_with_env() {
+    const P_OLD: &str = "pk-old-keychain";
+    const S_OLD: &str = "sk-old-keychain-secret";
+    const P_NEW: &str = "pk-new-keychain";
+    const S_NEW: &str = "sk-new-keychain-secret";
+
+    // Seed an existing Keychain pair (the "replacing existing credentials" case). The store's `set`
+    // refuses the secret account, so the prior pair is injected directly into its backing map.
+    let store = SecretWriteFailsStore::default();
+    {
+        let mut inner = store.inner.lock().unwrap();
+        inner.insert(PUBLIC_KEY_ACCOUNT.to_string(), P_OLD.to_string());
+        inner.insert(SECRET_KEY_ACCOUNT.to_string(), S_OLD.to_string());
+    }
+
+    // Attempt to replace the pair; the secret-key write fails mid-replacement.
+    let err = set_langfuse_secret_repo(&store, P_NEW.into(), S_NEW.into()).unwrap_err();
+    assert!(!err.is_empty());
+    for needle in [S_OLD, S_NEW, P_OLD, P_NEW] {
+        assert!(!err.contains(needle), "rollback error must be secret-free, found {needle}");
+    }
+
+    // The pair is restored to the prior, consistent state — both entries present and matching the
+    // prior pair (NOT the new public beside the stale secret, NOT a deleted public).
+    assert_eq!(store.get(PUBLIC_KEY_ACCOUNT).unwrap().as_deref(), Some(P_OLD));
+    assert_eq!(store.get(SECRET_KEY_ACCOUNT).unwrap().as_deref(), Some(S_OLD));
+
+    // The decisive check: even with an env public-key fallback available, the resolver returns the
+    // prior Keychain pair. It can NOT combine the env public key with the surviving Keychain secret.
+    let c = conn();
+    let env = MapEnv::new()
+        .with("VIRE_LANGFUSE_PUBLIC_KEY", "pk-env-must-not-be-used")
+        .with("LANGFUSE_PUBLIC_KEY", "pk-env-must-not-be-used");
+    let creds = resolve_config_with(&c, &store, &env)
+        .unwrap()
+        .credentials
+        .expect("the restored prior Keychain pair resolves to credentials");
+    assert_eq!(creds.public_key, P_OLD, "public key must come from the Keychain, not the env fallback");
+    assert_eq!(creds.secret_key.expose(), S_OLD, "secret key must remain the prior Keychain entry");
+    assert_ne!(
+        creds.public_key, "pk-env-must-not-be-used",
+        "no Keychain/env mixed pair: the env public key must never pair with the Keychain secret"
+    );
+}

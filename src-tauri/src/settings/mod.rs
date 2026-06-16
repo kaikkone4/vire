@@ -266,7 +266,10 @@ pub fn set_langfuse_settings_repo(
 }
 
 /// Store the credential pair in the Keychain. The secret is accepted *in* and never returned. Both
-/// keys are entered together (one clean credential surface); both must be non-empty.
+/// keys are entered together (one clean credential surface); both must be non-empty. The two
+/// Keychain entries are written atomically: if the secret write fails the public entry is rolled
+/// back to its prior state, so a failed (re)write never leaves exactly one entry — which would let
+/// the resolver combine an env-fallback public key with a stale Keychain secret.
 pub fn set_langfuse_secret_repo(
     secrets: &dyn SecretStore,
     public_key: String,
@@ -280,13 +283,32 @@ pub fn set_langfuse_secret_repo(
     if secret_key.is_empty() {
         return Err("Secret key cannot be empty".into());
     }
+    // Capture the prior public-key entry first so a failed secret write can restore the exact prior
+    // Keychain state. The two Keychain entries are one atomic credential pair: after this function
+    // the public and secret entries must be EITHER both the new pair OR both the prior state — never
+    // one entry deleted/replaced beside a stale other. If a failed *replacement* of an existing pair
+    // deleted the public entry while the old secret survived, `resolve_credentials` would fill the
+    // now-missing public key from the `VIRE_LANGFUSE_PUBLIC_KEY` / `LANGFUSE_PUBLIC_KEY` env fallback
+    // and combine it with that stale Keychain secret — a mixed-source credential pair (DEC-026
+    // credential-pair integrity). Reading the public key here exposes no secret (SEC-009 guards the
+    // secret key only).
+    let prior_public_key = secrets.get(PUBLIC_KEY_ACCOUNT).map_err(|e| e.0)?;
     secrets.set(PUBLIC_KEY_ACCOUNT, public_key).map_err(|e| e.0)?;
-    // If the secret write fails, roll back the public-key write so the credential surface is never
-    // left half-updated (a stored public key with no matching secret, which would read as a usable
-    // pair that authenticates with a stale/absent secret). The rollback delete is idempotent; its
-    // own failure must not mask the original secret-free error.
     if let Err(e) = secrets.set(SECRET_KEY_ACCOUNT, secret_key) {
-        let _ = secrets.delete(PUBLIC_KEY_ACCOUNT);
+        // The secret write failed, so the secret entry is untouched (still the prior value, if any).
+        // Restore the public entry to its prior state — put the previous value back when one existed
+        // (reinstating the prior consistent pair), else remove the entry we just wrote (back to both
+        // absent). Either way the pair is left consistent, so a failed replacement can never produce
+        // a Keychain/env mixed pair. The restore is best-effort and idempotent; its own failure must
+        // not mask the original secret-free error.
+        match prior_public_key {
+            Some(prior) => {
+                let _ = secrets.set(PUBLIC_KEY_ACCOUNT, &prior);
+            }
+            None => {
+                let _ = secrets.delete(PUBLIC_KEY_ACCOUNT);
+            }
+        }
         return Err(e.0);
     }
     Ok(())
