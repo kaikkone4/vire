@@ -17,6 +17,8 @@ use api::{LangfuseApi, ReqwestLangfuseApi};
 use config::ImporterConfig;
 use model::{ApiError, HealthState, ImportWindow};
 
+pub use importer::ImportReport;
+
 use crate::settings::secret_store::KeyringSecretStore;
 
 /// Default look-back window for a manual import (last 7 days, UTC, RFC3339).
@@ -33,8 +35,9 @@ pub fn recent_window(days: i64) -> ImportWindow {
 ///
 /// Intended to be called from a dedicated OS thread (not a Tauri async context): the blocking
 /// `reqwest` client must not run inside the Tauri runtime, and using a separate connection keeps
-/// the network call off the UI's database lock. Returns a secret-free error string on failure.
-pub fn run_blocking_import(db_path: &Path) -> Result<(), String> {
+/// the network call off the UI's database lock. Returns a secret-free [`ImportReport`] on success,
+/// or a secret-free error string on failure (including the in-band persist-failure surfacing).
+pub fn run_blocking_import(db_path: &Path) -> Result<ImportReport, String> {
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     store::migrate(&conn).map_err(|e| e.to_string())?;
     // Settings-first resolution (TASK-026): stored settings + Keychain credentials win; process env
@@ -45,7 +48,13 @@ pub fn run_blocking_import(db_path: &Path) -> Result<(), String> {
     let api = ReqwestLangfuseApi::new(config.clone()).map_err(|e| e.message)?;
     let window = recent_window(7);
     let summaries = importer::run_import(&api, &conn, &config, &window);
-    import_result(&summaries)
+    // Build the secret-free diagnostics report from the counts the importer just computed, then
+    // apply the TASK-021 in-band persist-failure check: a run that could not be persisted still
+    // surfaces as `Err` (never a stale-healthy result), so the report is returned only for a run
+    // that did persist.
+    let report = ImportReport::from_summaries(&summaries);
+    import_result(&summaries)?;
+    Ok(report)
 }
 
 /// Collapse the per-environment summaries into the manual-import command's in-band result. A run that

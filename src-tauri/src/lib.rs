@@ -292,33 +292,45 @@ where
     }
 }
 
-/// The unit-returning import wrapper: bound a manual import with the import timeout message.
-fn run_bounded<F>(timeout: Duration, work: F) -> CmdResult<()>
-where
-    F: FnOnce() -> CmdResult<()> + Send + 'static,
-{
-    run_bounded_result(timeout, IMPORT_TIMEOUT_MSG, work)
+/// The manual-import IPC result (TASK-027 A3): the read-only health snapshot **plus** the
+/// secret-free [`langfuse::ImportReport`] so the Settings panel can render "Imported N (M skipped,
+/// D duplicates) across E environments" instead of nothing. `report` is `None` only on the
+/// disabled short-circuit — no import ran — so the UI shows the explicit disabled snapshot rather
+/// than fabricated zero counts.
+#[derive(Serialize)]
+struct ImportOutcome {
+    snapshot: SourceHealthSnapshot,
+    report: Option<langfuse::ImportReport>,
 }
 
 #[tauri::command]
-fn import_langfuse_now(state: State<AppState>) -> CmdResult<SourceHealthSnapshot> {
+fn import_langfuse_now(state: State<AppState>) -> CmdResult<ImportOutcome> {
     // Short-circuit a disabled integration before any network or Keychain access (TASK-026): no
-    // import runs and the snapshot reports an explicit disabled state, never zero.
+    // import runs and the snapshot reports an explicit disabled state, never zero. No report is
+    // produced because no run occurred.
     {
         let db = db_conn(&state)?;
         if !settings::langfuse_enabled(&db) {
-            return settings::source_health_snapshot(&db);
+            let snapshot = settings::source_health_snapshot(&db)?;
+            return Ok(ImportOutcome { snapshot, report: None });
         }
     }
     // Run the blocking REST import on a dedicated OS thread (off the Tauri runtime and off the UI's
     // database lock); it uses its own SQLite connection. Bound the wait so a hung import returns a
-    // secret-free error instead of blocking the UI. Then read the resulting snapshot.
+    // secret-free error instead of blocking the UI. The worker returns the secret-free import
+    // report; then read the resulting snapshot.
     let db_path = state.db_path.clone();
-    run_bounded(Duration::from_secs(IMPORT_TIMEOUT_SECS), move || {
-        langfuse::run_blocking_import(&db_path)
-    })?;
+    let report = run_bounded_result(
+        Duration::from_secs(IMPORT_TIMEOUT_SECS),
+        IMPORT_TIMEOUT_MSG,
+        move || langfuse::run_blocking_import(&db_path),
+    )?;
     let db = db_conn(&state)?;
-    settings::source_health_snapshot(&db)
+    let snapshot = settings::source_health_snapshot(&db)?;
+    Ok(ImportOutcome {
+        snapshot,
+        report: Some(report),
+    })
 }
 
 fn validate_csv_destination(path: &Path) -> Result<(), String> {
@@ -382,7 +394,7 @@ mod tests {
     #[test]
     fn run_bounded_times_out_promptly_with_a_secret_free_error() {
         let start = std::time::Instant::now();
-        let err = run_bounded(Duration::from_millis(50), || {
+        let err = run_bounded_result(Duration::from_millis(50), IMPORT_TIMEOUT_MSG, || {
             std::thread::sleep(Duration::from_millis(1500));
             Ok(())
         })
@@ -397,8 +409,11 @@ mod tests {
 
     #[test]
     fn run_bounded_returns_the_works_result_within_the_ceiling() {
-        assert!(run_bounded(Duration::from_secs(5), || Ok(())).is_ok());
-        let err = run_bounded(Duration::from_secs(5), || Err("import failed".to_string())).unwrap_err();
+        assert!(run_bounded_result(Duration::from_secs(5), IMPORT_TIMEOUT_MSG, || Ok(())).is_ok());
+        let err = run_bounded_result::<(), _>(Duration::from_secs(5), IMPORT_TIMEOUT_MSG, || {
+            Err("import failed".to_string())
+        })
+        .unwrap_err();
         assert_eq!(err, "import failed", "a normal failure is surfaced verbatim, not masked as a timeout");
     }
 

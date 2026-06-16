@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use super::api::LangfuseApi;
 use super::config::{ApiPath, Credentials, ImporterConfig, Secret, Source, DEFAULT_BASE_URL};
-use super::importer::run_import;
+use super::importer::{run_import, ImportReport};
 use super::model::{
     ApiError, ApiErrorKind, HealthState, ImportWindow, Observation, TracePage,
 };
@@ -411,6 +411,8 @@ fn observations_are_fetched_when_not_embedded() {
             total_tokens: Some(10),
             usage: None,
             calculated_total_cost: Some(2.25),
+            usage_details: None,
+            cost_details: None,
         }],
     );
     run_import(&api, &c, &local_vire(), &window());
@@ -872,4 +874,228 @@ fn rfc3339_run_sorts_after_legacy_space_format_run_same_day() {
         latest.id, "modern",
         "an RFC3339 run must sort latest over a legacy space-format run even when the legacy local time is numerically later"
     );
+}
+
+// ----- TASK-027 A4: payload tolerance (legacy AND current Langfuse shapes) ------------------
+
+/// A trace carrying a generation in the **current** Langfuse shape only: token usage in
+/// `usageDetails` and cost in `costDetails` — NO legacy `promptTokens`/`usage`/`calculatedTotalCost`.
+/// This is the shape the live v3 stack (verified at SW-2 against local 3.178.0) emits and that the
+/// previous parser would have degraded to `schema_changed`.
+fn trace_with_current_shape(id: &str, env: &str, ts: &str, total_cost: f64, total_tokens: i64) -> Value {
+    json!({
+        "id": id,
+        "environment": env,
+        "timestamp": ts,
+        "name": "claude-code",
+        "sessionId": null,
+        "metadata": {},
+        "observations": [{
+            "type": "GENERATION",
+            "model": "claude",
+            "startTime": ts,
+            "endTime": ts,
+            "usageDetails": {"input": total_tokens / 2, "output": total_tokens / 2, "total": total_tokens},
+            "costDetails": {"input": total_cost / 2.0, "output": total_cost / 2.0, "total": total_cost}
+        }]
+    })
+}
+
+#[test]
+fn observation_reads_current_usage_and_cost_details() {
+    let obs: Observation = serde_json::from_value(json!({
+        "type": "GENERATION",
+        "usageDetails": {"input": 12, "output": 8, "total": 20},
+        "costDetails": {"input": 0.1, "output": 0.2, "total": 0.3}
+    }))
+    .unwrap();
+    assert_eq!(obs.prompt(), Some(12));
+    assert_eq!(obs.completion(), Some(8));
+    assert_eq!(obs.total(), Some(20));
+    assert_eq!(obs.cost(), Some(0.3), "cost is read from costDetails['total']");
+    assert!(!obs.lacks_usage_and_cost(), "a current-shape generation is recognized, not schema_changed");
+}
+
+#[test]
+fn observation_legacy_shape_still_parses() {
+    let obs: Observation = serde_json::from_value(json!({
+        "type": "GENERATION",
+        "promptTokens": 4, "completionTokens": 6, "totalTokens": 10,
+        "usage": {"input": 4, "output": 6, "total": 10, "unit": "TOKENS"},
+        "calculatedTotalCost": 1.25
+    }))
+    .unwrap();
+    assert_eq!(obs.prompt(), Some(4));
+    assert_eq!(obs.completion(), Some(6));
+    assert_eq!(obs.total(), Some(10));
+    assert_eq!(obs.cost(), Some(1.25));
+}
+
+#[test]
+fn observation_absent_usage_stays_none_not_zero() {
+    // Empty detail maps with no legacy fields → every accessor is None (absence-≠-zero) and the
+    // generation degrades to schema_changed, never a fabricated 0.
+    let obs: Observation = serde_json::from_value(json!({
+        "type": "GENERATION", "usageDetails": {}, "costDetails": {}
+    }))
+    .unwrap();
+    assert_eq!(obs.prompt(), None);
+    assert_eq!(obs.completion(), None);
+    assert_eq!(obs.total(), None);
+    assert_eq!(obs.cost(), None);
+    assert!(obs.lacks_usage_and_cost());
+}
+
+#[test]
+fn observation_present_zero_is_distinct_from_absence() {
+    // A genuine 0 in usageDetails reads as Some(0); absence in costDetails stays None.
+    let obs: Observation = serde_json::from_value(json!({
+        "type": "GENERATION", "usageDetails": {"input": 0, "output": 0, "total": 0}
+    }))
+    .unwrap();
+    assert_eq!(obs.prompt(), Some(0));
+    assert_eq!(obs.total(), Some(0));
+    assert_eq!(obs.cost(), None, "no cost anywhere stays None, even when token totals are a real 0");
+}
+
+#[test]
+fn current_shape_generation_is_healthy_and_cost_captured() {
+    let c = conn();
+    let api = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_with_current_shape("A", "vire", "2026-06-05T00:00:00Z", 0.6, 20)]],
+    );
+    let s = run_import(&api, &c, &local_vire(), &window());
+    let vire = s.iter().find(|x| x.environment == "vire").unwrap();
+    assert_eq!(
+        vire.health,
+        HealthState::Healthy,
+        "current usageDetails/costDetails usage+cost must be captured, not degraded to schema_changed"
+    );
+    assert_eq!(evidence_cost(&c, "vire", "A"), Some(0.6));
+}
+
+#[test]
+fn current_shape_with_empty_detail_maps_degrades_to_schema_changed() {
+    let c = conn();
+    let trace = json!({
+        "id": "A", "environment": "vire", "timestamp": "2026-06-05T00:00:00Z", "metadata": {},
+        "observations": [{"type": "GENERATION", "usageDetails": {}, "costDetails": {}}]
+    });
+    let api = MockApi::with_pages("vire", vec![vec![trace]]);
+    let s = run_import(&api, &c, &local_vire(), &window());
+    assert_eq!(s[0].health, HealthState::SchemaChanged);
+    assert_eq!(s[0].skipped_schema, 1, "the empty-shape generation is counted as skipped");
+    assert_eq!(evidence_cost(&c, "vire", "A"), None, "an unrecognized shape never yields a zero cost");
+}
+
+// ----- TASK-027 A2/A3: the import report (secret-free diagnostics, SEC-010) -----------------
+
+#[test]
+fn import_report_aggregates_per_env_and_total_counts() {
+    let c = conn();
+    // vire: two unique healthy traces; default (synthetic probe): one wrong-env trace surfaced.
+    let mut api = MockApi::with_pages(
+        "vire",
+        vec![vec![
+            trace_with_generation("A", "vire", "2026-06-05T00:00:00Z", 1.0, 10),
+            trace_with_generation("B", "vire", "2026-06-06T00:00:00Z", 2.0, 20),
+        ]],
+    );
+    api.pages.insert(
+        "default".into(),
+        vec![vec![trace_with_generation("D", "default", "2026-06-05T00:00:00Z", 1.0, 8)]],
+    );
+    let summaries = run_import(&api, &c, &local_vire(), &window());
+    let report = ImportReport::from_summaries(&summaries);
+
+    assert_eq!(report.environment_count, 2);
+    let vire = report.environments.iter().find(|e| e.environment == "vire").unwrap();
+    assert_eq!(vire.health, "healthy");
+    assert_eq!(vire.unique, 2);
+    assert_eq!(vire.skipped_schema, 0);
+    let def = report.environments.iter().find(|e| e.environment == "default").unwrap();
+    assert_eq!(def.health, "wrong_env");
+    assert_eq!(def.unique, 1);
+
+    assert_eq!(report.total_unique, 3, "totals sum across environments");
+    assert_eq!(report.total_traces_seen, 3);
+    assert_eq!(report.total_skipped_schema, 0);
+}
+
+#[test]
+fn import_report_explains_an_empty_import_rather_than_blank() {
+    let c = conn();
+    let api = MockApi::default(); // nothing in vire, nothing in default
+    let summaries = run_import(&api, &c, &local_vire(), &window());
+    let report = ImportReport::from_summaries(&summaries);
+
+    assert_eq!(report.total_unique, 0);
+    // The configured environment is still surfaced with an explicit health state — never blank.
+    let vire = report.environments.iter().find(|e| e.environment == "vire").unwrap();
+    assert_eq!(vire.health, "missing");
+    assert_eq!(vire.traces_seen, 0);
+}
+
+#[test]
+fn import_report_counts_duplicates_and_skips_on_a_partial_run() {
+    let c = conn();
+    // page1: [A healthy, BAD unparseable]; page2: [A duplicate, B healthy].
+    let bad = json!({ "environment": "vire" }); // no id → unparseable → skipped
+    let api = MockApi::with_pages(
+        "vire",
+        vec![
+            vec![trace_with_generation("A", "vire", "2026-06-02T00:00:00Z", 1.0, 10), bad],
+            vec![
+                trace_with_generation("A", "vire", "2026-06-02T00:00:00Z", 1.0, 10),
+                trace_with_generation("B", "vire", "2026-06-03T00:00:00Z", 2.0, 20),
+            ],
+        ],
+    );
+    let summaries = run_import(&api, &c, &local_vire(), &window());
+    let report = ImportReport::from_summaries(&summaries);
+    let vire = report.environments.iter().find(|e| e.environment == "vire").unwrap();
+    assert_eq!(vire.unique, 2, "A and B imported once each");
+    assert_eq!(vire.duplicates, 1, "the cross-page A is suppressed");
+    assert_eq!(vire.skipped_schema, 1, "the unparseable trace is counted as skipped");
+    assert_eq!(report.total_duplicates, 1);
+    assert_eq!(report.total_skipped_schema, 1);
+}
+
+/// SEC-010: the import report MUST carry no credential, `Authorization` header, raw response body,
+/// or trace prompt/session content — only counts, health, env names, and secret-free warnings. A
+/// trace whose raw payload is deliberately stuffed with secret-shaped content proves none of it
+/// leaks into the serialized report.
+#[test]
+fn import_report_is_secret_free() {
+    let c = conn();
+    let trace = json!({
+        "id": "SECRET",
+        "environment": "vire",
+        "timestamp": "2026-06-05T00:00:00Z",
+        "name": "sk-lf-supersecret-canary",
+        "sessionId": "session-Bearer-leak",
+        "metadata": {"Authorization": "Bearer pk-lf-leak", "secret": "sk-ant-oat01-leak"},
+        "observations": [{
+            "type": "GENERATION",
+            "usageDetails": {"input": 4, "output": 6, "total": 10},
+            "costDetails": {"total": 1.5}
+        }]
+    });
+    let api = MockApi::with_pages("vire", vec![vec![trace]]);
+    let summaries = run_import(&api, &c, &local_vire(), &window());
+    let report = ImportReport::from_summaries(&summaries);
+
+    // Sanity: the trace WAS imported, so the secret-free assertion below is not vacuous.
+    assert_eq!(report.total_unique, 1);
+
+    let serialized = serde_json::to_string(&report).unwrap();
+    for needle in [
+        "sk-", "pk-", "Bearer", "Authorization", "supersecret", "canary", "leak", "session-",
+    ] {
+        assert!(
+            !serialized.contains(needle),
+            "import report must be secret-free (SEC-010), found {needle}"
+        );
+    }
 }
