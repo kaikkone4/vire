@@ -53,9 +53,10 @@ Role hints are for Pi-Assistant routing.
   *(`langfuse_discovered_environments(environment PK, first_seen, last_seen)` in `langfuse/store.rs`;
   `upsert_discovered_environment` advances `last_seen` additively; `run_blocking_import` runs
   `discover_and_record` best-effort after the import.)*
-- [ ] C4. Settings: replace/augment the free-text env CSV with a **picker** seeded from discovered
-  environments (CSV stays as advanced fallback; default `vire` unchanged). *(frontend — separate call;
-  backend surface `list_discovered_environments` ready.)*
+- [x] C4. Settings: replace/augment the free-text env CSV with a **picker** seeded from discovered
+  environments (CSV stays as advanced fallback; default `vire` unchanged). *(`src/env-mapping-ui.ts`
+  `envPickerCheckboxes`/`envPickerOptions`/`mergeSelectedEnvironments`; Settings form ticks discovered +
+  configured envs, `vire` always offered, Advanced CSV adds undiscovered envs; save = union of both.)*
 - [x] C5. Tests: discovery collects distinct envs from a multi-env page; allowlist/loopback unchanged.
   *(`langfuse/tests.rs`: distinct-across-pages, empty/error, additive persistence, allowlist+loopback URL.)*
 
@@ -73,10 +74,12 @@ Role hints are for Pi-Assistant routing.
   rewrite. Vire project record stays authoritative (DEC-001).
   *(`list_evidence_projects_repo` LEFT JOINs evidence→map→projects; `list_evidence_projects` IPC.
   Clearing a mapping changes only the join, evidence rows untouched — asserted by test.)*
-- [ ] D4. Settings UI: per environment show mapped project / a project picker / a **"Create a project
+- [x] D4. Settings UI: per environment show mapped project / a project picker / a **"Create a project
   for `<env>`"** suggestion that calls the existing `create_project` then writes the map row (explicit
-  user action only — DEC-006). No silent auto-create. *(frontend — separate call; backend surfaces +
-  the explicit `create_project` → `set_env_mapping` flow are ready and tested.)*
+  user action only — DEC-006). No silent auto-create. *(`src/env-mapping-ui.ts` `mappingPanel`/
+  `mappingRow` + `bindEnvMapping` in `src/main.ts`: mapped row shows project + Clear; unmapped row shows
+  a project picker (Map) and Create-project-for-`<env>` which prompts, calls `create_project` then
+  `set_env_mapping`. Clear calls `clear_env_mapping`. No auto-create/auto-map.)*
 - [x] D5. Tests: map persistence + idempotent init; suggest-create writes a row only on explicit action;
   evidence-to-project join. *(`env_mapping/tests.rs`: idempotent migrate, set/list/remap/clear,
   missing-project refusal creates nothing, suggest-create explicit-only with no auto-create, read-time
@@ -103,15 +106,24 @@ Role hints are for Pi-Assistant routing.
 
 ## Workstream E — Desktop UX polish  *(frontend + assets)*  *(independent)*
 
-- [ ] E1. Remove the fake `.traffic` cluster from `shell()` (`src/main.ts:35`) and the `.traffic` CSS
-  (`src/style.css`); keep native window controls.
-- [ ] E2. Re-balance `.titlebar` layout so brand/version still align without the dots.
-- [ ] E3. Regenerate the placeholder icon mark with ~80% safe-area padding
+- [x] E1. Remove the fake `.traffic` cluster from `shell()` (`src/main.ts:35`) and the `.traffic` CSS
+  (`src/style.css`); keep native window controls. *(Titlebar extracted to `src/shell-chrome.ts`
+  `titlebar()`; `shell()` calls it. `.traffic` div and all `.traffic` CSS rules deleted. Native window
+  decorations unchanged in `tauri.conf.json`.)*
+- [x] E2. Re-balance `.titlebar` layout so brand/version still align without the dots. *(`.titlebar`
+  grid `1fr auto 1fr`: brand centered in col 2, version pinned to col 3 — symmetric without the left
+  dots.)*
+- [x] E3. Regenerate the placeholder icon mark with ~80% safe-area padding
   (`src-tauri/icons/source/generate-vire-mark.mjs`), re-run `npx tauri icon …`, regenerate
-  `src-tauri/icons/*` incl. `icon.icns`.
-- [ ] E4. Docs: note the safe-area requirement so the branded asset (brand-owned) inherits it; do **not**
-  write to `artifacts/brand/`.
-- [ ] E5. Frontend test/snapshot: `shell()` no longer emits `.traffic`.
+  `src-tauri/icons/*` incl. `icon.icns`. *(Generator now insets the mark to 80% of canvas (`SAFE=0.8`,
+  centered rounded-square SDF + V geometry on the inset box); source PNG regenerated and `npx tauri
+  icon` re-ran the desktop icon set incl. `icon.icns`. Extraneous ios/android dirs `tauri icon` emits
+  removed — desktop-only bundle.)*
+- [x] E4. Docs: note the safe-area requirement so the branded asset (brand-owned) inherits it; do **not**
+  write to `artifacts/brand/`. *(Safe-area note added to the generator header and the README Application
+  icon section. `artifacts/brand/` untouched.)*
+- [x] E5. Frontend test/snapshot: `shell()` no longer emits `.traffic`. *(`tests/shellChrome.test.mjs`
+  asserts `titlebar()` renders brand/version, contains no `traffic` and no `<span>`, and escapes input.)*
 
 ## Cross-cutting (L2 gates)
 

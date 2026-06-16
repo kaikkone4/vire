@@ -45,6 +45,19 @@ npm run tauri:build
    stored in the macOS Keychain, never in plaintext. AI trace import additionally requires the local
    Langfuse Docker stack to be running (see below); a down stack is reported as unavailable, never as
    zero AI usage or cost.
+5. **Environments are picked, not just typed** (TASK-027 C4): the Settings panel offers a checkbox
+   picker seeded from the environments discovered during import; `vire` is the default. An *Advanced*
+   field still accepts a comma-separated list for environments discovery has not yet surfaced. Saving
+   stores the union of the ticked boxes and any advanced entries.
+6. **Each environment maps to a Vire project** (TASK-027 D4): the *Environment → project mapping*
+   panel shows every discovered environment as mapped or unmapped. An unmapped environment can be
+   mapped to an existing project, or you can use **Create project for `<env>`** to create a project and
+   map it in one explicit action. Vire never auto-creates a project or auto-maps an environment — every
+   mapping is a deliberate user action (DEC-006). Clearing a mapping changes only the link; imported
+   evidence rows are never rewritten.
+7. **Import results are explained, never blank** (TASK-027 A): after an import the source panel shows
+   how many traces were imported, duplicated, or skipped, with per-environment health — an empty or
+   partial result is explained rather than shown as zero.
 
 > The build is a local prototype: it is **not** code-signed or notarized. On first launch macOS
 > Gatekeeper may require right-click → Open (or *System Settings → Privacy & Security → Open Anyway*).
@@ -61,6 +74,11 @@ To replace it with a branded asset — **no code change required**:
 1. Drop a branded PNG (≥1024×1024, square) at `src-tauri/icons/source/vire-icon.png`.
 2. Regenerate the icon set: `npx tauri icon src-tauri/icons/source/vire-icon.png`.
 3. Rebuild: `npm run tauri:build`.
+
+> **Safe area (TASK-027 E3):** the mark must occupy ~80% of a transparent 1024×1024 canvas (≈10%
+> margin per side) so macOS renders it at Dock parity with other apps. The branded replacement asset
+> **must keep this same ~80% safe area** — a full-bleed PNG renders oversized in the Dock. The
+> placeholder generator already applies this inset.
 
 The placeholder source PNG is produced by a dependency-free generator
 (`src-tauri/icons/source/generate-vire-mark.mjs`, run with `node`) so the temporary mark is
