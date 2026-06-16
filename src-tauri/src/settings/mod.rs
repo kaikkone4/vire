@@ -16,7 +16,7 @@ use crate::langfuse::config::{
     Credentials, ImporterConfig, Secret, Source, DEFAULT_BASE_URL, DEFAULT_ENVIRONMENT,
 };
 use crate::langfuse::store::{self, SourceHealthSnapshot};
-use secret_store::SecretStore;
+use secret_store::{SecretStore, SecretStoreError};
 
 /// Keychain account names (service = bundle id `dev.vire.app`); distinct entries per key.
 pub const PUBLIC_KEY_ACCOUNT: &str = "langfuse_public_key";
@@ -163,7 +163,12 @@ pub fn resolve_public_config_with(conn: &Connection, env: &dyn EnvSource) -> Imp
 /// read from the Keychain first (per field), then the marked dev-fallback env vars. Both keys must
 /// be present for credentials to be attached, mirroring the existing `from_env` contract. The
 /// secret flows through the redacting [`Secret`]/[`Credentials`] types — never a raw second path.
-pub fn resolve_config(conn: &Connection, secrets: &dyn SecretStore) -> ImporterConfig {
+///
+/// A genuine secret-store backend failure (distinct from "no entry") is propagated as a coarse,
+/// secret-free `Err` — it must **not** be silently treated as an absent credential, because that
+/// would let the env dev fallback override a failed settings-first read (the resolver contract is
+/// env-only-when-stored-credentials-are-absent).
+pub fn resolve_config(conn: &Connection, secrets: &dyn SecretStore) -> CmdResult<ImporterConfig> {
     resolve_config_with(conn, secrets, &ProcessEnv)
 }
 
@@ -171,32 +176,39 @@ pub fn resolve_config_with(
     conn: &Connection,
     secrets: &dyn SecretStore,
     env: &dyn EnvSource,
-) -> ImporterConfig {
+) -> CmdResult<ImporterConfig> {
     let mut config = resolve_public_config_with(conn, env);
-    config.credentials = resolve_credentials(secrets, env);
-    config
+    config.credentials = resolve_credentials(secrets, env).map_err(|e| e.0)?;
+    Ok(config)
 }
 
-fn resolve_credentials(secrets: &dyn SecretStore, env: &dyn EnvSource) -> Option<Credentials> {
-    let public_key = secrets
-        .get(PUBLIC_KEY_ACCOUNT)
-        .ok()
-        .flatten()
-        .or_else(|| env.get("VIRE_LANGFUSE_PUBLIC_KEY"))
-        .or_else(|| env.get("LANGFUSE_PUBLIC_KEY"));
-    let secret_key = secrets
-        .get(SECRET_KEY_ACCOUNT)
-        .ok()
-        .flatten()
-        .or_else(|| env.get("VIRE_LANGFUSE_SECRET_KEY"))
-        .or_else(|| env.get("LANGFUSE_SECRET_KEY"));
-    match (public_key, secret_key) {
+/// Resolve the credential pair. Each key is read from the secret store first; the env dev fallback
+/// is consulted **only** when the store reports no entry (`Ok(None)`). A real read failure
+/// (`Err`) short-circuits with a coarse, secret-free error so a Keychain outage can never be
+/// mistaken for "no credential" and silently downgraded to the env fallback.
+fn resolve_credentials(
+    secrets: &dyn SecretStore,
+    env: &dyn EnvSource,
+) -> Result<Option<Credentials>, SecretStoreError> {
+    let public_key = match secrets.get(PUBLIC_KEY_ACCOUNT)? {
+        Some(value) => Some(value),
+        None => env
+            .get("VIRE_LANGFUSE_PUBLIC_KEY")
+            .or_else(|| env.get("LANGFUSE_PUBLIC_KEY")),
+    };
+    let secret_key = match secrets.get(SECRET_KEY_ACCOUNT)? {
+        Some(value) => Some(value),
+        None => env
+            .get("VIRE_LANGFUSE_SECRET_KEY")
+            .or_else(|| env.get("LANGFUSE_SECRET_KEY")),
+    };
+    Ok(match (public_key, secret_key) {
         (Some(public_key), Some(secret_key)) => Some(Credentials {
             public_key,
             secret_key: Secret::new(secret_key),
         }),
         _ => None,
-    }
+    })
 }
 
 // ----- IPC repo functions (secret-free) -----------------------------------------------------
@@ -269,7 +281,14 @@ pub fn set_langfuse_secret_repo(
         return Err("Secret key cannot be empty".into());
     }
     secrets.set(PUBLIC_KEY_ACCOUNT, public_key).map_err(|e| e.0)?;
-    secrets.set(SECRET_KEY_ACCOUNT, secret_key).map_err(|e| e.0)?;
+    // If the secret write fails, roll back the public-key write so the credential surface is never
+    // left half-updated (a stored public key with no matching secret, which would read as a usable
+    // pair that authenticates with a stale/absent secret). The rollback delete is idempotent; its
+    // own failure must not mask the original secret-free error.
+    if let Err(e) = secrets.set(SECRET_KEY_ACCOUNT, secret_key) {
+        let _ = secrets.delete(PUBLIC_KEY_ACCOUNT);
+        return Err(e.0);
+    }
     Ok(())
 }
 
@@ -278,6 +297,33 @@ pub fn clear_langfuse_secret_repo(secrets: &dyn SecretStore) -> CmdResult<()> {
     secrets.delete(PUBLIC_KEY_ACCOUNT).map_err(|e| e.0)?;
     secrets.delete(SECRET_KEY_ACCOUNT).map_err(|e| e.0)?;
     Ok(())
+}
+
+/// Outcome of resolving what a **Test connection** action should do. A disabled integration is
+/// resolved **before** the secret store or network is touched, so the caller returns an explicit
+/// disabled verdict without a Keychain read or probe; only an enabled integration carries the
+/// resolved [`ImporterConfig`] (with its one-shot credential read) forward to the bounded probe.
+/// `Debug` is safe to derive: the embedded `ImporterConfig`/`Credentials` redact key material in
+/// their own `Debug` impls (`langfuse/config.rs`), so a plan never renders a secret.
+#[derive(Debug)]
+pub enum TestConnectionPlan {
+    Disabled,
+    Probe(ImporterConfig),
+}
+
+/// Decide what a Test connection should do. Mirrors the `import_langfuse_now` / health-snapshot
+/// short-circuit: when `langfuse_enabled == false` this returns [`TestConnectionPlan::Disabled`]
+/// **before** any `SecretStore` access (the secret store is consulted only on the `Probe` path), so
+/// a disabled integration can never trigger a Keychain read or a network probe. A real Keychain
+/// read failure on the enabled path surfaces as a coarse, secret-free `Err`.
+pub fn test_connection_plan(
+    conn: &Connection,
+    secrets: &dyn SecretStore,
+) -> CmdResult<TestConnectionPlan> {
+    if !langfuse_enabled(conn) {
+        return Ok(TestConnectionPlan::Disabled);
+    }
+    Ok(TestConnectionPlan::Probe(resolve_config(conn, secrets)?))
 }
 
 /// Read-only source health for `get_langfuse_source_health` and post-import. When the integration

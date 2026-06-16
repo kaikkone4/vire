@@ -39,7 +39,9 @@ pub fn run_blocking_import(db_path: &Path) -> Result<(), String> {
     store::migrate(&conn).map_err(|e| e.to_string())?;
     // Settings-first resolution (TASK-026): stored settings + Keychain credentials win; process env
     // is the marked dev fallback. The Keychain read is on this dedicated import thread, off the UI.
-    let config = crate::settings::resolve_config(&conn, &KeyringSecretStore::new());
+    // A genuine Keychain read failure propagates a coarse, secret-free error rather than silently
+    // resolving to no/partial credentials.
+    let config = crate::settings::resolve_config(&conn, &KeyringSecretStore::new())?;
     let api = ReqwestLangfuseApi::new(config.clone()).map_err(|e| e.message)?;
     let window = recent_window(7);
     let summaries = importer::run_import(&api, &conn, &config, &window);
@@ -87,6 +89,18 @@ impl TestConnectionResult {
             ok: false,
             verdict: "invalid_config".into(),
             message: message.into(),
+        }
+    }
+
+    /// The integration is disabled: report an explicit, secret-free `disabled` verdict. The caller
+    /// reaches this **without** resolving credentials or opening a socket, so no Keychain read or
+    /// network probe occurs while disabled. Mirrors the disabled health snapshot's posture — a
+    /// disabled integration is an explicit state, never "reachable" or zero.
+    pub fn disabled() -> Self {
+        TestConnectionResult {
+            ok: false,
+            verdict: "disabled".into(),
+            message: "Langfuse integration is disabled — enable it to test the connection.".into(),
         }
     }
 

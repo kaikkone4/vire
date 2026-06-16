@@ -230,11 +230,18 @@ fn clear_langfuse_secret() -> CmdResult<()> {
 
 #[tauri::command]
 fn test_langfuse_connection(state: State<AppState>) -> CmdResult<langfuse::TestConnectionResult> {
-    // Resolve config (incl. a one-shot Keychain read) under the lock, then drop it before the
-    // bounded probe so the UI's DB is never held across the network call.
+    // A disabled integration short-circuits to an explicit disabled verdict BEFORE any Keychain
+    // read or network probe (TASK-026): `test_connection_plan` only touches the secret store on the
+    // enabled `Probe` path. Resolve under the lock, then drop it before the bounded probe so the
+    // UI's DB is never held across the network call.
     let config = {
         let db = db_conn(&state)?;
-        settings::resolve_config(&db, &settings::secret_store::KeyringSecretStore::new())
+        match settings::test_connection_plan(&db, &settings::secret_store::KeyringSecretStore::new())? {
+            settings::TestConnectionPlan::Disabled => {
+                return Ok(langfuse::TestConnectionResult::disabled());
+            }
+            settings::TestConnectionPlan::Probe(config) => config,
+        }
     };
     run_bounded_result(
         Duration::from_secs(TEST_CONNECTION_TIMEOUT_SECS),

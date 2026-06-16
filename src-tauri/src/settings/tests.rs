@@ -101,6 +101,7 @@ fn credentials_resolve_keychain_first_then_env_dev_fallback() {
         .with("VIRE_LANGFUSE_SECRET_KEY", "sk-env-secret");
     // No Keychain creds → env dev fallback supplies them.
     let from_env = resolve_config_with(&c, &secrets, &env)
+        .unwrap()
         .credentials
         .expect("env credentials present");
     assert_eq!(from_env.public_key, "pk-env");
@@ -108,6 +109,7 @@ fn credentials_resolve_keychain_first_then_env_dev_fallback() {
     // Store in the Keychain → Keychain wins over env.
     set_langfuse_secret_repo(&secrets, "pk-keychain".into(), "sk-keychain-secret".into()).unwrap();
     let from_keychain = resolve_config_with(&c, &secrets, &env)
+        .unwrap()
         .credentials
         .expect("keychain credentials present");
     assert_eq!(from_keychain.public_key, "pk-keychain");
@@ -118,7 +120,7 @@ fn credentials_resolve_keychain_first_then_env_dev_fallback() {
 fn credentials_absent_when_neither_keychain_nor_env() {
     let c = conn();
     let secrets = MemorySecretStore::default();
-    let cfg = resolve_config_with(&c, &secrets, &MapEnv::new());
+    let cfg = resolve_config_with(&c, &secrets, &MapEnv::new()).unwrap();
     assert!(cfg.credentials.is_none(), "no creds → None, never fabricated as empty");
 }
 
@@ -203,7 +205,7 @@ fn clearing_secret_removes_it_and_flips_presence() {
     assert!(!view.has_public_key);
     // With no env fallback, a cleared secret resolves to no credentials → auth_or_network_error at
     // import time, never zero. (The credential is simply absent.)
-    assert!(resolve_config_with(&c, &secrets, &MapEnv::new()).credentials.is_none());
+    assert!(resolve_config_with(&c, &secrets, &MapEnv::new()).unwrap().credentials.is_none());
     // Clearing again is idempotent.
     clear_langfuse_secret_repo(&secrets).unwrap();
 }
@@ -232,7 +234,7 @@ fn settings_sourced_credentials_stay_redacted_in_debug() {
     let c = conn();
     let secrets = MemorySecretStore::default();
     set_langfuse_secret_repo(&secrets, PUBLIC.into(), SECRET.into()).unwrap();
-    let cfg = resolve_config_with(&c, &secrets, &MapEnv::new());
+    let cfg = resolve_config_with(&c, &secrets, &MapEnv::new()).unwrap();
     let rendered = format!("{cfg:?}");
     for needle in [SECRET, PUBLIC, "supersecret", "canary"] {
         assert!(!rendered.contains(needle), "Debug(ImporterConfig) leaked {needle}");
@@ -292,4 +294,141 @@ fn round_trip_set_then_get_reflects_non_secret_settings() {
     assert_eq!(view.environments, vec!["prod".to_string(), "staging".to_string()]);
     assert!(view.langfuse_enabled);
     assert_eq!(view, get_langfuse_settings_repo(&c, &secrets).unwrap());
+}
+
+// ----- Blocker 1: disabled Test connection short-circuits before any secret-store access ----
+
+/// A secret store that fails loudly if *any* method runs — used to prove a code path never touches
+/// the secret store (the disabled Test-connection short-circuit must not read the Keychain).
+struct TripwireSecretStore;
+
+impl SecretStore for TripwireSecretStore {
+    fn get(&self, _account: &str) -> Result<Option<String>, SecretStoreError> {
+        panic!("secret store get must not be called on the disabled path");
+    }
+    fn set(&self, _account: &str, _value: &str) -> Result<(), SecretStoreError> {
+        panic!("secret store set must not be called on the disabled path");
+    }
+    fn delete(&self, _account: &str) -> Result<(), SecretStoreError> {
+        panic!("secret store delete must not be called on the disabled path");
+    }
+}
+
+#[test]
+fn disabled_test_connection_plan_short_circuits_without_touching_the_secret_store() {
+    let c = conn();
+    // Persist the integration as disabled (the credential, if any, is irrelevant to this path).
+    store_settings(&c, &MemorySecretStore::default(), "http://127.0.0.1:3000", "local", &["vire"], false);
+    assert!(!langfuse_enabled(&c));
+    // The tripwire panics on any secret-store method; reaching `Disabled` without a panic proves
+    // the disabled path performs no Keychain read (and, by construction, no network probe).
+    let plan = test_connection_plan(&c, &TripwireSecretStore).unwrap();
+    assert!(matches!(plan, TestConnectionPlan::Disabled));
+}
+
+#[test]
+fn enabled_test_connection_plan_resolves_config_for_a_probe() {
+    let c = conn();
+    let secrets = MemorySecretStore::default();
+    store_settings(&c, &secrets, "http://127.0.0.1:3000", "local", &["vire"], true);
+    set_langfuse_secret_repo(&secrets, PUBLIC.into(), SECRET.into()).unwrap();
+    match test_connection_plan(&c, &secrets).unwrap() {
+        TestConnectionPlan::Probe(config) => {
+            assert_eq!(config.base_url, "http://127.0.0.1:3000");
+            assert!(config.credentials.is_some(), "enabled probe carries resolved credentials");
+        }
+        TestConnectionPlan::Disabled => panic!("enabled integration must produce a probe plan"),
+    }
+}
+
+// ----- Blocker 2: a Keychain read failure is distinguished from an absent credential -------
+
+/// A secret store whose reads fail with a coarse backend error (a Keychain access failure). Proves
+/// a read failure is not silently flattened to "no entry" and downgraded to the env dev fallback.
+struct FailingSecretStore;
+
+impl SecretStore for FailingSecretStore {
+    fn get(&self, _account: &str) -> Result<Option<String>, SecretStoreError> {
+        Err(SecretStoreError(
+            "could not read the credential from the system keychain".into(),
+        ))
+    }
+    fn set(&self, _account: &str, _value: &str) -> Result<(), SecretStoreError> {
+        Err(SecretStoreError(
+            "could not store the credential in the system keychain".into(),
+        ))
+    }
+    fn delete(&self, _account: &str) -> Result<(), SecretStoreError> {
+        Err(SecretStoreError(
+            "could not remove the credential from the system keychain".into(),
+        ))
+    }
+}
+
+#[test]
+fn keychain_read_failure_is_propagated_not_masked_as_missing_credentials() {
+    let c = conn();
+    // Env creds ARE present: the old `.ok().flatten()` would have wrongly fallen back to them.
+    let env = MapEnv::new()
+        .with("VIRE_LANGFUSE_PUBLIC_KEY", "pk-env")
+        .with("VIRE_LANGFUSE_SECRET_KEY", "sk-env-secret");
+    let err = resolve_config_with(&c, &FailingSecretStore, &env).unwrap_err();
+    // A real Keychain failure surfaces as a coarse, secret-free error — never an env-fallback config.
+    assert!(!err.is_empty());
+    for needle in ["sk-", "pk-", "sk-env-secret", "pk-env", "canary"] {
+        assert!(!err.contains(needle), "keychain failure error must be secret-free, found {needle}");
+    }
+}
+
+#[test]
+fn keychain_read_failure_blocks_the_test_connection_plan_before_a_probe() {
+    let c = conn();
+    // Enabled, so the plan reaches the credential read — which fails coarsely instead of probing
+    // with no/partial credentials.
+    store_settings(&c, &MemorySecretStore::default(), "http://127.0.0.1:3000", "local", &["vire"], true);
+    let err = test_connection_plan(&c, &FailingSecretStore).unwrap_err();
+    assert!(!err.is_empty());
+    assert!(!err.contains("sk-") && !err.contains("pk-"));
+}
+
+// ----- Suggestion: a half-failed credential write rolls back the public key ----------------
+
+/// Writes succeed for the public key but fail for the secret key — exercises the rollback that
+/// prevents a misleading half-updated credential surface (public set, secret missing).
+#[derive(Default)]
+struct SecretWriteFailsStore {
+    inner: std::sync::Mutex<HashMap<String, String>>,
+}
+
+impl SecretStore for SecretWriteFailsStore {
+    fn get(&self, account: &str) -> Result<Option<String>, SecretStoreError> {
+        Ok(self.inner.lock().unwrap().get(account).cloned())
+    }
+    fn set(&self, account: &str, value: &str) -> Result<(), SecretStoreError> {
+        if account == SECRET_KEY_ACCOUNT {
+            return Err(SecretStoreError(
+                "could not store the credential in the system keychain".into(),
+            ));
+        }
+        self.inner.lock().unwrap().insert(account.to_string(), value.to_string());
+        Ok(())
+    }
+    fn delete(&self, account: &str) -> Result<(), SecretStoreError> {
+        self.inner.lock().unwrap().remove(account);
+        Ok(())
+    }
+}
+
+#[test]
+fn secret_write_failure_rolls_back_the_public_key_write() {
+    let store = SecretWriteFailsStore::default();
+    let err = set_langfuse_secret_repo(&store, PUBLIC.into(), SECRET.into()).unwrap_err();
+    assert!(!err.is_empty());
+    assert!(!err.contains(SECRET) && !err.contains(PUBLIC), "rollback error must be secret-free");
+    // No misleading partial state: the public key write is rolled back, so neither key remains.
+    assert!(
+        store.get(PUBLIC_KEY_ACCOUNT).unwrap().is_none(),
+        "public key write must be rolled back when the secret write fails"
+    );
+    assert!(store.get(SECRET_KEY_ACCOUNT).unwrap().is_none());
 }

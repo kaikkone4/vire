@@ -16,3 +16,10 @@ export function parseEnvironmentsCsv(csv: string): string[] {
 export function secretStateLabel(present: boolean): string {
   return present ? 'set' : 'not set';
 }
+
+// Test connection is gated on the SAVED enable switch. The Rust core authoritatively
+// short-circuits a disabled integration before any Keychain/network read; the UI mirrors that so a
+// disabled integration cannot trigger a probe. Empty string = allowed; otherwise the tooltip reason.
+export function testConnectionDisabledReason(enabled: boolean): string {
+  return enabled ? '' : 'Enable the Langfuse integration above to test the connection.';
+}
