@@ -52,7 +52,9 @@ fn read_safely(path: &Path) -> Option<String> {
     }
     // Lossy decode: a non-UTF-8 byte cannot become a typed allowlist value; it degrades to a
     // replacement char in a field we never persist, and malformed lines are skipped below.
-    fs::read(path).ok().map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    fs::read(path)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// A session under construction. Fields are only ever overwritten with a *present* value, so a
@@ -153,11 +155,7 @@ fn finish(session_key: String, b: Builder) -> RuntimeSession {
 fn is_known_event(event: &str) -> bool {
     matches!(
         event,
-        "tool_started"
-            | "manual_active"
-            | "tool_finished"
-            | "manual_inactive"
-            | "tool_orphaned"
+        "tool_started" | "manual_active" | "tool_finished" | "manual_inactive" | "tool_orphaned"
     )
 }
 
@@ -166,7 +164,11 @@ fn is_known_event(event: &str) -> bool {
 fn coarse_status(ev: &RawEvent) -> String {
     if let Some(s) = nonempty(&ev.status) {
         let s = s.to_ascii_lowercase();
-        if s.contains("success") || s.contains("ok") || s.contains("complete") || s.contains("finish") {
+        if s.contains("success")
+            || s.contains("ok")
+            || s.contains("complete")
+            || s.contains("finish")
+        {
             return status::SUCCESS.to_string();
         }
         if s.contains("fail") || s.contains("error") {
@@ -184,5 +186,7 @@ fn coarse_status(ev: &RawEvent) -> String {
 }
 
 fn nonempty(v: &Option<String>) -> Option<String> {
-    v.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    v.as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }

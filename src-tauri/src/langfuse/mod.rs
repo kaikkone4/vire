@@ -83,9 +83,11 @@ fn discover_and_record(api: &dyn LangfuseApi, conn: &Connection, window: &Import
 /// function return, not a database read. Keys on the exact sentinel — **not** `health == Unknown`,
 /// which is also produced by a legitimately-persisted indeterminate classification.
 fn import_result(summaries: &[importer::ImportSummary]) -> Result<(), String> {
-    let persist_failed = summaries
-        .iter()
-        .any(|s| s.warnings.iter().any(|w| w == importer::PERSIST_FAILURE_MSG));
+    let persist_failed = summaries.iter().any(|s| {
+        s.warnings
+            .iter()
+            .any(|w| w == importer::PERSIST_FAILURE_MSG)
+    });
     if persist_failed {
         return Err(importer::PERSIST_FAILURE_MSG.to_string());
     }

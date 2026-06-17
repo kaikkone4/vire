@@ -76,7 +76,9 @@ fn add_column_if_absent(
         [],
     ) {
         Ok(_) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column name") => {
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") =>
+        {
             Ok(())
         }
         Err(e) => Err(e),
@@ -139,7 +141,14 @@ pub fn persist_import_run(
 ) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     for (trace_id, payload) in raw {
-        upsert_raw_trace(&tx, &run.environment, trace_id, payload, imported_at, &run.id)?;
+        upsert_raw_trace(
+            &tx,
+            &run.environment,
+            trace_id,
+            payload,
+            imported_at,
+            &run.id,
+        )?;
     }
     for ev in evidence {
         upsert_ai_evidence(&tx, ev, &run.id)?;
@@ -238,7 +247,9 @@ pub fn upsert_discovered_environment(
 }
 
 /// All discovered environments, ordered by name, for the Settings picker and the mapping surface.
-pub fn list_discovered_environments(conn: &Connection) -> rusqlite::Result<Vec<DiscoveredEnvironment>> {
+pub fn list_discovered_environments(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<DiscoveredEnvironment>> {
     let mut stmt = conn.prepare(
         "SELECT environment, first_seen, last_seen
            FROM langfuse_discovered_environments
@@ -369,9 +380,10 @@ pub fn disabled_snapshot(config: &ImporterConfig) -> SourceHealthSnapshot {
         last_import_at: None,
         latest_trace_ts: None,
         health: "disabled".to_string(),
-        message: "Langfuse integration is turned off — enable it in Settings to import AI evidence. \
+        message:
+            "Langfuse integration is turned off — enable it in Settings to import AI evidence. \
                   Disabled is not zero AI usage or cost."
-            .to_string(),
+                .to_string(),
     }
 }
 

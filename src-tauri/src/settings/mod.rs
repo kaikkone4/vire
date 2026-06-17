@@ -258,7 +258,11 @@ pub fn set_langfuse_settings_repo(
     write_setting(
         conn,
         KEY_ENABLED,
-        if input.langfuse_enabled { "true" } else { "false" },
+        if input.langfuse_enabled {
+            "true"
+        } else {
+            "false"
+        },
     )
     .map_err(|e| e.to_string())?;
 
@@ -293,7 +297,9 @@ pub fn set_langfuse_secret_repo(
     // credential-pair integrity). Reading the public key here exposes no secret (SEC-009 guards the
     // secret key only).
     let prior_public_key = secrets.get(PUBLIC_KEY_ACCOUNT).map_err(|e| e.0)?;
-    secrets.set(PUBLIC_KEY_ACCOUNT, public_key).map_err(|e| e.0)?;
+    secrets
+        .set(PUBLIC_KEY_ACCOUNT, public_key)
+        .map_err(|e| e.0)?;
     if let Err(e) = secrets.set(SECRET_KEY_ACCOUNT, secret_key) {
         // The secret write failed, so the secret entry is untouched (still the prior value, if any).
         // Restore the public entry to its prior state — put the previous value back when one existed

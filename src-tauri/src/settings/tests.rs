@@ -41,7 +41,14 @@ fn conn() -> Connection {
     c
 }
 
-fn store_settings(c: &Connection, secrets: &dyn SecretStore, base_url: &str, source: &str, envs: &[&str], enabled: bool) {
+fn store_settings(
+    c: &Connection,
+    secrets: &dyn SecretStore,
+    base_url: &str,
+    source: &str,
+    envs: &[&str],
+    enabled: bool,
+) {
     set_langfuse_settings_repo(
         c,
         secrets,
@@ -76,19 +83,32 @@ fn resolver_falls_back_to_env_when_no_settings() {
         .with("VIRE_LANGFUSE_ENVIRONMENTS", "alpha, beta");
     let cfg = resolve_public_config_with(&c, &env);
     assert_eq!(cfg.base_url, "http://localhost:3000");
-    assert_eq!(cfg.allowed_environments, vec!["alpha".to_string(), "beta".to_string()]);
+    assert_eq!(
+        cfg.allowed_environments,
+        vec!["alpha".to_string(), "beta".to_string()]
+    );
 }
 
 #[test]
 fn stored_settings_win_over_env() {
     let c = conn();
     let secrets = MemorySecretStore::default();
-    store_settings(&c, &secrets, "http://127.0.0.1:4000", "local", &["stored"], true);
+    store_settings(
+        &c,
+        &secrets,
+        "http://127.0.0.1:4000",
+        "local",
+        &["stored"],
+        true,
+    );
     let env = MapEnv::new()
         .with("VIRE_LANGFUSE_BASE_URL", "http://127.0.0.1:9999")
         .with("VIRE_LANGFUSE_ENVIRONMENTS", "envonly");
     let cfg = resolve_public_config_with(&c, &env);
-    assert_eq!(cfg.base_url, "http://127.0.0.1:4000", "stored base_url wins over env");
+    assert_eq!(
+        cfg.base_url, "http://127.0.0.1:4000",
+        "stored base_url wins over env"
+    );
     assert_eq!(cfg.allowed_environments, vec!["stored".to_string()]);
 }
 
@@ -121,7 +141,10 @@ fn credentials_absent_when_neither_keychain_nor_env() {
     let c = conn();
     let secrets = MemorySecretStore::default();
     let cfg = resolve_config_with(&c, &secrets, &MapEnv::new()).unwrap();
-    assert!(cfg.credentials.is_none(), "no creds → None, never fabricated as empty");
+    assert!(
+        cfg.credentials.is_none(),
+        "no creds → None, never fabricated as empty"
+    );
 }
 
 // ----- SEC-002 loopback boundary holds for settings-sourced values ------------------------
@@ -131,7 +154,14 @@ fn loopback_boundary_holds_for_settings_sourced_local() {
     let c = conn();
     let secrets = MemorySecretStore::default();
     // `set` accepts a well-formed URL; `validate_target` enforces loopback at use time.
-    store_settings(&c, &secrets, "http://example.com:3000", "local", &["vire"], true);
+    store_settings(
+        &c,
+        &secrets,
+        "http://example.com:3000",
+        "local",
+        &["vire"],
+        true,
+    );
     let cfg = resolve_public_config_with(&c, &MapEnv::new());
     assert!(
         cfg.validate_target().is_err(),
@@ -143,10 +173,20 @@ fn loopback_boundary_holds_for_settings_sourced_local() {
 fn cloud_off_host_allowed_only_on_explicit_source() {
     let c = conn();
     let secrets = MemorySecretStore::default();
-    store_settings(&c, &secrets, "https://cloud.langfuse.com", "cloud", &["vire"], true);
+    store_settings(
+        &c,
+        &secrets,
+        "https://cloud.langfuse.com",
+        "cloud",
+        &["vire"],
+        true,
+    );
     let cfg = resolve_public_config_with(&c, &MapEnv::new());
     assert_eq!(cfg.source, Source::Cloud);
-    assert!(cfg.validate_target().is_ok(), "cloud + off-host is permitted on explicit source");
+    assert!(
+        cfg.validate_target().is_ok(),
+        "cloud + off-host is permitted on explicit source"
+    );
 }
 
 #[test]
@@ -198,14 +238,21 @@ fn clearing_secret_removes_it_and_flips_presence() {
     let c = conn();
     let secrets = MemorySecretStore::default();
     set_langfuse_secret_repo(&secrets, PUBLIC.into(), SECRET.into()).unwrap();
-    assert!(get_langfuse_settings_repo(&c, &secrets).unwrap().has_secret_key);
+    assert!(
+        get_langfuse_settings_repo(&c, &secrets)
+            .unwrap()
+            .has_secret_key
+    );
     clear_langfuse_secret_repo(&secrets).unwrap();
     let view = get_langfuse_settings_repo(&c, &secrets).unwrap();
     assert!(!view.has_secret_key);
     assert!(!view.has_public_key);
     // With no env fallback, a cleared secret resolves to no credentials → auth_or_network_error at
     // import time, never zero. (The credential is simply absent.)
-    assert!(resolve_config_with(&c, &secrets, &MapEnv::new()).unwrap().credentials.is_none());
+    assert!(resolve_config_with(&c, &secrets, &MapEnv::new())
+        .unwrap()
+        .credentials
+        .is_none());
     // Clearing again is idempotent.
     clear_langfuse_secret_repo(&secrets).unwrap();
 }
@@ -214,7 +261,14 @@ fn clearing_secret_removes_it_and_flips_presence() {
 fn secret_is_never_written_to_the_settings_table() {
     let c = conn();
     let secrets = MemorySecretStore::default();
-    store_settings(&c, &secrets, "http://127.0.0.1:3000", "local", &["vire"], true);
+    store_settings(
+        &c,
+        &secrets,
+        "http://127.0.0.1:3000",
+        "local",
+        &["vire"],
+        true,
+    );
     set_langfuse_secret_repo(&secrets, PUBLIC.into(), SECRET.into()).unwrap();
     let mut stmt = c.prepare("SELECT key, value FROM settings").unwrap();
     let rows: Vec<(String, String)> = stmt
@@ -223,9 +277,18 @@ fn secret_is_never_written_to_the_settings_table() {
         .map(Result::unwrap)
         .collect();
     for (key, value) in &rows {
-        assert!(!value.contains(SECRET), "settings[{key}] leaked the secret key");
-        assert!(!value.contains(PUBLIC), "settings[{key}] leaked the public key");
-        assert!(!key.to_ascii_lowercase().contains("secret"), "no credential-bearing settings key");
+        assert!(
+            !value.contains(SECRET),
+            "settings[{key}] leaked the secret key"
+        );
+        assert!(
+            !value.contains(PUBLIC),
+            "settings[{key}] leaked the public key"
+        );
+        assert!(
+            !key.to_ascii_lowercase().contains("secret"),
+            "no credential-bearing settings key"
+        );
     }
 }
 
@@ -237,7 +300,10 @@ fn settings_sourced_credentials_stay_redacted_in_debug() {
     let cfg = resolve_config_with(&c, &secrets, &MapEnv::new()).unwrap();
     let rendered = format!("{cfg:?}");
     for needle in [SECRET, PUBLIC, "supersecret", "canary"] {
-        assert!(!rendered.contains(needle), "Debug(ImporterConfig) leaked {needle}");
+        assert!(
+            !rendered.contains(needle),
+            "Debug(ImporterConfig) leaked {needle}"
+        );
     }
 }
 
@@ -246,7 +312,10 @@ fn settings_sourced_credentials_stay_redacted_in_debug() {
 #[test]
 fn enabled_is_true_by_default_and_snapshot_is_unknown_before_import() {
     let c = conn();
-    assert!(langfuse_enabled(&c), "default-on preserves the pre-TASK-026 always-active behavior");
+    assert!(
+        langfuse_enabled(&c),
+        "default-on preserves the pre-TASK-026 always-active behavior"
+    );
     let snap = source_health_snapshot(&c).unwrap();
     assert_eq!(snap.health, "unknown");
 }
@@ -256,22 +325,38 @@ fn disabled_short_circuits_to_a_disabled_snapshot_with_no_secret_store_access() 
     let c = conn();
     let secrets = MemorySecretStore::default();
     set_langfuse_secret_repo(&secrets, PUBLIC.into(), SECRET.into()).unwrap();
-    store_settings(&c, &secrets, "http://127.0.0.1:3000", "local", &["vire"], false);
+    store_settings(
+        &c,
+        &secrets,
+        "http://127.0.0.1:3000",
+        "local",
+        &["vire"],
+        false,
+    );
     assert!(!langfuse_enabled(&c));
     // `source_health_snapshot` takes no SecretStore and fires no probe — disabled is resolved
     // structurally before any Keychain or network access.
     let snap = source_health_snapshot(&c).unwrap();
     assert_eq!(snap.health, "disabled");
-    assert!(snap.message.contains("not zero AI usage or cost"), "disabled is never reported as zero");
+    assert!(
+        snap.message.contains("not zero AI usage or cost"),
+        "disabled is never reported as zero"
+    );
 }
 
 #[test]
 fn enabled_env_fallback_can_disable_but_stored_setting_wins() {
     let c = conn();
     let env = MapEnv::new().with("VIRE_LANGFUSE_ENABLED", "false");
-    assert!(!langfuse_enabled_with(&c, &env), "env dev fallback can disable when unset in settings");
+    assert!(
+        !langfuse_enabled_with(&c, &env),
+        "env dev fallback can disable when unset in settings"
+    );
     write_setting(&c, KEY_ENABLED, "true").unwrap();
-    assert!(langfuse_enabled_with(&c, &env), "stored setting wins over env");
+    assert!(
+        langfuse_enabled_with(&c, &env),
+        "stored setting wins over env"
+    );
 }
 
 #[test]
@@ -291,7 +376,10 @@ fn round_trip_set_then_get_reflects_non_secret_settings() {
     .unwrap();
     // Source normalized, blank environments dropped, trimmed.
     assert_eq!(view.source, "cloud");
-    assert_eq!(view.environments, vec!["prod".to_string(), "staging".to_string()]);
+    assert_eq!(
+        view.environments,
+        vec!["prod".to_string(), "staging".to_string()]
+    );
     assert!(view.langfuse_enabled);
     assert_eq!(view, get_langfuse_settings_repo(&c, &secrets).unwrap());
 }
@@ -318,7 +406,14 @@ impl SecretStore for TripwireSecretStore {
 fn disabled_test_connection_plan_short_circuits_without_touching_the_secret_store() {
     let c = conn();
     // Persist the integration as disabled (the credential, if any, is irrelevant to this path).
-    store_settings(&c, &MemorySecretStore::default(), "http://127.0.0.1:3000", "local", &["vire"], false);
+    store_settings(
+        &c,
+        &MemorySecretStore::default(),
+        "http://127.0.0.1:3000",
+        "local",
+        &["vire"],
+        false,
+    );
     assert!(!langfuse_enabled(&c));
     // The tripwire panics on any secret-store method; reaching `Disabled` without a panic proves
     // the disabled path performs no Keychain read (and, by construction, no network probe).
@@ -330,12 +425,22 @@ fn disabled_test_connection_plan_short_circuits_without_touching_the_secret_stor
 fn enabled_test_connection_plan_resolves_config_for_a_probe() {
     let c = conn();
     let secrets = MemorySecretStore::default();
-    store_settings(&c, &secrets, "http://127.0.0.1:3000", "local", &["vire"], true);
+    store_settings(
+        &c,
+        &secrets,
+        "http://127.0.0.1:3000",
+        "local",
+        &["vire"],
+        true,
+    );
     set_langfuse_secret_repo(&secrets, PUBLIC.into(), SECRET.into()).unwrap();
     match test_connection_plan(&c, &secrets).unwrap() {
         TestConnectionPlan::Probe(config) => {
             assert_eq!(config.base_url, "http://127.0.0.1:3000");
-            assert!(config.credentials.is_some(), "enabled probe carries resolved credentials");
+            assert!(
+                config.credentials.is_some(),
+                "enabled probe carries resolved credentials"
+            );
         }
         TestConnectionPlan::Disabled => panic!("enabled integration must produce a probe plan"),
     }
@@ -376,7 +481,10 @@ fn keychain_read_failure_is_propagated_not_masked_as_missing_credentials() {
     // A real Keychain failure surfaces as a coarse, secret-free error — never an env-fallback config.
     assert!(!err.is_empty());
     for needle in ["sk-", "pk-", "sk-env-secret", "pk-env", "canary"] {
-        assert!(!err.contains(needle), "keychain failure error must be secret-free, found {needle}");
+        assert!(
+            !err.contains(needle),
+            "keychain failure error must be secret-free, found {needle}"
+        );
     }
 }
 
@@ -385,7 +493,14 @@ fn keychain_read_failure_blocks_the_test_connection_plan_before_a_probe() {
     let c = conn();
     // Enabled, so the plan reaches the credential read — which fails coarsely instead of probing
     // with no/partial credentials.
-    store_settings(&c, &MemorySecretStore::default(), "http://127.0.0.1:3000", "local", &["vire"], true);
+    store_settings(
+        &c,
+        &MemorySecretStore::default(),
+        "http://127.0.0.1:3000",
+        "local",
+        &["vire"],
+        true,
+    );
     let err = test_connection_plan(&c, &FailingSecretStore).unwrap_err();
     assert!(!err.is_empty());
     assert!(!err.contains("sk-") && !err.contains("pk-"));
@@ -410,7 +525,10 @@ impl SecretStore for SecretWriteFailsStore {
                 "could not store the credential in the system keychain".into(),
             ));
         }
-        self.inner.lock().unwrap().insert(account.to_string(), value.to_string());
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(account.to_string(), value.to_string());
         Ok(())
     }
     fn delete(&self, account: &str) -> Result<(), SecretStoreError> {
@@ -424,7 +542,10 @@ fn secret_write_failure_rolls_back_the_public_key_write() {
     let store = SecretWriteFailsStore::default();
     let err = set_langfuse_secret_repo(&store, PUBLIC.into(), SECRET.into()).unwrap_err();
     assert!(!err.is_empty());
-    assert!(!err.contains(SECRET) && !err.contains(PUBLIC), "rollback error must be secret-free");
+    assert!(
+        !err.contains(SECRET) && !err.contains(PUBLIC),
+        "rollback error must be secret-free"
+    );
     // No misleading partial state: the public key write is rolled back, so neither key remains.
     assert!(
         store.get(PUBLIC_KEY_ACCOUNT).unwrap().is_none(),
@@ -459,13 +580,22 @@ fn failed_replacement_restores_the_prior_pair_and_never_mixes_keychain_with_env(
     let err = set_langfuse_secret_repo(&store, P_NEW.into(), S_NEW.into()).unwrap_err();
     assert!(!err.is_empty());
     for needle in [S_OLD, S_NEW, P_OLD, P_NEW] {
-        assert!(!err.contains(needle), "rollback error must be secret-free, found {needle}");
+        assert!(
+            !err.contains(needle),
+            "rollback error must be secret-free, found {needle}"
+        );
     }
 
     // The pair is restored to the prior, consistent state — both entries present and matching the
     // prior pair (NOT the new public beside the stale secret, NOT a deleted public).
-    assert_eq!(store.get(PUBLIC_KEY_ACCOUNT).unwrap().as_deref(), Some(P_OLD));
-    assert_eq!(store.get(SECRET_KEY_ACCOUNT).unwrap().as_deref(), Some(S_OLD));
+    assert_eq!(
+        store.get(PUBLIC_KEY_ACCOUNT).unwrap().as_deref(),
+        Some(P_OLD)
+    );
+    assert_eq!(
+        store.get(SECRET_KEY_ACCOUNT).unwrap().as_deref(),
+        Some(S_OLD)
+    );
 
     // The decisive check: even with an env public-key fallback available, the resolver returns the
     // prior Keychain pair. It can NOT combine the env public key with the surviving Keychain secret.
@@ -477,8 +607,15 @@ fn failed_replacement_restores_the_prior_pair_and_never_mixes_keychain_with_env(
         .unwrap()
         .credentials
         .expect("the restored prior Keychain pair resolves to credentials");
-    assert_eq!(creds.public_key, P_OLD, "public key must come from the Keychain, not the env fallback");
-    assert_eq!(creds.secret_key.expose(), S_OLD, "secret key must remain the prior Keychain entry");
+    assert_eq!(
+        creds.public_key, P_OLD,
+        "public key must come from the Keychain, not the env fallback"
+    );
+    assert_eq!(
+        creds.secret_key.expose(),
+        S_OLD,
+        "secret key must remain the prior Keychain entry"
+    );
     assert_ne!(
         creds.public_key, "pk-env-must-not-be-used",
         "no Keychain/env mixed pair: the env public key must never pair with the Keychain secret"

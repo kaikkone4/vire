@@ -323,7 +323,8 @@ fn normalize_trace(api: &dyn LangfuseApi, env: &str, trace: &Trace) -> (AiEviden
             Err(_) => fetch_failed = true,
         }
     }
-    let generations: Vec<&Observation> = observations.iter().filter(|o| o.is_generation()).collect();
+    let generations: Vec<&Observation> =
+        observations.iter().filter(|o| o.is_generation()).collect();
 
     let prompt_tokens = sum_opt_i64(generations.iter().map(|o| o.prompt()));
     let completion_tokens = sum_opt_i64(generations.iter().map(|o| o.completion()));
@@ -333,11 +334,13 @@ fn normalize_trace(api: &dyn LangfuseApi, env: &str, trace: &Trace) -> (AiEviden
         // Fall back to the trace-level aggregate convenience only if observations had no cost.
         cost_total = trace.total_cost;
     }
-    let ai_start_ts = generations.iter().filter_map(|o| o.start_time.clone()).min();
+    let ai_start_ts = generations
+        .iter()
+        .filter_map(|o| o.start_time.clone())
+        .min();
     let ai_end_ts = generations.iter().filter_map(|o| o.end_time.clone()).max();
 
-    let schema_issue =
-        fetch_failed || generations.iter().any(|o| o.lacks_usage_and_cost());
+    let schema_issue = fetch_failed || generations.iter().any(|o| o.lacks_usage_and_cost());
     let health = if schema_issue {
         HealthState::SchemaChanged
     } else {

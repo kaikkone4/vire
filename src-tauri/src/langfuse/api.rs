@@ -174,7 +174,10 @@ fn map_status_error(status: u16) -> ApiError {
             ApiErrorKind::Auth,
             "Langfuse rejected the credentials (auth error)",
         ),
-        429 => ApiError::new(ApiErrorKind::RateLimited, "Langfuse rate limited the import"),
+        429 => ApiError::new(
+            ApiErrorKind::RateLimited,
+            "Langfuse rate limited the import",
+        ),
         500..=599 => ApiError::new(
             ApiErrorKind::Unavailable,
             "Langfuse stack returned a server error",

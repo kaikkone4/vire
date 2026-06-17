@@ -20,9 +20,7 @@ use model::{ReconciledSession, ReconciliationState, RuntimeReconciliationSnapsho
 /// Observe → reconcile → persist → snapshot, all local. Reads the configured session log and the
 /// importer's evidence/run tables read-only, writes only the observer-owned `ai_runtime_sessions`
 /// table, and returns coarse counts. A persistence failure surfaces as a secret-free `Err`.
-pub fn observe_and_reconcile(
-    conn: &Connection,
-) -> Result<RuntimeReconciliationSnapshot, String> {
+pub fn observe_and_reconcile(conn: &Connection) -> Result<RuntimeReconciliationSnapshot, String> {
     let config = RuntimeConfig::from_env();
     observe_with_config(conn, &config)
 }
@@ -42,11 +40,16 @@ pub(crate) fn observe_with_config(
 
     let observed_at = now();
     for r in &reconciled {
-        store::upsert_session(conn, r, &observed_at).map_err(|_| PERSIST_FAILURE_MSG.to_string())?;
+        store::upsert_session(conn, r, &observed_at)
+            .map_err(|_| PERSIST_FAILURE_MSG.to_string())?;
     }
 
     let unmatched_trace = reconcile::count_unmatched_traces(&reconciled, &evidence);
-    Ok(build_snapshot(&reconciled, unmatched_trace, ingested.log_present))
+    Ok(build_snapshot(
+        &reconciled,
+        unmatched_trace,
+        ingested.log_present,
+    ))
 }
 
 /// Secret-free message used if the observer cannot persist a reconciled session. rusqlite driver
@@ -60,7 +63,10 @@ fn build_snapshot(
     log_present: bool,
 ) -> RuntimeReconciliationSnapshot {
     let count = |state: ReconciliationState| {
-        reconciled.iter().filter(|r| r.reconciliation == state).count() as u32
+        reconciled
+            .iter()
+            .filter(|r| r.reconciliation == state)
+            .count() as u32
     };
     let observed_no_trace = count(ReconciliationState::ObservedNoTrace);
     let reconciliation_unknown = count(ReconciliationState::ReconciliationUnknown);

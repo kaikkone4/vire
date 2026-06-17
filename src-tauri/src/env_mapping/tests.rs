@@ -19,13 +19,20 @@ fn conn() -> Connection {
 }
 
 fn make_project(c: &Connection, name: &str) -> String {
-    create_project_repo(c, ProjectInput { name: name.into(), notes: None })
-        .unwrap()
-        .id
+    create_project_repo(
+        c,
+        ProjectInput {
+            name: name.into(),
+            notes: None,
+        },
+    )
+    .unwrap()
+    .id
 }
 
 fn project_count(c: &Connection) -> i64 {
-    c.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap()
+    c.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+        .unwrap()
 }
 
 #[test]
@@ -60,8 +67,14 @@ fn remapping_updates_project_but_preserves_created_at() {
     let p2 = make_project(&c, "Beta");
     let first = set_env_mapping_repo(&c, "vire".into(), p1).unwrap();
     let second = set_env_mapping_repo(&c, "vire".into(), p2.clone()).unwrap();
-    assert_eq!(second.project_id, p2, "the environment now maps to the new project");
-    assert_eq!(second.created_at, first.created_at, "created_at is preserved across a re-map");
+    assert_eq!(
+        second.project_id, p2,
+        "the environment now maps to the new project"
+    );
+    assert_eq!(
+        second.created_at, first.created_at,
+        "created_at is preserved across a re-map"
+    );
     // Still exactly one row for the environment (upsert, not insert).
     assert_eq!(list_env_mappings_repo(&c).unwrap().len(), 1);
 }
@@ -82,7 +95,11 @@ fn mapping_to_a_missing_project_is_refused_and_creates_nothing() {
     let c = conn();
     let err = set_env_mapping_repo(&c, "vire".into(), "no-such-project".into()).unwrap_err();
     assert!(err.contains("does not exist"));
-    assert_eq!(project_count(&c), 0, "a failed map must not create a project (DEC-001)");
+    assert_eq!(
+        project_count(&c),
+        0,
+        "a failed map must not create a project (DEC-001)"
+    );
     assert!(list_env_mappings_repo(&c).unwrap().is_empty());
 }
 
@@ -94,17 +111,27 @@ fn discovered_unmapped_suggests_create_then_explicit_action_maps_it() {
     let before = list_discovered_environments_repo(&c).unwrap();
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].environment, "vire");
-    assert!(!before[0].mapped, "an unmapped discovered env is the suggest-create case");
+    assert!(
+        !before[0].mapped,
+        "an unmapped discovered env is the suggest-create case"
+    );
     assert!(before[0].project_id.is_none());
     // CRITICAL (DEC-006): reading the suggestion list never auto-creates a project.
-    assert_eq!(project_count(&c), 0, "no project is auto-created by surfacing a suggestion");
+    assert_eq!(
+        project_count(&c),
+        0,
+        "no project is auto-created by surfacing a suggestion"
+    );
 
     // The user explicitly accepts: create the project via the normal path, then map it.
     let pid = make_project(&c, "Vire");
     set_env_mapping_repo(&c, "vire".into(), pid.clone()).unwrap();
 
     let after = list_discovered_environments_repo(&c).unwrap();
-    assert!(after[0].mapped, "after the explicit action the environment is mapped");
+    assert!(
+        after[0].mapped,
+        "after the explicit action the environment is mapped"
+    );
     assert_eq!(after[0].project_id.as_deref(), Some(pid.as_str()));
     assert_eq!(after[0].project_name.as_deref(), Some("Vire"));
 }
@@ -154,17 +181,34 @@ fn evidence_is_associated_to_a_project_at_read_time_without_rewrite() {
     let joined = list_evidence_projects_repo(&c).unwrap();
     let t1 = joined.iter().find(|e| e.trace_id == "T1").unwrap();
     let t2 = joined.iter().find(|e| e.trace_id == "T2").unwrap();
-    assert_eq!(t1.project_id.as_deref(), Some(pid.as_str()), "mapped env's evidence joins to its project");
-    assert!(t2.project_id.is_none(), "unmapped env's evidence has no project at read time");
+    assert_eq!(
+        t1.project_id.as_deref(),
+        Some(pid.as_str()),
+        "mapped env's evidence joins to its project"
+    );
+    assert!(
+        t2.project_id.is_none(),
+        "unmapped env's evidence has no project at read time"
+    );
 
     // Clearing the mapping changes only the join result — the evidence rows are untouched.
     clear_env_mapping_repo(&c, "vire".into()).unwrap();
     let after = list_evidence_projects_repo(&c).unwrap();
-    assert!(after.iter().find(|e| e.trace_id == "T1").unwrap().project_id.is_none());
+    assert!(after
+        .iter()
+        .find(|e| e.trace_id == "T1")
+        .unwrap()
+        .project_id
+        .is_none());
     let surviving: i64 = c
-        .query_row("SELECT COUNT(*) FROM langfuse_ai_evidence", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM langfuse_ai_evidence", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(surviving, 2, "evidence rows are preserved across a mapping change (no rewrite)");
+    assert_eq!(
+        surviving, 2,
+        "evidence rows are preserved across a mapping change (no rewrite)"
+    );
 }
 
 #[test]
