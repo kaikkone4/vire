@@ -109,7 +109,9 @@ impl RawEvent {
 }
 
 fn nonempty(v: &Option<String>) -> Option<String> {
-    v.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    v.as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// A coarse runtime session after lifecycle pairing — boundaries only, no content.

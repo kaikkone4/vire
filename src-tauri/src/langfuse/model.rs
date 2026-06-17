@@ -147,8 +147,11 @@ pub struct Trace {
 }
 
 /// A generation observation — where token usage and model cost actually live. Read by observed
-/// shape: `usage` = `{input, output, total, unit}` plus top-level token counts; several
-/// cost/model fields are nullable.
+/// shape across Langfuse versions: the legacy `usage` = `{input, output, total, unit}` map plus
+/// top-level `promptTokens`/`completionTokens`/`totalTokens` AND the current `usageDetails` /
+/// `costDetails` maps the live stack (v3, verified at SW-2 against the local 3.178.0 instance and
+/// the TASK-007 shape-only spike) returns. Several cost/model fields are nullable; absence in
+/// every supported location stays absent, never `0`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Observation {
     #[serde(default, rename = "type")]
@@ -171,6 +174,15 @@ pub struct Observation {
     pub usage: Option<Usage>,
     #[serde(default, rename = "calculatedTotalCost")]
     pub calculated_total_cost: Option<f64>,
+    /// Current-shape token usage map (e.g. `{"input": N, "output": M, "total": T, …}`). May be
+    /// absent or empty on older shapes; per-model extra keys (cache/reasoning tokens) are ignored —
+    /// only the conventional `input`/`output`/`total` keys are read.
+    #[serde(default, rename = "usageDetails")]
+    pub usage_details: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Current-shape cost breakdown map (e.g. `{"input": x, "output": y, "total": z}`). The
+    /// authoritative per-call total is `costDetails["total"]`; absent ⇒ `None`.
+    #[serde(default, rename = "costDetails")]
+    pub cost_details: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -195,30 +207,55 @@ impl Observation {
             .unwrap_or(false)
     }
 
-    /// Prompt tokens by observed shape: top-level field, else nested `usage.input`. `None` (not
-    /// `0`) when neither is present.
+    /// Prompt tokens by observed shape, in precedence order: legacy top-level `promptTokens`,
+    /// else nested legacy `usage.input`, else current `usageDetails["input"]`. `None` (not `0`)
+    /// when none is present — absence is preserved across all supported shapes.
     pub fn prompt(&self) -> Option<i64> {
         self.prompt_tokens
             .or_else(|| self.usage.as_ref().and_then(|u| u.input))
+            .or_else(|| self.usage_detail_tokens("input"))
     }
 
     pub fn completion(&self) -> Option<i64> {
         self.completion_tokens
             .or_else(|| self.usage.as_ref().and_then(|u| u.output))
+            .or_else(|| self.usage_detail_tokens("output"))
     }
 
     pub fn total(&self) -> Option<i64> {
         self.total_tokens
             .or_else(|| self.usage.as_ref().and_then(|u| u.total))
+            .or_else(|| self.usage_detail_tokens("total"))
     }
 
+    /// Per-call cost: legacy `calculatedTotalCost`, else current `costDetails["total"]`. `None`
+    /// (not `0`) when neither is present.
     pub fn cost(&self) -> Option<f64> {
         self.calculated_total_cost
+            .or_else(|| self.cost_detail("total"))
     }
 
-    /// True when a generation observation carries neither any token count nor any cost — the
-    /// Claude-hook-silent-fail / unmapped-price condition that must degrade to `schema_changed`,
-    /// never zero.
+    /// Read a token count from the current `usageDetails` map by key, tolerating integer or float
+    /// JSON encodings. An absent or null key returns `None`, never `0` (absence-≠-zero); a present
+    /// `0` reads as `Some(0)`.
+    fn usage_detail_tokens(&self, key: &str) -> Option<i64> {
+        self.usage_details
+            .as_ref()
+            .and_then(|m| m.get(key))
+            .and_then(json_number_as_i64)
+    }
+
+    /// Read a cost component from the current `costDetails` map by key. Absent/null ⇒ `None`.
+    fn cost_detail(&self, key: &str) -> Option<f64> {
+        self.cost_details
+            .as_ref()
+            .and_then(|m| m.get(key))
+            .and_then(|v| v.as_f64())
+    }
+
+    /// True when a generation observation carries neither any token count nor any cost in **any**
+    /// supported location (legacy or current) — the Claude-hook-silent-fail / unmapped-price
+    /// condition that must degrade to `schema_changed`, never zero.
     pub fn lacks_usage_and_cost(&self) -> bool {
         self.is_generation()
             && self.prompt().is_none()
@@ -226,6 +263,12 @@ impl Observation {
             && self.total().is_none()
             && self.cost().is_none()
     }
+}
+
+/// Read a JSON number as `i64`, tolerating a float encoding (e.g. `10.0`). A non-number or `null`
+/// value yields `None`, so an absent/typeless `usageDetails` entry never becomes a fabricated `0`.
+fn json_number_as_i64(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().or_else(|| value.as_f64().map(|f| f as i64))
 }
 
 /// The normalized AI-evidence row persisted to `langfuse_ai_evidence`. Token/cost fields are

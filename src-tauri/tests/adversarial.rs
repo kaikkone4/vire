@@ -32,7 +32,11 @@ fn archived_project_entries_remain_editable_for_historical_corrections() {
         },
     )
     .unwrap();
-    let entry = create_entry_repo(&c, entry_input(project.id.clone(), Some("before archive".into()))).unwrap();
+    let entry = create_entry_repo(
+        &c,
+        entry_input(project.id.clone(), Some("before archive".into())),
+    )
+    .unwrap();
 
     archive_project_repo(&c, project.id.clone()).unwrap();
 
@@ -124,8 +128,17 @@ fn csv_export_neutralizes_formula_like_project_names_and_notes() {
     .unwrap();
     let csv = std::fs::read_to_string(out.path()).unwrap();
 
-    assert!(csv.contains("'="), "formula-like project name should be prefixed: {csv}");
+    assert!(
+        csv.contains("'="),
+        "formula-like project name should be prefixed: {csv}"
+    );
     assert!(csv.contains("\"' +SUM(1,2) with bare\rcarriage return\""), "formula-like note should be prefixed, preserve leading whitespace, and bare CR should force CSV quoting: {csv}");
-    assert!(!csv.contains(",=WEBSERVICE"), "project formula must not be emitted as an executable CSV cell: {csv}");
-    assert!(!csv.contains(",+SUM"), "note formula must not be emitted as an executable CSV cell: {csv}");
+    assert!(
+        !csv.contains(",=WEBSERVICE"),
+        "project formula must not be emitted as an executable CSV cell: {csv}"
+    );
+    assert!(
+        !csv.contains(",+SUM"),
+        "note formula must not be emitted as an executable CSV cell: {csv}"
+    );
 }

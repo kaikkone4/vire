@@ -32,10 +32,7 @@ fn resolve_one(
     import_runs: &[ImportRunHealth],
     config: &RuntimeConfig,
 ) -> ReconciledSession {
-    let environment = session
-        .project_key
-        .as_str()
-        .trim();
+    let environment = session.project_key.as_str().trim();
     let env = config.resolve_environment(environment);
 
     // 1. session_id exact — works across environments, the strongest signal.
@@ -50,9 +47,10 @@ fn resolve_one(
 
     // 2. environment + time-window overlap — only when the session maps to an environment.
     if let Some(env_name) = &env {
-        if let Some(ev) = evidence.iter().find(|e| {
-            &e.environment == env_name && overlaps(session, e, config.slop_secs)
-        }) {
+        if let Some(ev) = evidence
+            .iter()
+            .find(|e| &e.environment == env_name && overlaps(session, e, config.slop_secs))
+        {
             return matched(session, Some(env_name.clone()), &ev.trace_id);
         }
     }
@@ -183,7 +181,11 @@ fn parse_ts(value: &str) -> Option<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(v) {
         return Some(dt.with_timezone(&Utc));
     }
-    for fmt in ["%Y-%m-%dT%H:%M:%S%.fZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S%.fZ",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+    ] {
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(v, fmt) {
             return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
         }
@@ -192,5 +194,7 @@ fn parse_ts(value: &str) -> Option<DateTime<Utc>> {
 }
 
 fn nonempty(v: &Option<String>) -> Option<String> {
-    v.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    v.as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }

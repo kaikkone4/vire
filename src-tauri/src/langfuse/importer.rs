@@ -31,9 +31,69 @@ pub struct ImportSummary {
     pub traces_seen: usize,
     pub unique: usize,
     pub duplicates: usize,
+    /// Traces/generations dropped for an unrecognized shape (unparseable trace, or a generation
+    /// with no usage/cost in any supported location). Surfaced as `skipped` in the import report.
+    pub skipped_schema: usize,
     pub cursor_ts: Option<String>,
     pub evidence: Vec<AiEvidence>,
     pub warnings: Vec<String>,
+}
+
+/// Secret-free, serializable summary of one import run for the Settings panel (SEC-010). It is
+/// built **only** from counts, health enums (as fixed strings), environment names, and the
+/// importer's existing secret-free warning strings — never a credential, `Authorization` header,
+/// raw API response body, or trace prompt/session content. The per-trace `evidence` (token/cost
+/// values) is deliberately excluded; only aggregate counts cross this boundary.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ImportReport {
+    pub total_traces_seen: usize,
+    pub total_unique: usize,
+    pub total_duplicates: usize,
+    pub total_skipped_schema: usize,
+    pub environment_count: usize,
+    pub environments: Vec<EnvImportLine>,
+}
+
+/// One environment's line in the [`ImportReport`]. Counts + health + secret-free warnings only.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnvImportLine {
+    pub environment: String,
+    pub health: String,
+    pub pages: u32,
+    pub traces_seen: usize,
+    pub unique: usize,
+    pub duplicates: usize,
+    pub skipped_schema: usize,
+    pub warnings: Vec<String>,
+}
+
+impl ImportReport {
+    /// Fold the per-environment summaries into the secret-free report. Pure aggregation of the
+    /// counts the importer already computed — nothing new is read from the network or the store,
+    /// and no token/cost value or raw payload is copied in.
+    pub fn from_summaries(summaries: &[ImportSummary]) -> Self {
+        let environments: Vec<EnvImportLine> = summaries
+            .iter()
+            .map(|s| EnvImportLine {
+                environment: s.environment.clone(),
+                health: s.health.as_str().to_string(),
+                pages: s.pages,
+                traces_seen: s.traces_seen,
+                unique: s.unique,
+                duplicates: s.duplicates,
+                skipped_schema: s.skipped_schema,
+                warnings: s.warnings.clone(),
+            })
+            .collect();
+        ImportReport {
+            total_traces_seen: environments.iter().map(|e| e.traces_seen).sum(),
+            total_unique: environments.iter().map(|e| e.unique).sum(),
+            total_duplicates: environments.iter().map(|e| e.duplicates).sum(),
+            total_skipped_schema: environments.iter().map(|e| e.skipped_schema).sum(),
+            environment_count: environments.len(),
+            environments,
+        }
+    }
 }
 
 struct EnvImport {
@@ -121,6 +181,7 @@ fn unavailable_summary(conn: &Connection, env: &str, err: &ApiError) -> ImportSu
         traces_seen: 0,
         unique: 0,
         duplicates: 0,
+        skipped_schema: 0,
         cursor_ts,
         evidence: Vec::new(),
         warnings: vec![err.message.clone()],
@@ -240,6 +301,7 @@ fn import_environment(
             traces_seen,
             unique: unique_ids.len(),
             duplicates,
+            skipped_schema: schema_issues,
             cursor_ts,
             evidence,
             warnings,
@@ -261,7 +323,8 @@ fn normalize_trace(api: &dyn LangfuseApi, env: &str, trace: &Trace) -> (AiEviden
             Err(_) => fetch_failed = true,
         }
     }
-    let generations: Vec<&Observation> = observations.iter().filter(|o| o.is_generation()).collect();
+    let generations: Vec<&Observation> =
+        observations.iter().filter(|o| o.is_generation()).collect();
 
     let prompt_tokens = sum_opt_i64(generations.iter().map(|o| o.prompt()));
     let completion_tokens = sum_opt_i64(generations.iter().map(|o| o.completion()));
@@ -271,11 +334,13 @@ fn normalize_trace(api: &dyn LangfuseApi, env: &str, trace: &Trace) -> (AiEviden
         // Fall back to the trace-level aggregate convenience only if observations had no cost.
         cost_total = trace.total_cost;
     }
-    let ai_start_ts = generations.iter().filter_map(|o| o.start_time.clone()).min();
+    let ai_start_ts = generations
+        .iter()
+        .filter_map(|o| o.start_time.clone())
+        .min();
     let ai_end_ts = generations.iter().filter_map(|o| o.end_time.clone()).max();
 
-    let schema_issue =
-        fetch_failed || generations.iter().any(|o| o.lacks_usage_and_cost());
+    let schema_issue = fetch_failed || generations.iter().any(|o| o.lacks_usage_and_cost());
     let health = if schema_issue {
         HealthState::SchemaChanged
     } else {

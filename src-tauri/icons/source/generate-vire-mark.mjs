@@ -3,6 +3,10 @@
 // To replace: drop a branded >=1024x1024 PNG at src-tauri/icons/source/vire-icon.png and re-run
 // `npx tauri icon src-tauri/icons/source/vire-icon.png`, then rebuild. No code change required.
 //
+// SAFE AREA (TASK-027 E3): the mark must occupy ~80% of a transparent 1024x1024 canvas (≈10% margin
+// per side) so macOS renders it at Dock parity with other apps. The branded replacement asset MUST
+// keep this same ~80% safe area — a full-bleed PNG will render oversized in the Dock.
+//
 // Dependency-free: encodes a PNG with Node's built-in zlib so it runs anywhere Node is present
 // (no ImageMagick/rsvg/PIL needed). Run: `node src-tauri/icons/source/generate-vire-mark.mjs`.
 
@@ -14,16 +18,25 @@ import { dirname, join } from 'node:path';
 const N = 1024;
 const BG = [79, 70, 229]; // indigo (#4F46E5)
 const FG = [255, 255, 255]; // white mark
-const CORNER_R = 220; // rounded-square corners
 const AA = 1.5; // anti-alias edge width in px
 
-// V geometry (fractions of N)
-const ty = 0.30 * N;
-const by = 0.72 * N;
-const lx = 0.30 * N;
-const rx = 0.70 * N;
-const apex = [0.5 * N, by];
-const strokeHalf = 0.058 * N;
+// Safe-area inset (TASK-027 E3): the rounded-square mark occupies ~80% of the canvas with a
+// transparent margin so macOS renders it at Dock parity with other apps instead of oversized. The
+// branded asset that replaces this placeholder MUST keep the same ~80% safe area (see icons README).
+const SAFE = 0.8;
+const BOX = SAFE * N; // content square side (~819px)
+const ORIGIN = (N - BOX) / 2; // top-left of the inset content square (~102px)
+const CENTER = N / 2;
+const CORNER_R = 0.215 * BOX; // rounded-square corner radius, relative to the inset box
+
+// V geometry as fractions of the inset content box (not the full canvas)
+const frac = (f) => ORIGIN + f * BOX;
+const ty = frac(0.3);
+const by = frac(0.72);
+const lx = frac(0.3);
+const rx = frac(0.7);
+const apex = [frac(0.5), by];
+const strokeHalf = 0.058 * BOX;
 
 function smoothEdge(d, edge) {
   // returns coverage 1 inside (d<0), 0 outside, linear ramp over `edge` px
@@ -43,11 +56,10 @@ function distToSegment(px, py, ax, ay, bx, by) {
 }
 
 function roundedRectSDF(px, py) {
-  // signed distance to a rounded square covering the full canvas; <0 inside
-  const hx = N / 2;
-  const hy = N / 2;
-  const qx = Math.abs(px - hx) - (hx - CORNER_R);
-  const qy = Math.abs(py - hy) - (hy - CORNER_R);
+  // signed distance to the inset rounded square (~80% of canvas, centered); <0 inside
+  const half = BOX / 2;
+  const qx = Math.abs(px - CENTER) - (half - CORNER_R);
+  const qy = Math.abs(py - CENTER) - (half - CORNER_R);
   const ax = Math.max(qx, 0);
   const ay = Math.max(qy, 0);
   const outside = Math.hypot(ax, ay);

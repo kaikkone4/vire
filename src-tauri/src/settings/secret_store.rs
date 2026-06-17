@@ -66,9 +66,9 @@ impl SecretStore for KeyringSecretStore {
     }
 
     fn set(&self, account: &str, value: &str) -> Result<(), SecretStoreError> {
-        self.entry(account)?
-            .set_password(value)
-            .map_err(|_| SecretStoreError("could not store the credential in the system keychain".into()))
+        self.entry(account)?.set_password(value).map_err(|_| {
+            SecretStoreError("could not store the credential in the system keychain".into())
+        })
     }
 
     fn delete(&self, account: &str) -> Result<(), SecretStoreError> {

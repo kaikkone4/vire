@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod config;
+pub mod discovery;
 pub mod importer;
 pub mod model;
 pub mod store;
@@ -16,6 +17,8 @@ use rusqlite::Connection;
 use api::{LangfuseApi, ReqwestLangfuseApi};
 use config::ImporterConfig;
 use model::{ApiError, HealthState, ImportWindow};
+
+pub use importer::ImportReport;
 
 use crate::settings::secret_store::KeyringSecretStore;
 
@@ -33,8 +36,9 @@ pub fn recent_window(days: i64) -> ImportWindow {
 ///
 /// Intended to be called from a dedicated OS thread (not a Tauri async context): the blocking
 /// `reqwest` client must not run inside the Tauri runtime, and using a separate connection keeps
-/// the network call off the UI's database lock. Returns a secret-free error string on failure.
-pub fn run_blocking_import(db_path: &Path) -> Result<(), String> {
+/// the network call off the UI's database lock. Returns a secret-free [`ImportReport`] on success,
+/// or a secret-free error string on failure (including the in-band persist-failure surfacing).
+pub fn run_blocking_import(db_path: &Path) -> Result<ImportReport, String> {
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     store::migrate(&conn).map_err(|e| e.to_string())?;
     // Settings-first resolution (TASK-026): stored settings + Keychain credentials win; process env
@@ -45,7 +49,30 @@ pub fn run_blocking_import(db_path: &Path) -> Result<(), String> {
     let api = ReqwestLangfuseApi::new(config.clone()).map_err(|e| e.message)?;
     let window = recent_window(7);
     let summaries = importer::run_import(&api, &conn, &config, &window);
-    import_result(&summaries)
+    // TASK-027 C: discover the environments present in the source as part of the import (a read-only
+    // scan over the same allowlist). Best-effort and secret-free — a discovery failure must not fail
+    // an otherwise-successful import, and only environment names (not trace content) are persisted.
+    discover_and_record(&api, &conn, &window);
+    // Build the secret-free diagnostics report from the counts the importer just computed, then
+    // apply the TASK-021 in-band persist-failure check: a run that could not be persisted still
+    // surfaces as `Err` (never a stale-healthy result), so the report is returned only for a run
+    // that did persist.
+    let report = ImportReport::from_summaries(&summaries);
+    import_result(&summaries)?;
+    Ok(report)
+}
+
+/// Run environment discovery and persist the distinct environment names additively (TASK-027 C3).
+/// Best-effort: a transport/API failure or an individual persist failure is swallowed so it can
+/// never fail the import that already ran. Only environment names + a `last_seen` timestamp are
+/// written — no credential, trace content, or count (SEC-010).
+fn discover_and_record(api: &dyn LangfuseApi, conn: &Connection, window: &ImportWindow) {
+    if let Ok(environments) = discovery::discover_environments(api, window) {
+        let seen_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        for environment in environments {
+            let _ = store::upsert_discovered_environment(conn, &environment, &seen_at);
+        }
+    }
 }
 
 /// Collapse the per-environment summaries into the manual-import command's in-band result. A run that
@@ -56,9 +83,11 @@ pub fn run_blocking_import(db_path: &Path) -> Result<(), String> {
 /// function return, not a database read. Keys on the exact sentinel — **not** `health == Unknown`,
 /// which is also produced by a legitimately-persisted indeterminate classification.
 fn import_result(summaries: &[importer::ImportSummary]) -> Result<(), String> {
-    let persist_failed = summaries
-        .iter()
-        .any(|s| s.warnings.iter().any(|w| w == importer::PERSIST_FAILURE_MSG));
+    let persist_failed = summaries.iter().any(|s| {
+        s.warnings
+            .iter()
+            .any(|w| w == importer::PERSIST_FAILURE_MSG)
+    });
     if persist_failed {
         return Err(importer::PERSIST_FAILURE_MSG.to_string());
     }

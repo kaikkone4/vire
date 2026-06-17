@@ -135,12 +135,26 @@ fn allowlist_drops_injected_prohibited_fields_and_never_persists_them() {
     // Allowlisted coarse fields survived.
     assert!(dump.contains("vire"), "safe project token kept");
     assert!(dump.contains("claude"), "coarse tool label kept");
-    assert!(dump.contains("session-abc"), "opaque hashed session id kept");
-    assert!(dump.contains(st::SUCCESS), "coarse status derived from exit_code");
+    assert!(
+        dump.contains("session-abc"),
+        "opaque hashed session id kept"
+    );
+    assert!(
+        dump.contains(st::SUCCESS),
+        "coarse status derived from exit_code"
+    );
     // No prohibited value reached the store, in ANY column.
     for needle in [
-        "SECRET", "AKIA", "sk-ant", "rm -rf", "export K", "git_branch", "summary", "command_body",
-        "AWS_SECRET", "cwd",
+        "SECRET",
+        "AKIA",
+        "sk-ant",
+        "rm -rf",
+        "export K",
+        "git_branch",
+        "summary",
+        "command_body",
+        "AWS_SECRET",
+        "cwd",
     ] {
         assert!(
             !dump.contains(needle),
@@ -159,7 +173,11 @@ fn malformed_lines_are_skipped_not_fatal() {
     ]);
     let result = ingest(&config);
     assert!(result.log_present);
-    assert_eq!(result.sessions.len(), 1, "the one valid session is still paired");
+    assert_eq!(
+        result.sessions.len(),
+        1,
+        "the one valid session is still paired"
+    );
     assert_eq!(result.sessions[0].status, st::SUCCESS);
 }
 
@@ -185,7 +203,11 @@ fn empty_log_is_no_evidence() {
 fn symlinked_log_is_refused() {
     let dir = tempdir().unwrap();
     let real = dir.path().join("real.jsonl");
-    std::fs::write(&real, started("r1", "vire", "s", "2026-06-05T10:00:00Z", "claude")).unwrap();
+    std::fs::write(
+        &real,
+        started("r1", "vire", "s", "2026-06-05T10:00:00Z", "claude"),
+    )
+    .unwrap();
     let link = dir.path().join("link.jsonl");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let config = config_for(link);
@@ -202,7 +224,10 @@ fn oversize_log_is_refused() {
     std::fs::write(&path, big).unwrap();
     let config = config_for(path);
     let result = ingest(&config);
-    assert!(!result.log_present, "a file over the byte cap is refused, never partially read");
+    assert!(
+        !result.log_present,
+        "a file over the byte cap is refused, never partially read"
+    );
     assert!(result.sessions.is_empty());
 }
 
@@ -247,7 +272,11 @@ fn idempotent_reingest_does_not_duplicate_rows() {
     let c = conn();
     observe_with_config(&c, &config).unwrap();
     observe_with_config(&c, &config).unwrap();
-    assert_eq!(session_count(&c), 1, "re-ingesting the same log re-resolves in place, no dup rows");
+    assert_eq!(
+        session_count(&c),
+        1,
+        "re-ingesting the same log re-resolves in place, no dup rows"
+    );
 }
 
 // ----- matcher precedence ------------------------------------------------------------------
@@ -256,21 +285,44 @@ fn idempotent_reingest_does_not_duplicate_rows() {
 fn matches_by_session_id_exact_even_cross_environment() {
     let c = conn();
     // Evidence carries the session id but sits in a different environment.
-    seed_evidence(&c, "T1", "other", Some("session-zzz"), Some("2026-06-05T10:00:00Z"), Some("2026-06-05T10:30:00Z"));
+    seed_evidence(
+        &c,
+        "T1",
+        "other",
+        Some("session-zzz"),
+        Some("2026-06-05T10:00:00Z"),
+        Some("2026-06-05T10:30:00Z"),
+    );
     let (config, _dir) = log_with(&[
-        &started("r1", "vire", "session-zzz", "2026-06-05T10:00:00Z", "claude"),
+        &started(
+            "r1",
+            "vire",
+            "session-zzz",
+            "2026-06-05T10:00:00Z",
+            "claude",
+        ),
         &finished("r1", "2026-06-05T10:30:00Z", 0),
     ]);
     observe_with_config(&c, &config).unwrap();
     let dump = dump_sessions(&c);
-    assert!(dump.contains("matched"), "session_id match resolves to matched");
+    assert!(
+        dump.contains("matched"),
+        "session_id match resolves to matched"
+    );
     assert!(dump.contains("T1"), "the matched trace id is recorded");
 }
 
 #[test]
 fn matches_by_env_and_time_overlap_when_no_session_id() {
     let c = conn();
-    seed_evidence(&c, "T2", "vire", None, Some("2026-06-05T10:05:00Z"), Some("2026-06-05T10:20:00Z"));
+    seed_evidence(
+        &c,
+        "T2",
+        "vire",
+        None,
+        Some("2026-06-05T10:05:00Z"),
+        Some("2026-06-05T10:20:00Z"),
+    );
     // Session has no session_id; project maps to env `vire`; windows overlap.
     let line_start = r#"{"event":"tool_started","run_id":"r9","project":"vire","tool":"claude","ts":"2026-06-05T10:00:00Z"}"#;
     let line_finish = finished("r9", "2026-06-05T10:30:00Z", 0);
@@ -287,17 +339,41 @@ fn matches_by_env_and_time_overlap_when_no_session_id() {
 fn session_id_takes_precedence_over_time_overlap() {
     let c = conn();
     // Trace A overlaps in time; trace B shares the session id. session_id must win.
-    seed_evidence(&c, "A", "vire", None, Some("2026-06-05T10:00:00Z"), Some("2026-06-05T10:30:00Z"));
-    seed_evidence(&c, "B", "vire", Some("session-key9"), Some("2026-06-01T00:00:00Z"), Some("2026-06-01T00:10:00Z"));
+    seed_evidence(
+        &c,
+        "A",
+        "vire",
+        None,
+        Some("2026-06-05T10:00:00Z"),
+        Some("2026-06-05T10:30:00Z"),
+    );
+    seed_evidence(
+        &c,
+        "B",
+        "vire",
+        Some("session-key9"),
+        Some("2026-06-01T00:00:00Z"),
+        Some("2026-06-01T00:10:00Z"),
+    );
     let (config, _dir) = log_with(&[
-        &started("r1", "vire", "session-key9", "2026-06-05T10:00:00Z", "claude"),
+        &started(
+            "r1",
+            "vire",
+            "session-key9",
+            "2026-06-05T10:00:00Z",
+            "claude",
+        ),
         &finished("r1", "2026-06-05T10:30:00Z", 0),
     ]);
     let evidence = store::evidence_refs(&c).unwrap();
     let runs = store::import_runs(&c).unwrap();
     let sessions = ingest(&config).sessions;
     let reconciled = reconcile_sessions(&sessions, &evidence, &runs, &config);
-    assert_eq!(reconciled[0].matched_trace_id.as_deref(), Some("B"), "session_id match precedes time");
+    assert_eq!(
+        reconciled[0].matched_trace_id.as_deref(),
+        Some("B"),
+        "session_id match precedes time"
+    );
 }
 
 #[test]
@@ -309,7 +385,10 @@ fn unmappable_project_is_unmatched_runtime() {
         &finished("r1", "2026-06-05T10:05:00Z", 0),
     ]);
     let snap = observe_with_config(&c, &config).unwrap();
-    assert_eq!(snap.unmatched_runtime, 1, "no env mapping ⇒ unmatched_runtime");
+    assert_eq!(
+        snap.unmatched_runtime, 1,
+        "no env mapping ⇒ unmatched_runtime"
+    );
     assert_eq!(snap.observed_no_trace, 0);
 }
 
@@ -318,43 +397,87 @@ fn unmappable_project_is_unmatched_runtime() {
 #[test]
 fn observed_no_trace_only_under_a_healthy_import() {
     let c = conn();
-    seed_import_run(&c, "ir-healthy", "vire", HealthState::Healthy, "2026-06-01T00:00:00Z", "2026-06-08T00:00:00Z");
+    seed_import_run(
+        &c,
+        "ir-healthy",
+        "vire",
+        HealthState::Healthy,
+        "2026-06-01T00:00:00Z",
+        "2026-06-08T00:00:00Z",
+    );
     let (config, _dir) = log_with(&[
-        &started("r1", "vire", "session-nogap", "2026-06-05T10:00:00Z", "claude"),
+        &started(
+            "r1",
+            "vire",
+            "session-nogap",
+            "2026-06-05T10:00:00Z",
+            "claude",
+        ),
         &finished("r1", "2026-06-05T10:30:00Z", 0),
     ]);
     let snap = observe_with_config(&c, &config).unwrap();
-    assert_eq!(snap.observed_no_trace, 1, "healthy import + no trace ⇒ real gap");
+    assert_eq!(
+        snap.observed_no_trace, 1,
+        "healthy import + no trace ⇒ real gap"
+    );
     assert_eq!(snap.reconciliation_unknown, 0);
 }
 
 #[test]
 fn down_or_uncertain_import_is_reconciliation_unknown_never_a_gap() {
-    for down in [HealthState::Unavailable, HealthState::Unknown, HealthState::AuthOrNetworkError] {
+    for down in [
+        HealthState::Unavailable,
+        HealthState::Unknown,
+        HealthState::AuthOrNetworkError,
+    ] {
         let c = conn();
-        seed_import_run(&c, "ir", "vire", down, "2026-06-01T00:00:00Z", "2026-06-08T00:00:00Z");
+        seed_import_run(
+            &c,
+            "ir",
+            "vire",
+            down,
+            "2026-06-01T00:00:00Z",
+            "2026-06-08T00:00:00Z",
+        );
         let (config, _dir) = log_with(&[
             &started("r1", "vire", "session-x", "2026-06-05T10:00:00Z", "claude"),
             &finished("r1", "2026-06-05T10:30:00Z", 0),
         ]);
         let snap = observe_with_config(&c, &config).unwrap();
         assert_eq!(snap.reconciliation_unknown, 1, "{down:?} ⇒ unknown");
-        assert_eq!(snap.observed_no_trace, 0, "{down:?} must never assert a gap");
+        assert_eq!(
+            snap.observed_no_trace, 0,
+            "{down:?} must never assert a gap"
+        );
     }
 }
 
 #[test]
 fn non_healthy_import_does_not_license_a_gap() {
     // stale / missing are not clean positives; a missing trace under them stays unknown.
-    for state in [HealthState::Stale, HealthState::Missing, HealthState::Duplicate] {
+    for state in [
+        HealthState::Stale,
+        HealthState::Missing,
+        HealthState::Duplicate,
+    ] {
         let c = conn();
-        seed_import_run(&c, "ir", "vire", state, "2026-06-01T00:00:00Z", "2026-06-08T00:00:00Z");
+        seed_import_run(
+            &c,
+            "ir",
+            "vire",
+            state,
+            "2026-06-01T00:00:00Z",
+            "2026-06-08T00:00:00Z",
+        );
         let (config, _dir) = log_with(&[
             &started("r1", "vire", "session-x", "2026-06-05T10:00:00Z", "claude"),
             &finished("r1", "2026-06-05T10:30:00Z", 0),
         ]);
         let snap = observe_with_config(&c, &config).unwrap();
-        assert_eq!(snap.observed_no_trace, 0, "{state:?} is not a clean positive ⇒ no gap asserted");
+        assert_eq!(
+            snap.observed_no_trace, 0,
+            "{state:?} is not a clean positive ⇒ no gap asserted"
+        );
         assert_eq!(snap.reconciliation_unknown, 1);
     }
 }
@@ -368,7 +491,10 @@ fn no_import_run_for_env_is_unknown_not_a_gap() {
         &finished("r1", "2026-06-05T10:30:00Z", 0),
     ]);
     let snap = observe_with_config(&c, &config).unwrap();
-    assert_eq!(snap.observed_no_trace, 0, "no covering import ⇒ cannot assert a gap");
+    assert_eq!(
+        snap.observed_no_trace, 0,
+        "no covering import ⇒ cannot assert a gap"
+    );
     assert_eq!(snap.reconciliation_unknown, 1);
 }
 
@@ -377,27 +503,54 @@ fn no_import_run_for_env_is_unknown_not_a_gap() {
 #[test]
 fn trace_with_no_runtime_session_is_unmatched_trace() {
     let c = conn();
-    seed_evidence(&c, "MATCHED", "vire", Some("session-1"), Some("2026-06-05T10:00:00Z"), Some("2026-06-05T10:30:00Z"));
-    seed_evidence(&c, "ORPHANTRACE", "vire", Some("session-none"), Some("2026-06-05T11:00:00Z"), Some("2026-06-05T11:30:00Z"));
+    seed_evidence(
+        &c,
+        "MATCHED",
+        "vire",
+        Some("session-1"),
+        Some("2026-06-05T10:00:00Z"),
+        Some("2026-06-05T10:30:00Z"),
+    );
+    seed_evidence(
+        &c,
+        "ORPHANTRACE",
+        "vire",
+        Some("session-none"),
+        Some("2026-06-05T11:00:00Z"),
+        Some("2026-06-05T11:30:00Z"),
+    );
     let (config, _dir) = log_with(&[
         &started("r1", "vire", "session-1", "2026-06-05T10:00:00Z", "claude"),
         &finished("r1", "2026-06-05T10:30:00Z", 0),
     ]);
     let snap = observe_with_config(&c, &config).unwrap();
     assert_eq!(snap.matched, 1);
-    assert_eq!(snap.unmatched_trace, 1, "the trace with no session is surfaced, not read as zero");
+    assert_eq!(
+        snap.unmatched_trace, 1,
+        "the trace with no session is surfaced, not read as zero"
+    );
 }
 
 #[test]
 fn absent_log_with_evidence_yields_unknown_message_never_zero() {
     let c = conn();
-    seed_evidence(&c, "T", "vire", Some("session-1"), Some("2026-06-05T10:00:00Z"), Some("2026-06-05T10:30:00Z"));
+    seed_evidence(
+        &c,
+        "T",
+        "vire",
+        Some("session-1"),
+        Some("2026-06-05T10:00:00Z"),
+        Some("2026-06-05T10:30:00Z"),
+    );
     let dir = tempdir().unwrap();
     let config = config_for(dir.path().join("missing.jsonl"));
     let snap = observe_with_config(&c, &config).unwrap();
     assert!(!snap.runtime_log_present);
     assert_eq!(snap.observed_runs, 0);
-    assert_eq!(snap.unmatched_trace, 1, "an unmatched trace is surfaced, never zeroed");
+    assert_eq!(
+        snap.unmatched_trace, 1,
+        "an unmatched trace is surfaced, never zeroed"
+    );
     assert!(snap.message.contains("unknown"));
     assert!(snap.message.to_lowercase().contains("never zero"));
 }
@@ -415,7 +568,9 @@ fn runtime_sessions_table_has_no_cost_token_or_duration_column() {
         .collect();
     for col in &cols {
         let lc = col.to_ascii_lowercase();
-        for banned in ["cost", "token", "duration", "price", "prompt", "command", "secret"] {
+        for banned in [
+            "cost", "token", "duration", "price", "prompt", "command", "secret",
+        ] {
             assert!(
                 !lc.contains(banned),
                 "ai_runtime_sessions must carry no `{banned}`-bearing column (found `{col}`)"
@@ -434,7 +589,10 @@ fn snapshot_serializes_to_counts_only_with_no_secret_or_content() {
     let snap = observe_with_config(&c, &config).unwrap();
     let json = serde_json::to_string(&snap).unwrap();
     for needle in ["SECRET", "sk-ant", "rm -rf", "command_body", "prompt"] {
-        assert!(!json.contains(needle), "IPC surface must carry no content; found `{needle}` in {json}");
+        assert!(
+            !json.contains(needle),
+            "IPC surface must carry no content; found `{needle}` in {json}"
+        );
     }
     // It does carry coarse counts + posture.
     assert!(json.contains("observed_runs"));
@@ -454,16 +612,39 @@ fn environment_resolution_map_then_allowed_then_none() {
         allowed_environments: vec!["vire".into(), "staging".into()],
         slop_secs: 300,
     };
-    assert_eq!(config.resolve_environment("alpha").as_deref(), Some("vire"), "explicit map wins");
-    assert_eq!(config.resolve_environment("staging").as_deref(), Some("staging"), "token that is an allowed env maps to itself");
-    assert_eq!(config.resolve_environment("mystery"), None, "unmapped ⇒ None ⇒ unmatched_runtime");
-    assert_eq!(config.resolve_environment("  "), None, "blank token never resolves");
+    assert_eq!(
+        config.resolve_environment("alpha").as_deref(),
+        Some("vire"),
+        "explicit map wins"
+    );
+    assert_eq!(
+        config.resolve_environment("staging").as_deref(),
+        Some("staging"),
+        "token that is an allowed env maps to itself"
+    );
+    assert_eq!(
+        config.resolve_environment("mystery"),
+        None,
+        "unmapped ⇒ None ⇒ unmatched_runtime"
+    );
+    assert_eq!(
+        config.resolve_environment("  "),
+        None,
+        "blank token never resolves"
+    );
 }
 
 #[test]
 fn reconciliation_is_persisted_and_reread() {
     let c = conn();
-    seed_evidence(&c, "T1", "vire", Some("session-1"), Some("2026-06-05T10:00:00Z"), Some("2026-06-05T10:30:00Z"));
+    seed_evidence(
+        &c,
+        "T1",
+        "vire",
+        Some("session-1"),
+        Some("2026-06-05T10:00:00Z"),
+        Some("2026-06-05T10:30:00Z"),
+    );
     let (config, _dir) = log_with(&[
         &started("r1", "vire", "session-1", "2026-06-05T10:00:00Z", "claude"),
         &finished("r1", "2026-06-05T10:30:00Z", 0),
