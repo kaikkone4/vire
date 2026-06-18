@@ -2,16 +2,18 @@
 //! observations → classify a health state → persist. Pure orchestration over the `LangfuseApi`
 //! trait, so the whole flow is unit-tested against an in-memory mock (no network, no credentials).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use rusqlite::Connection;
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::api::LangfuseApi;
 use super::config::ImporterConfig;
 use super::model::{
-    AiEvidence, ApiError, ApiErrorKind, HealthState, ImportWindow, Observation, Trace,
+    self, AiEvidence, ApiError, ApiErrorKind, HealthState, ImportWindow, Observation, SkipReason,
+    SkipReasonCount, SkipSample, Trace,
 };
 use super::store::{self, ImportRunRecord};
 
@@ -22,6 +24,23 @@ pub const STALE_AFTER_HOURS: i64 = 24;
 /// Hard pagination backstop so a wrong `totalPages` can never spin forever.
 const MAX_PAGES: u32 = 1000;
 
+/// Maximum bounded structural samples kept per skip reason (SEC-011 — diagnostics, not a log).
+const MAX_SAMPLES_PER_REASON: usize = 3;
+
+/// Incremental reconciliation lookback (seconds): a normal import resumes from `cursor − OVERLAP` so
+/// late/delayed traces inside the overlap are re-seen. Durable `(env, trace_id)` dedup makes the
+/// overlap free, and the cursor never regresses (TASK-029 C2).
+const OVERLAP_SECS: i64 = 3600;
+
+/// Minimum width of one backfill sub-window. A backfill commits durably chunk-by-chunk; 30 days is a
+/// reasonable per-commit unit (TASK-029 C4).
+const BACKFILL_MIN_CHUNK_DAYS: i64 = 30;
+
+/// Upper bound on the number of backfill sub-windows. The chunk width widens above
+/// [`BACKFILL_MIN_CHUNK_DAYS`] when needed so even an `all`-history backfill stays a bounded sequence
+/// of atomic runs rather than thousands of tiny windows.
+const MAX_BACKFILL_CHUNKS: i64 = 24;
+
 /// Per-environment outcome of one import run, returned for reporting/IPC.
 #[derive(Debug, Clone)]
 pub struct ImportSummary {
@@ -31,9 +50,22 @@ pub struct ImportSummary {
     pub traces_seen: usize,
     pub unique: usize,
     pub duplicates: usize,
-    /// Traces/generations dropped for an unrecognized shape (unparseable trace, or a generation
-    /// with no usage/cost in any supported location). Surfaced as `skipped` in the import report.
+    /// Traces genuinely dropped or degraded for a shape reason (no usable id, or a generation with
+    /// no usage/cost in any supported location, or a failed observations fetch). Surfaced as
+    /// `skipped` in the import report. Informational anomalies the importer tolerates (the v3
+    /// identifier-list `observations` shape, a tolerated peripheral type mismatch) are NOT counted
+    /// here — they appear in `skip_reasons` for diagnostics but never inflate the skip count or
+    /// force `schema_changed` (TASK-029 A/B).
     pub skipped_schema: usize,
+    /// Grouped, secret-free per-reason breakdown of skips/degrades for this environment (TASK-029 A).
+    /// Replaces the old per-trace repeated warning string.
+    pub skip_reasons: Vec<SkipReasonCount>,
+    /// Bounded structural samples (≤ [`MAX_SAMPLES_PER_REASON`] per reason): JSON key names + the
+    /// offending field's JSON type name only — never a value or any payload content (SEC-011).
+    pub skip_samples: Vec<SkipSample>,
+    /// True when at least one window for this environment hit the [`MAX_PAGES`] pagination backstop,
+    /// so the run was bounded and the user should re-run to continue (no silent truncation, TASK-029 C4).
+    pub reached_page_limit: bool,
     pub cursor_ts: Option<String>,
     pub evidence: Vec<AiEvidence>,
     pub warnings: Vec<String>,
@@ -50,11 +82,18 @@ pub struct ImportReport {
     pub total_unique: usize,
     pub total_duplicates: usize,
     pub total_skipped_schema: usize,
+    /// Grouped skip/degrade reasons aggregated across every environment (TASK-029 A). Fixed reason
+    /// labels + counts only — secret-free (SEC-011).
+    pub total_skip_reasons: Vec<SkipReasonCount>,
+    /// True when any environment's run was bounded by the pagination backstop, so the import was
+    /// incomplete and re-running will continue it (no silent truncation, TASK-029 C4).
+    pub reached_page_limit: bool,
     pub environment_count: usize,
     pub environments: Vec<EnvImportLine>,
 }
 
-/// One environment's line in the [`ImportReport`]. Counts + health + secret-free warnings only.
+/// One environment's line in the [`ImportReport`]. Counts + health + grouped secret-free skip
+/// breakdown + secret-free warnings only.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EnvImportLine {
     pub environment: String,
@@ -64,6 +103,11 @@ pub struct EnvImportLine {
     pub unique: usize,
     pub duplicates: usize,
     pub skipped_schema: usize,
+    /// Grouped per-reason skip/degrade breakdown for this environment (TASK-029 A / D).
+    pub skip_reasons: Vec<SkipReasonCount>,
+    /// Bounded structural samples for this environment (SEC-011): key names + JSON type names only.
+    pub skip_samples: Vec<SkipSample>,
+    pub reached_page_limit: bool,
     pub warnings: Vec<String>,
 }
 
@@ -82,6 +126,9 @@ impl ImportReport {
                 unique: s.unique,
                 duplicates: s.duplicates,
                 skipped_schema: s.skipped_schema,
+                skip_reasons: s.skip_reasons.clone(),
+                skip_samples: s.skip_samples.clone(),
+                reached_page_limit: s.reached_page_limit,
                 warnings: s.warnings.clone(),
             })
             .collect();
@@ -90,9 +137,112 @@ impl ImportReport {
             total_unique: environments.iter().map(|e| e.unique).sum(),
             total_duplicates: environments.iter().map(|e| e.duplicates).sum(),
             total_skipped_schema: environments.iter().map(|e| e.skipped_schema).sum(),
+            total_skip_reasons: aggregate_skip_reasons(&environments),
+            reached_page_limit: environments.iter().any(|e| e.reached_page_limit),
             environment_count: environments.len(),
             environments,
         }
+    }
+}
+
+/// Sum each [`SkipReason`] across environments, preserving the fixed [`SkipReason::ALL`] order so the
+/// aggregated breakdown is deterministic. Only reasons that actually occurred are emitted.
+fn aggregate_skip_reasons(environments: &[EnvImportLine]) -> Vec<SkipReasonCount> {
+    SkipReason::ALL
+        .iter()
+        .filter_map(|reason| {
+            let label = reason.as_str();
+            let count: usize = environments
+                .iter()
+                .flat_map(|e| &e.skip_reasons)
+                .filter(|rc| rc.reason == label)
+                .map(|rc| rc.count)
+                .sum();
+            (count > 0).then(|| SkipReasonCount {
+                reason: label.to_string(),
+                count,
+            })
+        })
+        .collect()
+}
+
+/// Aggregates skip/degrade classifications for one environment's import: per-reason counts plus a
+/// small bounded set of secret-free structural samples (TASK-029 A / SEC-011). This replaces the
+/// per-trace repeated warning string with a grouped, secret-free breakdown — the classifier inspects
+/// the raw `serde_json::Value` **structurally** and never copies a field value or a `serde` error.
+#[derive(Default)]
+struct SkipClassifier {
+    counts: HashMap<SkipReason, usize>,
+    samples: Vec<SkipSample>,
+    samples_per_reason: HashMap<SkipReason, usize>,
+}
+
+impl SkipClassifier {
+    /// Record one occurrence of `reason`, derived structurally from the raw entry `value`. Keeps at
+    /// most [`MAX_SAMPLES_PER_REASON`] bounded structural samples per reason. `field` names the
+    /// offending field (for the field-scoped reasons) so the sample can carry its JSON type name —
+    /// never its value.
+    fn record(&mut self, reason: SkipReason, value: &Value, field: Option<&str>) {
+        *self.counts.entry(reason).or_insert(0) += 1;
+        let kept = self.samples_per_reason.entry(reason).or_insert(0);
+        if *kept < MAX_SAMPLES_PER_REASON {
+            *kept += 1;
+            self.samples.push(structural_sample(reason, value, field));
+        }
+    }
+
+    /// Count of genuine drops/degrades (the reasons that surface as `schema_changed`); excludes the
+    /// informational reasons (`observations_not_embedded`, `field_type_mismatch`).
+    fn schema_issue_count(&self) -> usize {
+        self.counts
+            .iter()
+            .filter(|(reason, _)| reason.is_schema_issue())
+            .map(|(_, count)| *count)
+            .sum()
+    }
+
+    /// Per-reason counts in fixed [`SkipReason::ALL`] order (only reasons that occurred), and the
+    /// bounded structural samples.
+    fn finish(self) -> (Vec<SkipReasonCount>, Vec<SkipSample>) {
+        let counts = SkipReason::ALL
+            .iter()
+            .filter_map(|reason| {
+                self.counts
+                    .get(reason)
+                    .copied()
+                    .filter(|count| *count > 0)
+                    .map(|count| SkipReasonCount {
+                        reason: reason.as_str().to_string(),
+                        count,
+                    })
+            })
+            .collect();
+        (counts, self.samples)
+    }
+}
+
+/// Build one bounded, **secret-free** structural sample (SEC-011). Carries only the entry's top-level
+/// JSON key **names**, the offending field **name**, that field's JSON **type name**, and — for an
+/// array field — its first element's type name. No field value, nested content, raw bytes, or `serde`
+/// error string is ever read.
+fn structural_sample(reason: SkipReason, value: &Value, field: Option<&str>) -> SkipSample {
+    let keys = value
+        .as_object()
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default();
+    let field_value = field.and_then(|name| value.get(name));
+    let field_type = field_value.map(model::json_type_name).map(str::to_string);
+    let element_type = field_value
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .map(model::json_type_name)
+        .map(str::to_string);
+    SkipSample {
+        reason: reason.as_str().to_string(),
+        keys,
+        field: field.map(str::to_string),
+        field_type,
+        element_type,
     }
 }
 
@@ -111,15 +261,35 @@ fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// Run an import across the configured environments. Always probes availability first; a down or
-/// unreachable stack records `unavailable` for each environment and never reports zero usage/cost.
-/// The non-configured `default` environment is additionally checked so wrong-environment traffic
-/// is surfaced (`wrong_env`) rather than silently lost.
+/// Resolve the import window for one environment given its persisted cursor (TASK-029 C2). The
+/// fixed-window engine passes a constant window for every environment; incremental/backfill pass a
+/// per-environment resolver that reads from the range floor + cursor.
+pub type WindowResolver<'a> = dyn Fn(&str, Option<&str>) -> ImportWindow + 'a;
+
+/// Run an import across the configured environments using a fixed window for every environment. This
+/// is the single-window engine the incremental and backfill paths build on; a backfill drives it
+/// once per bounded sub-window (TASK-029 C4). Always probes availability first; a down or unreachable
+/// stack records `unavailable` for each environment and never reports zero usage/cost. The
+/// non-configured `default` environment is additionally checked so wrong-environment traffic is
+/// surfaced (`wrong_env`) rather than silently lost.
 pub fn run_import(
     api: &dyn LangfuseApi,
     conn: &Connection,
     config: &ImporterConfig,
     window: &ImportWindow,
+) -> Vec<ImportSummary> {
+    run_import_with(api, conn, config, &|_env, _cursor| window.clone())
+}
+
+/// Like [`run_import`] but resolves a **per-environment** window from `resolve(env, cursor_ts)`
+/// (TASK-029 C2). Used by the incremental path so each environment resumes from its own persisted
+/// cursor (less a reconciliation overlap). The cursor passed to the resolver is the environment's
+/// last persisted `cursor_ts`, or `None` for a never-imported environment.
+pub fn run_import_with(
+    api: &dyn LangfuseApi,
+    conn: &Connection,
+    config: &ImporterConfig,
+    resolve: &WindowResolver,
 ) -> Vec<ImportSummary> {
     // 1. Availability gate — absence of a stack is a health state, never zero.
     if let Err(err) = api.probe() {
@@ -127,8 +297,9 @@ pub fn run_import(
             .allowed_environments
             .iter()
             .map(|env| {
+                let window = resolve(env, prior_cursor_for(conn, env).as_deref());
                 let mut summary = unavailable_summary(conn, env, &err);
-                persist_run(conn, &mut summary, &[], window);
+                persist_run(conn, &mut summary, &[], &window);
                 summary
             })
             .collect();
@@ -146,15 +317,254 @@ pub fn run_import(
 
     let mut out = Vec::new();
     for (env, is_allowed) in targets {
-        let mut imported = import_environment(api, conn, config, window, &env, is_allowed);
+        let window = resolve(&env, prior_cursor_for(conn, &env).as_deref());
+        let mut imported = import_environment(api, conn, config, &window, &env, is_allowed);
         // Don't record the synthetic `default` probe when it found nothing to surface.
         if !imported.is_allowed && !should_surface(&imported.summary) {
             continue;
         }
-        persist_run(conn, &mut imported.summary, &imported.raw, window);
+        persist_run(conn, &mut imported.summary, &imported.raw, &window);
         out.push(imported.summary);
     }
     out
+}
+
+/// The persisted `cursor_ts` for an environment (the last successfully synced timestamp), or `None`
+/// when the environment has never been imported.
+fn prior_cursor_for(conn: &Connection, env: &str) -> Option<String> {
+    store::latest_run_for_env(conn, env)
+        .ok()
+        .flatten()
+        .and_then(|r| r.cursor_ts)
+}
+
+fn fmt_ts(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// Resolve a single environment's **incremental** window (TASK-029 C2): `to = now`, and
+/// `from = max(range_floor, cursor − OVERLAP)`. A never-imported environment (no cursor) starts at
+/// the range floor. Timestamps are compared chronologically (parsed), not lexicographically, so
+/// mixed RFC3339 precisions never mis-order the floor against the overlapped cursor.
+pub fn incremental_window(range_floor: &str, cursor: Option<&str>, now: &str) -> ImportWindow {
+    let from = match cursor.and_then(parse_ts) {
+        Some(cur) => {
+            let overlapped = cur - ChronoDuration::seconds(OVERLAP_SECS);
+            let chosen = match parse_ts(range_floor) {
+                Some(floor) if floor > overlapped => floor,
+                _ => overlapped,
+            };
+            fmt_ts(chosen)
+        }
+        None => range_floor.to_string(),
+    };
+    ImportWindow {
+        from,
+        to: now.to_string(),
+    }
+}
+
+/// Split `[floor, now]` into an ordered, bounded sequence of sub-windows, **newest → oldest**, so a
+/// wide backfill commits durably chunk-by-chunk (each chunk is its own atomic run) instead of one
+/// giant transaction (TASK-029 C4). Newest-first establishes currency immediately; the cursor never
+/// regresses as older chunks follow. The chunk width is at least [`BACKFILL_MIN_CHUNK_DAYS`] and
+/// widens as needed to keep the count ≤ [`MAX_BACKFILL_CHUNKS`], so even an `all`-history backfill is
+/// a bounded sequence.
+fn backfill_chunks(floor: DateTime<Utc>, now: DateTime<Utc>) -> Vec<ImportWindow> {
+    if now <= floor {
+        return Vec::new();
+    }
+    let span_days = (now - floor).num_days().max(1);
+    let chunk_days = std::cmp::max(
+        BACKFILL_MIN_CHUNK_DAYS,
+        (span_days + MAX_BACKFILL_CHUNKS - 1) / MAX_BACKFILL_CHUNKS,
+    );
+    let chunk = ChronoDuration::days(chunk_days);
+    let mut windows = Vec::new();
+    let mut end = now;
+    while end > floor {
+        let start = std::cmp::max(floor, end - chunk);
+        windows.push(ImportWindow {
+            from: fmt_ts(start),
+            to: fmt_ts(end),
+        });
+        end = start;
+    }
+    windows
+}
+
+/// Run a **chunked, resumable backfill** over `[range_floor, now]` (TASK-029 C4 / DEC-030). Each
+/// bounded sub-window runs through the single-window [`run_import`] engine and is persisted
+/// atomically as its own run (S-3 preserved) advancing the per-env cursor — so an interruption loses
+/// at most the in-flight chunk and a re-run converges via durable `(env, trace_id)` dedup and the
+/// non-regressing cursor. Per-environment summaries are merged across chunks into one report. Honors
+/// the same boundaries as a normal import (the caller probes/serializes/bounds identically). If the
+/// stack is hard-down on a chunk, the run stops early rather than probing every remaining chunk.
+pub fn run_backfill(
+    api: &dyn LangfuseApi,
+    conn: &Connection,
+    config: &ImporterConfig,
+    range_floor: &str,
+    now: &str,
+) -> Vec<ImportSummary> {
+    let chunks = match (parse_ts(range_floor), parse_ts(now)) {
+        (Some(floor), Some(now_dt)) => backfill_chunks(floor, now_dt),
+        // Unparseable bounds: fall back to one window over the literal range rather than nothing.
+        _ => vec![ImportWindow {
+            from: range_floor.to_string(),
+            to: now.to_string(),
+        }],
+    };
+    if chunks.is_empty() {
+        // Range floor is already at/after now: nothing to backfill. Run one incremental-style pass so
+        // the environments still surface an explicit health state rather than a blank result.
+        return run_import(
+            api,
+            conn,
+            config,
+            &ImportWindow {
+                from: range_floor.to_string(),
+                to: now.to_string(),
+            },
+        );
+    }
+    let mut merged: Vec<ImportSummary> = Vec::new();
+    for window in &chunks {
+        let chunk = run_import(api, conn, config, window);
+        let hard_down = !chunk.is_empty()
+            && chunk.iter().all(|s| {
+                matches!(
+                    s.health,
+                    HealthState::Unavailable | HealthState::AuthOrNetworkError
+                )
+            });
+        merge_summaries(&mut merged, chunk);
+        if hard_down {
+            // Stack is down/unreachable — re-probing every remaining chunk would just repeat the
+            // failure. The committed chunks (if any) persist; re-running continues.
+            break;
+        }
+    }
+    merged
+}
+
+/// Merge a chunk's per-environment summaries into the running accumulator, keyed by environment, so
+/// a multi-chunk backfill reports one aggregated line per environment (TASK-029 C4).
+fn merge_summaries(acc: &mut Vec<ImportSummary>, chunk: Vec<ImportSummary>) {
+    for summary in chunk {
+        match acc
+            .iter_mut()
+            .find(|e| e.environment == summary.environment)
+        {
+            Some(existing) => merge_into(existing, summary),
+            None => acc.push(summary),
+        }
+    }
+}
+
+/// Fold one later chunk's summary into an earlier one for the same environment. Counts sum; the
+/// `reached_page_limit` flag OR-s; the cursor takes the chronologically-latest value (never
+/// regressing); skip reasons sum per reason and samples stay bounded; health takes the more
+/// significant state so a genuine `schema_changed`/error across any chunk is not masked by a later
+/// empty chunk.
+fn merge_into(acc: &mut ImportSummary, next: ImportSummary) {
+    acc.pages = acc.pages.max(next.pages);
+    acc.traces_seen += next.traces_seen;
+    acc.unique += next.unique;
+    acc.duplicates += next.duplicates;
+    acc.skipped_schema += next.skipped_schema;
+    acc.reached_page_limit |= next.reached_page_limit;
+    acc.health = merge_health(acc.health, next.health);
+    acc.cursor_ts = later_ts(acc.cursor_ts.take(), next.cursor_ts);
+    acc.skip_reasons = merge_reason_counts(&acc.skip_reasons, &next.skip_reasons);
+    acc.skip_samples = merge_samples(std::mem::take(&mut acc.skip_samples), next.skip_samples);
+    acc.evidence.extend(next.evidence);
+    for warning in next.warnings {
+        if !acc.warnings.contains(&warning) {
+            acc.warnings.push(warning);
+        }
+    }
+}
+
+/// The chronologically-later of two optional RFC3339 timestamps (the cursor never regresses).
+fn later_ts(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(match (parse_ts(&a), parse_ts(&b)) {
+            (Some(da), Some(db)) => {
+                if db > da {
+                    b
+                } else {
+                    a
+                }
+            }
+            // Unparseable: fall back to lexicographic max to stay deterministic.
+            _ => {
+                if b.as_str() > a.as_str() {
+                    b
+                } else {
+                    a
+                }
+            }
+        }),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
+/// Pick the more significant health state across two chunks. Hard infrastructure/transport failures
+/// and shape problems dominate a successful import; `healthy` dominates the benign empty/duplicate
+/// states (so importing some traces is not masked by a later empty chunk).
+fn merge_health(a: HealthState, b: HealthState) -> HealthState {
+    fn rank(h: HealthState) -> u8 {
+        match h {
+            HealthState::Unavailable => 9,
+            HealthState::AuthOrNetworkError => 8,
+            HealthState::Unknown => 7,
+            HealthState::SchemaChanged => 6,
+            HealthState::WrongEnv => 5,
+            HealthState::Healthy => 4,
+            HealthState::Delayed => 3,
+            HealthState::Duplicate => 2,
+            HealthState::Stale => 1,
+            HealthState::Missing => 0,
+        }
+    }
+    if rank(a) >= rank(b) {
+        a
+    } else {
+        b
+    }
+}
+
+/// Sum two per-reason breakdowns, preserving the fixed [`SkipReason::ALL`] order.
+fn merge_reason_counts(a: &[SkipReasonCount], b: &[SkipReasonCount]) -> Vec<SkipReasonCount> {
+    SkipReason::ALL
+        .iter()
+        .filter_map(|reason| {
+            let label = reason.as_str();
+            let sum: usize = a
+                .iter()
+                .chain(b)
+                .filter(|rc| rc.reason == label)
+                .map(|rc| rc.count)
+                .sum();
+            (sum > 0).then(|| SkipReasonCount {
+                reason: label.to_string(),
+                count: sum,
+            })
+        })
+        .collect()
+}
+
+/// Concatenate two sample lists while keeping at most [`MAX_SAMPLES_PER_REASON`] per reason.
+fn merge_samples(mut acc: Vec<SkipSample>, next: Vec<SkipSample>) -> Vec<SkipSample> {
+    for sample in next {
+        let kept = acc.iter().filter(|s| s.reason == sample.reason).count();
+        if kept < MAX_SAMPLES_PER_REASON {
+            acc.push(sample);
+        }
+    }
+    acc
 }
 
 fn should_surface(summary: &ImportSummary) -> bool {
@@ -182,6 +592,9 @@ fn unavailable_summary(conn: &Connection, env: &str, err: &ApiError) -> ImportSu
         unique: 0,
         duplicates: 0,
         skipped_schema: 0,
+        skip_reasons: Vec::new(),
+        skip_samples: Vec::new(),
+        reached_page_limit: false,
         cursor_ts,
         evidence: Vec::new(),
         warnings: vec![err.message.clone()],
@@ -207,10 +620,11 @@ fn import_environment(
     let mut evidence: Vec<AiEvidence> = Vec::new();
     let mut raw: Vec<(String, String)> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
-    let mut schema_issues = 0usize;
+    let mut classifier = SkipClassifier::default();
     let mut delayed = 0usize;
     let mut max_ts: Option<String> = None;
     let mut api_error: Option<ApiErrorKind> = None;
+    let mut reached_page_limit = false;
 
     let mut page = 1u32;
     loop {
@@ -219,20 +633,47 @@ fn import_environment(
                 pages = page;
                 for value in &tp.data {
                     traces_seen += 1;
-                    let trace: Trace = match serde_json::from_value(value.clone()) {
-                        Ok(t) => t,
-                        Err(_) => {
-                            schema_issues += 1;
-                            warnings.push("a trace did not match the expected shape".into());
-                            continue;
-                        }
+                    // Identification is decoupled from usage parsing (TASK-029 B1 / DEC-031): an
+                    // entry with a usable `id` is ALWAYS imported; the only identification failure
+                    // that still skips is a missing/blank id.
+                    let Some(id) = model::trace_id(value) else {
+                        classifier.record(SkipReason::MissingTraceId, value, None);
+                        continue;
                     };
                     // Dedup by (environment, trace_id) across pages, re-imports, and overlap.
-                    if !seen.insert(trace.id.clone()) {
+                    if !seen.insert(id.clone()) {
                         duplicates += 1;
                         continue;
                     }
-                    unique_ids.insert(trace.id.clone());
+                    unique_ids.insert(id.clone());
+
+                    // Informational: the current v3 list shape carries observation ID strings, not
+                    // embedded objects. The trace is still imported (usage comes from the fetch); we
+                    // record the reason so the report explains it rather than dropping the trace.
+                    if model::observations_is_id_list(value) {
+                        classifier.record(
+                            SkipReason::ObservationsNotEmbedded,
+                            value,
+                            Some("observations"),
+                        );
+                    }
+
+                    // Fast path: the strict typed parse (now tolerant of the v3 observations shape).
+                    // If a *peripheral* identification field has an unexpected JSON type the strict
+                    // parse fails — record the field name and fall back to the tolerant reader so the
+                    // identifiable trace is still imported, never dropped.
+                    let trace = match serde_json::from_value::<Trace>(value.clone()) {
+                        Ok(trace) => trace,
+                        Err(_) => {
+                            let field = model::offending_identification_field(value);
+                            classifier.record(SkipReason::FieldTypeMismatch, value, field);
+                            match Trace::from_value_tolerant(value) {
+                                Some(trace) => trace,
+                                // Unreachable (id is present), but never drop silently if it happens.
+                                None => continue,
+                            }
+                        }
+                    };
 
                     if let (Some(ts), Some(cur)) = (&trace.timestamp, &prior_cursor) {
                         if ts.as_str() < cur.as_str() {
@@ -245,9 +686,9 @@ fn import_environment(
                         }
                     }
 
-                    let (mut norm, schema_issue) = normalize_trace(api, env, &trace);
-                    if schema_issue {
-                        schema_issues += 1;
+                    let (mut norm, degrade) = normalize_trace(api, env, &trace);
+                    if let Some(reason) = degrade {
+                        classifier.record(reason, value, None);
                     }
                     if !is_allowed {
                         // A trace in `default`/unexpected env is surfaced for review, never folded
@@ -255,10 +696,16 @@ fn import_environment(
                         norm.health = HealthState::WrongEnv;
                     }
                     evidence.push(norm);
-                    raw.push((trace.id.clone(), value.to_string()));
+                    raw.push((id, value.to_string()));
                 }
 
                 let total_pages = tp.meta.total_pages;
+                if page >= MAX_PAGES && page < total_pages && !tp.data.is_empty() {
+                    // Bounded by the pagination backstop with more pages still indicated: say so
+                    // rather than silently truncating — the user re-runs to continue (TASK-029 C4).
+                    reached_page_limit = true;
+                    break;
+                }
                 if tp.data.is_empty() || page >= total_pages || page >= MAX_PAGES {
                     break;
                 }
@@ -281,6 +728,7 @@ fn import_environment(
     };
     let stale = is_stale(&cursor_ts, &window.to);
 
+    let schema_issues = classifier.schema_issue_count();
     let outcome = Outcome {
         available: true,
         api_error,
@@ -292,6 +740,7 @@ fn import_environment(
         stale,
     };
     let health = classify_health(&outcome);
+    let (skip_reasons, skip_samples) = classifier.finish();
 
     EnvImport {
         summary: ImportSummary {
@@ -302,6 +751,9 @@ fn import_environment(
             unique: unique_ids.len(),
             duplicates,
             skipped_schema: schema_issues,
+            skip_reasons,
+            skip_samples,
+            reached_page_limit,
             cursor_ts,
             evidence,
             warnings,
@@ -312,15 +764,29 @@ fn import_environment(
 }
 
 /// Aggregate token usage and cost for a trace from its generation **observations** (not the trace
-/// body). Returns the evidence row and whether a schema/usage issue was detected. Token/cost stay
-/// `None` when genuinely absent — never `0`.
-fn normalize_trace(api: &dyn LangfuseApi, env: &str, trace: &Trace) -> (AiEvidence, bool) {
+/// body). Returns the evidence row and, when usage/cost are genuinely unreadable, the specific
+/// secret-free [`SkipReason`] the trace is degraded under (`schema_changed`). Token/cost stay `None`
+/// when genuinely absent — never `0`. Usage extraction is fully decoupled from identification: the
+/// observations fetch (the authoritative source for the v3 list shape) supplies usage/cost when the
+/// list payload embedded only observation IDs.
+fn normalize_trace(
+    api: &dyn LangfuseApi,
+    env: &str,
+    trace: &Trace,
+) -> (AiEvidence, Option<SkipReason>) {
     let mut observations = trace.observations.clone();
-    let mut fetch_failed = false;
+    let mut degrade: Option<SkipReason> = None;
     if observations.is_empty() {
+        // N+1 ACKNOWLEDGED, NOT HIDDEN (TASK-029 C6, design §4.4): one observations fetch per trace.
+        // For the v3 list shape (and thus every backfilled trace) this is one round-trip per trace —
+        // the dominant cost at backfill scale. The windowed-observations-scan optimization (one
+        // paginated `GET /api/public/observations` per chunk, joined by `traceId`) is a deliberate
+        // deferred follow-up; the per-trace path is correct, just slower, and stays read-only on the
+        // already-allowlisted observations endpoint. The chunked-resumable backfill bounds the blast
+        // radius (a timeout is non-destructive), so deferring the optimization is safe, not silent.
         match api.get_observations(&trace.id) {
             Ok(obs) => observations = obs,
-            Err(_) => fetch_failed = true,
+            Err(_) => degrade = Some(SkipReason::ObservationsFetchFailed),
         }
     }
     let generations: Vec<&Observation> =
@@ -340,8 +806,12 @@ fn normalize_trace(api: &dyn LangfuseApi, env: &str, trace: &Trace) -> (AiEviden
         .min();
     let ai_end_ts = generations.iter().filter_map(|o| o.end_time.clone()).max();
 
-    let schema_issue = fetch_failed || generations.iter().any(|o| o.lacks_usage_and_cost());
-    let health = if schema_issue {
+    // A genuinely unsupported usage shape degrades to `schema_changed` (reserved for exactly this,
+    // after the v3 widening — never the normal ID-list shape). A fetch failure already won.
+    if degrade.is_none() && generations.iter().any(|o| o.lacks_usage_and_cost()) {
+        degrade = Some(SkipReason::GenerationLacksUsageAndCost);
+    }
+    let health = if degrade.is_some() {
         HealthState::SchemaChanged
     } else {
         HealthState::Healthy
@@ -360,7 +830,7 @@ fn normalize_trace(api: &dyn LangfuseApi, env: &str, trace: &Trace) -> (AiEviden
             cost_total,
             health,
         },
-        schema_issue,
+        degrade,
     )
 }
 

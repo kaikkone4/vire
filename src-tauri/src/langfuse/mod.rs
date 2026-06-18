@@ -11,7 +11,7 @@ pub mod store;
 
 use std::path::Path;
 
-use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use rusqlite::Connection;
 
 use api::{LangfuseApi, ReqwestLangfuseApi};
@@ -22,7 +22,84 @@ pub use importer::ImportReport;
 
 use crate::settings::secret_store::KeyringSecretStore;
 
-/// Default look-back window for a manual import (last 7 days, UTC, RFC3339).
+/// Bounded look-back window discovery uses regardless of the configured import range — discovery only
+/// enumerates environment names, so it never needs the full backfill span (TASK-029 C3).
+const DISCOVERY_WINDOW_DAYS: i64 = 7;
+
+/// How far back an import reaches (TASK-029 C / DEC-030). Resolved settings-first; the default is
+/// [`ImportRange::Last30d`]. Maps to a UTC RFC3339 **range floor** via [`ImportRange::floor`]. This is
+/// a non-secret value — it only ever names a fixed range keyword or a timestamp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportRange {
+    Last7d,
+    Last30d,
+    Last90d,
+    All,
+    /// A custom floor — a validated, normalized UTC RFC3339 timestamp.
+    Since(String),
+}
+
+impl ImportRange {
+    /// The default range when none is configured or a stored value is malformed.
+    pub fn default_range() -> ImportRange {
+        ImportRange::Last30d
+    }
+
+    /// The canonical stored/displayed string (`last_7d|last_30d|last_90d|all|since:<RFC3339>`).
+    pub fn as_setting(&self) -> String {
+        match self {
+            ImportRange::Last7d => "last_7d".to_string(),
+            ImportRange::Last30d => "last_30d".to_string(),
+            ImportRange::Last90d => "last_90d".to_string(),
+            ImportRange::All => "all".to_string(),
+            ImportRange::Since(ts) => format!("since:{ts}"),
+        }
+    }
+
+    /// Parse a stored/user value. A `since:` value is validated as RFC3339 and normalized to UTC. An
+    /// unknown keyword or an unparseable `since:` timestamp is rejected with a **fixed, secret-free**
+    /// error string that never echoes the input value, so the caller can fall back to the default
+    /// with a safe note (SEC-011).
+    pub fn parse(value: &str) -> Result<ImportRange, &'static str> {
+        let trimmed = value.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
+            "last_7d" => Ok(ImportRange::Last7d),
+            "last_30d" => Ok(ImportRange::Last30d),
+            "last_90d" => Ok(ImportRange::Last90d),
+            "all" => Ok(ImportRange::All),
+            lowered if lowered.starts_with("since:") => {
+                // "since:" is ASCII (6 bytes); slice the original to preserve the timestamp's case.
+                let raw = trimmed[6..].trim();
+                match DateTime::parse_from_rfc3339(raw) {
+                    Ok(dt) => Ok(ImportRange::Since(
+                        dt.with_timezone(&Utc)
+                            .to_rfc3339_opts(SecondsFormat::Secs, true),
+                    )),
+                    Err(_) => Err("import range 'since:' value is not a valid RFC3339 timestamp"),
+                }
+            }
+            _ => Err(
+                "import range value is not one of last_7d/last_30d/last_90d/all/since:<timestamp>",
+            ),
+        }
+    }
+
+    /// The UTC RFC3339 **range floor** — the earliest timestamp an import reaches — relative to `now`.
+    pub fn floor(&self, now: DateTime<Utc>) -> String {
+        let floor = match self {
+            ImportRange::Last7d => now - ChronoDuration::days(7),
+            ImportRange::Last30d => now - ChronoDuration::days(30),
+            ImportRange::Last90d => now - ChronoDuration::days(90),
+            ImportRange::All => DateTime::<Utc>::from_timestamp(0, 0).unwrap_or(now),
+            ImportRange::Since(ts) => return ts.clone(),
+        };
+        floor.to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+}
+
+/// Default look-back window for a manual import (last `days` days, UTC, RFC3339). Retained for
+/// discovery's bounded recent scan; trace import now resolves a per-environment window from the
+/// configured [`ImportRange`] + cursor (TASK-029 C2).
 pub fn recent_window(days: i64) -> ImportWindow {
     let to = Utc::now();
     let from = to - ChronoDuration::days(days.max(1));
@@ -39,6 +116,26 @@ pub fn recent_window(days: i64) -> ImportWindow {
 /// the network call off the UI's database lock. Returns a secret-free [`ImportReport`] on success,
 /// or a secret-free error string on failure (including the in-band persist-failure surfacing).
 pub fn run_blocking_import(db_path: &Path) -> Result<ImportReport, String> {
+    run_blocking(db_path, ImportMode::Incremental)
+}
+
+/// Run one **backfill** against the real Langfuse REST API on this thread (TASK-029 C5). Identical
+/// posture to [`run_blocking_import`] — settings-first config, off-UI thread, secret-free report,
+/// in-band persist-failure surfacing — but re-scans the configured range floor → now in bounded,
+/// atomically-committed, resumable chunks instead of a single incremental window.
+pub fn run_blocking_backfill(db_path: &Path) -> Result<ImportReport, String> {
+    run_blocking(db_path, ImportMode::Backfill)
+}
+
+/// Whether an import resumes from each environment's cursor (incremental) or re-scans the full
+/// configured range in resumable chunks (backfill).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportMode {
+    Incremental,
+    Backfill,
+}
+
+fn run_blocking(db_path: &Path, mode: ImportMode) -> Result<ImportReport, String> {
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     store::migrate(&conn).map_err(|e| e.to_string())?;
     // Settings-first resolution (TASK-026): stored settings + Keychain credentials win; process env
@@ -47,12 +144,32 @@ pub fn run_blocking_import(db_path: &Path) -> Result<ImportReport, String> {
     // resolving to no/partial credentials.
     let config = crate::settings::resolve_config(&conn, &KeyringSecretStore::new())?;
     let api = ReqwestLangfuseApi::new(config.clone()).map_err(|e| e.message)?;
-    let window = recent_window(7);
-    let summaries = importer::run_import(&api, &conn, &config, &window);
+
+    // Resolve the configured import range (settings-first, default last_30d) into a UTC range floor
+    // (TASK-029 C). A malformed stored value resolves to the default — the import never fails for it.
+    let now_dt = Utc::now();
+    let range = crate::settings::resolve_import_range(&conn);
+    let range_floor = range.floor(now_dt);
+    let now = now_dt.to_rfc3339_opts(SecondsFormat::Secs, true);
+
+    let summaries = match mode {
+        // Incremental: each environment resumes from its own persisted cursor (less the overlap),
+        // floored at the configured range; a never-imported environment starts at the range floor.
+        ImportMode::Incremental => {
+            importer::run_import_with(&api, &conn, &config, &|_env, cursor| {
+                importer::incremental_window(&range_floor, cursor, &now)
+            })
+        }
+        // Backfill: re-scan the range floor → now in bounded, atomically-committed, resumable chunks.
+        ImportMode::Backfill => importer::run_backfill(&api, &conn, &config, &range_floor, &now),
+    };
+
     // TASK-027 C: discover the environments present in the source as part of the import (a read-only
     // scan over the same allowlist). Best-effort and secret-free — a discovery failure must not fail
     // an otherwise-successful import, and only environment names (not trace content) are persisted.
-    discover_and_record(&api, &conn, &window);
+    // Discovery stays on a bounded recent window (TASK-029 C3): it only enumerates env names, so it
+    // never needs the full backfill span.
+    discover_and_record(&api, &conn, &recent_window(DISCOVERY_WINDOW_DAYS));
     // Build the secret-free diagnostics report from the counts the importer just computed, then
     // apply the TASK-021 in-band persist-failure check: a run that could not be persisted still
     // surfaces as `Err` (never a stale-healthy result), so the report is returned only for a run

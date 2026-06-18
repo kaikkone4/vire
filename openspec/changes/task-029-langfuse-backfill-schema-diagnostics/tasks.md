@@ -1,0 +1,113 @@
+# Tasks — TASK-029
+
+Four sequenced workstreams. **A first** (diagnose — it gates B), then **B** (widen the parser only for
+proven shapes), then **C** (range + cursor + backfill), then **D** (grouped report UX). **No time-entry
+suggestion is built here** — that is TASK-030 (see `proposal.md` *Out of scope* and `arch-review.md`
+§Split). Role hints are for Pi-Assistant routing.
+
+## Workstream A — Forensic, secret-free schema diagnostics  *(backend developer)*  *(gates B)*
+
+- [x] A1. Add a fixed, secret-free `SkipReason` enum + `SkipReasonCount`/`SkipSample` types
+  (`langfuse/model.rs`): `missing_trace_id`, `observations_not_embedded`, `field_type_mismatch`,
+  `generation_lacks_usage_and_cost`, `observations_fetch_failed`. Classification is **structural** over
+  the raw `serde_json::Value` — never a passed-through `serde` error string.
+- [x] A2. Replace the per-trace repeated `warnings.push("a trace did not match the expected shape")`
+  with the `SkipClassifier` (`langfuse/importer.rs`): aggregate counts per reason; keep at most a small
+  fixed N (=3, `MAX_SAMPLES_PER_REASON`) **structural** samples per reason (top-level key names +
+  offending field JSON type name only — no values/content).
+- [x] A3. Thread `skip_reasons` + `skip_samples` onto `ImportSummary`/`EnvImportLine` and aggregate
+  them as `total_skip_reasons` in `ImportReport::from_summaries`; dropped the repeated shape-skip
+  warning strings (kept transport/auth/persist fixed warnings).
+- [x] A4. **VF-1 CONFIRMED** (via safe deterministic test evidence — the live stack is not reachable
+  from the backend agent and capturing raw bodies is itself forbidden by VF-1). Proof against the
+  project's own `Trace` type: the v3 ID-string list shape is the **one** shape that fails the
+  pre-widening `from_value::<Trace>` (`v3_idlist_parses=false`), while embedded-object and
+  observation-less traces parse — the exact numeric fit of the field report (611 with-observations
+  skipped, 29 observation-less duplicates). **Dominant reason = `observations_not_embedded`**, hypothesis
+  confirmed; no credentials/bodies/prompt content captured. (Live count re-confirmation is a QA/Janne
+  step, see VF-2.)
+- [x] A5. Tests: `skip_reasons_aggregate_per_env_and_in_total`, `skip_samples_are_bounded_per_reason`,
+  and **SEC-011 negative** `skip_diagnostics_are_secret_free` (serialized reasons/samples contain none
+  of `sk-`/`pk-`/`Bearer`/`Authorization`/a session/`oat01`/a raw field value; the ID-list sample
+  carries only `field_type="array"`, `element_type="string"`, never the ID value).
+
+## Workstream B — Widen the v3 parser + decouple identification from usage  *(backend developer)*
+
+- [x] B1. Made **trace identification total**: the import loop reads `id` structurally first
+  (`model::trace_id`) and, when the strict typed parse fails on a peripheral field, falls back to
+  `Trace::from_value_tolerant` (reads `id`/`timestamp`/`environment`/`sessionId` defensively) so a
+  peripheral-field type mismatch never drops an identifiable trace. Only `missing_trace_id` still skips.
+- [x] B2. Made `Trace.observations` tolerant of the v3 list shape via
+  `#[serde(deserialize_with = "deserialize_tolerant_observations")]` (`model.rs`) — keeps embedded
+  objects (fast path), ignores ID strings/non-objects → fetch fallback. Driven by the A4 finding
+  (`observations_not_embedded`).
+- [x] B3. `normalize_trace` reads usage/cost from fetched observations for the v3 list shape;
+  `schema_changed` is now reserved for genuinely unreadable usage (`generation_lacks_usage_and_cost`,
+  `observations_fetch_failed`) / unidentifiable (`missing_trace_id`) traces. Absence-≠-zero preserved
+  (`None`, never `0`).
+- [~] B4. **VF-2 (code-complete; live count is a QA/Janne step).** Proven via mock that previously-
+  skipped traces now import as `healthy` (usage from the fetched observations) or `schema_changed`
+  (genuinely unreadable) — **none silently dropped**. "new-trace count > 0 against the live stack" must
+  be confirmed by QA/Janne on the real 9-env / 640-trace stack (the backend agent has no stack access).
+- [x] B5. Tests: `identifiable_trace_with_idlist_observations_is_imported` (mock → imported, healthy,
+  cost captured, `observations_not_embedded` informational); `generation_with_no_usage_anywhere_is_
+  schema_changed_absence_preserved`; `peripheral_field_type_mismatch_still_imports_identifiable_trace`;
+  `trace_with_no_id_is_missing_trace_id_counted_not_crashed`.
+
+## Workstream C — Configurable range + incremental cursor + resumable backfill  *(backend developer)*
+
+- [x] C1. Added `langfuse_import_range` to `settings` (`settings/mod.rs`):
+  `last_7d|last_30d|last_90d|all|since:<RFC3339>`, default `last_30d`; settings-first resolve + validate
+  (malformed `since:`/unknown → default; the parse error is fixed and secret-free, never echoes input).
+  IPC `get_langfuse_import_range` / `set_langfuse_import_range`. `ImportRange` lives in `langfuse/mod.rs`.
+- [x] C2. Replaced the fixed `recent_window(7)` import window with a **per-environment** resolver
+  (`importer::run_import_with` + `incremental_window`): incremental `from = max(range_floor,
+  cursor_ts − OVERLAP)` (`OVERLAP_SECS = 3600`, chronological compare), backfill `from = range_floor`,
+  `to = now`. Cursor still never regresses.
+- [x] C3. Discovery stays on a bounded `recent_window(DISCOVERY_WINDOW_DAYS=7)` (no full-history scan
+  per import).
+- [x] C4. Chunked **resumable atomic backfill** (`importer::run_backfill` + `backfill_chunks`): a wide
+  range is an ordered newest→oldest sequence of bounded sub-windows (≥30d, ≤24 chunks), each run through
+  the single-window engine and persisted atomically as its own run (S-3 + TASK-021 surfacing preserved).
+  A window hitting the `MAX_PAGES` backstop sets `reached_page_limit` (surfaced on the report — no silent
+  truncation).
+- [x] C5. IPC `backfill_langfuse_now` (backfill mode + larger `BACKFILL_TIMEOUT_SECS=300` bound);
+  honours `langfuse_enabled` short-circuit, SEC-002 loopback (same `build_url`/`get_traces` path),
+  `import_lock` serialization, off-UI dedicated thread — identical posture to `import_langfuse_now`.
+- [~] C6. *(efficiency, deferred — ACKNOWLEDGED not hidden)* The windowed-observations-scan-by-`traceId`
+  optimization is deferred; the per-trace `get_observations` N+1 cost at backfill scale is explicitly
+  documented at the fetch site in `normalize_trace` and bounded by the chunked-resumable design (a
+  timeout is non-destructive). Recommended as a TASK-029 follow-up.
+- [x] C7. Tests: `incremental_window_resumes_from_cursor_floored_by_range`;
+  `first_import_uses_range_floor_then_resumes_from_cursor` (mock window capture);
+  `backfill_imports_history_in_chunks_and_is_resumable` (**VF-3**: multi-chunk, dedup convergence on
+  re-run, cursor non-regressing, no duplicate rows); `backfill_reports_bounded_run_rather_than_
+  truncating_silently`; `import_range_parses_validates_and_floors` (incl. malformed `since:`);
+  `import_range_setting_persists_validates_and_defaults`.
+
+## Workstream D — Grouped, actionable import summary  *(frontend developer)*
+
+- [ ] D1. Extend the report types in `src/main.ts:16` (`ImportReport`/`EnvImportLine`) with
+  `skip_reasons`/`skip_samples` and the bounded/backfill indicators.
+- [ ] D2. Rewrite `importReportLine()` (`src/main.ts:55`): per-env **seen / new / duplicate / skipped**
+  + grouped reason breakdown (e.g. *"611 skipped: 611 observations-not-embedded"*) + bounded-sample
+  hint; incremental-vs-backfill headline; never the repeated string. `aria-live` preserved.
+- [ ] D3. Settings: import-range control + "Backfill now" button wired to `set_langfuse_import_range` /
+  `backfill_langfuse_now`; range-control helpers in `src/langfuse-settings.ts` (pure, unit-tested);
+  list styling in `src/style.css`.
+- [ ] D4. Tests: `langfuse-settings.ts` range helpers; report renderer groups reasons and shows
+  per-env seen/new/dup/skipped; **SEC-011** — rendered DOM/string contains no secret/prompt/value.
+
+## Cross-cutting
+
+- [x] X1. `cargo test --lib` green (133 passed; 60 langfuse incl. 13 new); `cargo fmt` applied;
+  `cargo clippy --all-targets` introduces **zero** net new warnings (baseline task-027 = 7, after
+  TASK-029 = 7, all 7 pre-existing and outside this diff). *(Frontend `tsc`/tests are Workstream D.)*
+- [x] X2. `openspec validate task-029-langfuse-backfill-schema-diagnostics --strict` passes.
+- [x] X3. Confirmed: **no** new `HealthState` variant (only `SkipReason` added, a diagnostic enum);
+  **no** new egress host (backfill/incremental/discovery all via `ImporterConfig::build_url` under
+  `/api/public/*`, GET-only); diff touches only `langfuse/{model,importer,mod,tests}.rs`,
+  `settings/mod.rs`, `lib.rs` — **no** change to capture, `runtime_observer`, the classifier,
+  `env_mapping`, or CSV export.
+- [ ] X4. RELEASE.md (SW-6): additive settings row, range-default 7d→30d behaviour note, partial-automated
+  rollback — consistent with TASK-026/027 posture. *(SW-6 gate; not SW-2 backend scope.)*

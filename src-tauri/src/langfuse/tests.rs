@@ -11,9 +11,12 @@ use serde_json::{json, Value};
 
 use super::api::LangfuseApi;
 use super::config::{ApiPath, Credentials, ImporterConfig, Secret, Source, DEFAULT_BASE_URL};
-use super::importer::{run_import, ImportReport};
+use super::importer::{
+    incremental_window, run_backfill, run_import, run_import_with, ImportReport,
+};
 use super::model::{ApiError, ApiErrorKind, HealthState, ImportWindow, Observation, TracePage};
 use super::store;
+use super::ImportRange;
 
 // ----- mock --------------------------------------------------------------------------------
 
@@ -30,6 +33,14 @@ struct MockApi {
     /// Optional error for the discovery scan, to model a failed (best-effort) discovery.
     any_env_err: Option<ApiError>,
     calls: RefCell<Vec<String>>,
+    /// Records the `(environment, from, to)` window of every `get_traces` call, so a test can assert
+    /// which window the importer resolved (incremental cursor / backfill chunk) — the mock otherwise
+    /// ignores the window when selecting pages (TASK-029 C).
+    trace_windows: RefCell<Vec<(String, String, String)>>,
+    /// When set, every `get_traces` page returns this single trace and reports an effectively
+    /// unbounded `total_pages`, so a window runs until it hits the importer's `MAX_PAGES` backstop —
+    /// used to prove the bounded-run (`reached_page_limit`) surfacing (TASK-029 C4).
+    infinite_pages: Option<Value>,
 }
 
 impl MockApi {
@@ -52,16 +63,32 @@ impl LangfuseApi for MockApi {
     fn get_traces(
         &self,
         environment: &str,
-        _from: &str,
-        _to: &str,
+        from: &str,
+        to: &str,
         page: u32,
         limit: u32,
     ) -> Result<TracePage, ApiError> {
         self.calls
             .borrow_mut()
             .push(format!("get_traces:{environment}:{page}"));
+        self.trace_windows.borrow_mut().push((
+            environment.to_string(),
+            from.to_string(),
+            to.to_string(),
+        ));
         if let Some(e) = self.traces_err.get(environment) {
             return Err(e.clone());
+        }
+        if let Some(trace) = &self.infinite_pages {
+            return Ok(TracePage {
+                data: vec![trace.clone()],
+                meta: super::model::PageMeta {
+                    page,
+                    limit,
+                    total_items: 0,
+                    total_pages: u32::MAX,
+                },
+            });
         }
         let pages = self.pages.get(environment).cloned().unwrap_or_default();
         let total_pages = pages.len() as u32;
@@ -1460,4 +1487,532 @@ fn discovery_url_keeps_the_allowlist_and_loopback_gate_without_an_env_param() {
             limit: 50,
         })
         .is_err());
+}
+
+// ===== TASK-029 =============================================================================
+// Workstream A: forensic secret-free skip diagnostics; B: tolerant identification + v3 widening;
+// C: configurable range + incremental cursor + resumable chunked backfill.
+
+// ----- helpers ------------------------------------------------------------------------------
+
+/// A trace whose `observations` is the current Langfuse v3 LIST shape: an array of observation ID
+/// STRINGS, not embedded objects. The ID strings are deliberately secret-shaped to prove no value
+/// leaks into the diagnostics (SEC-011).
+fn trace_idlist_observations(id: &str, env: &str, ts: &str) -> Value {
+    json!({
+        "id": id,
+        "environment": env,
+        "timestamp": ts,
+        "name": "claude-code",
+        "sessionId": null,
+        "metadata": {},
+        "observations": ["sk-obs-leak-aaa", "pk-obs-leak-bbb"]
+    })
+}
+
+fn generation_obs(cost: f64, total_tokens: i64) -> Observation {
+    Observation {
+        obs_type: Some("GENERATION".into()),
+        model: Some("claude".into()),
+        start_time: Some("2026-06-05T00:00:00Z".into()),
+        end_time: Some("2026-06-05T00:01:00Z".into()),
+        prompt_tokens: Some(total_tokens / 2),
+        completion_tokens: Some(total_tokens / 2),
+        total_tokens: Some(total_tokens),
+        usage: None,
+        calculated_total_cost: Some(cost),
+        usage_details: None,
+        cost_details: None,
+    }
+}
+
+fn reason_count(reasons: &[super::model::SkipReasonCount], reason: &str) -> usize {
+    reasons
+        .iter()
+        .find(|rc| rc.reason == reason)
+        .map(|rc| rc.count)
+        .unwrap_or(0)
+}
+
+fn raw_trace_rows(c: &Connection, env: &str) -> i64 {
+    c.query_row(
+        "SELECT COUNT(*) FROM langfuse_raw_traces WHERE environment = ?1",
+        rusqlite::params![env],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// An in-memory connection with the importer tables AND a minimal `settings` table, for the
+/// range-resolution tests (which read/write the key-value `settings` rows).
+fn conn_with_settings() -> Connection {
+    let c = conn();
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .unwrap();
+    c
+}
+
+// ----- Workstream B: tolerant identification + v3 observations widening ----------------------
+
+#[test]
+fn identifiable_trace_with_idlist_observations_is_imported() {
+    let c = conn();
+    let mut api = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_idlist_observations(
+            "A",
+            "vire",
+            "2026-06-05T00:00:00Z",
+        )]],
+    );
+    // Usage/cost live on the fetched observations (the v3 list payload only carried IDs).
+    api.observations
+        .insert("A".into(), vec![generation_obs(3.5, 20)]);
+
+    let s = run_import(&api, &c, &local_vire(), &window());
+    let vire = s.iter().find(|x| x.environment == "vire").unwrap();
+
+    // The trace is IMPORTED (not dropped) and healthy, with usage/cost read from the fetch.
+    assert_eq!(
+        vire.unique, 1,
+        "the ID-list trace is identified and imported"
+    );
+    assert_eq!(vire.health, HealthState::Healthy);
+    assert_eq!(
+        vire.skipped_schema, 0,
+        "ID-list shape is not a genuine skip"
+    );
+    assert_eq!(evidence_cost(&c, "vire", "A"), Some(3.5));
+    // The ID-list shape is recorded as an INFORMATIONAL reason, not a drop.
+    assert_eq!(
+        reason_count(&vire.skip_reasons, "observations_not_embedded"),
+        1
+    );
+    // The importer fell through to the observations fetch for usage/cost.
+    assert!(api
+        .calls
+        .borrow()
+        .iter()
+        .any(|call| call == "get_observations:A"));
+}
+
+#[test]
+fn generation_with_no_usage_anywhere_is_schema_changed_absence_preserved() {
+    let c = conn();
+    // Embedded generation with NO usage and NO cost in any supported location.
+    let trace = json!({
+        "id": "A", "environment": "vire", "timestamp": "2026-06-05T00:00:00Z",
+        "observations": [{"type": "GENERATION", "model": "claude"}]
+    });
+    let api = MockApi::with_pages("vire", vec![vec![trace]]);
+    let s = run_import(&api, &c, &local_vire(), &window());
+    let vire = s.iter().find(|x| x.environment == "vire").unwrap();
+
+    // Imported and surfaced as schema_changed — never silently dropped, never a zero total.
+    assert_eq!(vire.unique, 1, "the trace is imported, not dropped");
+    assert_eq!(vire.health, HealthState::SchemaChanged);
+    assert_eq!(
+        evidence_cost(&c, "vire", "A"),
+        None,
+        "absent cost stays NULL"
+    );
+    assert_eq!(
+        reason_count(&vire.skip_reasons, "generation_lacks_usage_and_cost"),
+        1
+    );
+    assert_eq!(vire.skipped_schema, 1);
+}
+
+#[test]
+fn trace_with_no_id_is_missing_trace_id_counted_not_crashed() {
+    let c = conn();
+    let no_id = json!({ "environment": "vire", "timestamp": "2026-06-05T00:00:00Z" });
+    let api = MockApi::with_pages("vire", vec![vec![no_id]]);
+    let s = run_import(&api, &c, &local_vire(), &window());
+    let vire = s.iter().find(|x| x.environment == "vire").unwrap();
+
+    assert_eq!(vire.unique, 0, "an unidentifiable entry is not imported");
+    assert_eq!(reason_count(&vire.skip_reasons, "missing_trace_id"), 1);
+    assert_eq!(vire.skipped_schema, 1);
+    assert_eq!(vire.health, HealthState::SchemaChanged);
+    assert_eq!(
+        raw_trace_rows(&c, "vire"),
+        0,
+        "no row for the dropped entry"
+    );
+}
+
+#[test]
+fn peripheral_field_type_mismatch_still_imports_identifiable_trace() {
+    let c = conn();
+    // `timestamp` is a NUMBER, not a string — a peripheral type mismatch that used to drop the whole
+    // trace. The id is usable, so the trace must still be imported (B1 / DEC-031).
+    let trace = json!({ "id": "A", "environment": "vire", "timestamp": 1717545600 });
+    let api = MockApi::with_pages("vire", vec![vec![trace]]);
+    let s = run_import(&api, &c, &local_vire(), &window());
+    let vire = s.iter().find(|x| x.environment == "vire").unwrap();
+
+    assert_eq!(
+        vire.unique, 1,
+        "the identifiable trace is imported despite the mismatch"
+    );
+    assert_eq!(reason_count(&vire.skip_reasons, "field_type_mismatch"), 1);
+    // A tolerated peripheral mismatch is informational — it does not force schema_changed.
+    assert_eq!(vire.skipped_schema, 0);
+    assert_eq!(raw_trace_rows(&c, "vire"), 1);
+}
+
+// ----- Workstream A: classification, aggregation, SEC-011 ------------------------------------
+
+#[test]
+fn skip_reasons_aggregate_per_env_and_in_total() {
+    let c = conn();
+    // vire: one missing-id drop + one ID-list (informational). default(synthetic): one missing-id.
+    let mut api = MockApi::with_pages(
+        "vire",
+        vec![vec![
+            json!({ "environment": "vire" }),
+            trace_idlist_observations("A", "vire", "2026-06-05T00:00:00Z"),
+        ]],
+    );
+    api.observations
+        .insert("A".into(), vec![generation_obs(1.0, 10)]);
+    api.pages.insert(
+        "default".into(),
+        vec![vec![json!({ "environment": "default" })]],
+    );
+
+    let summaries = run_import(&api, &c, &local_vire(), &window());
+    let report = ImportReport::from_summaries(&summaries);
+
+    let vire = report
+        .environments
+        .iter()
+        .find(|e| e.environment == "vire")
+        .unwrap();
+    assert_eq!(reason_count(&vire.skip_reasons, "missing_trace_id"), 1);
+    assert_eq!(
+        reason_count(&vire.skip_reasons, "observations_not_embedded"),
+        1
+    );
+    // Total sums the missing-id across vire + default.
+    assert_eq!(
+        reason_count(&report.total_skip_reasons, "missing_trace_id"),
+        2
+    );
+    assert_eq!(
+        reason_count(&report.total_skip_reasons, "observations_not_embedded"),
+        1
+    );
+}
+
+#[test]
+fn skip_samples_are_bounded_per_reason() {
+    let c = conn();
+    // Five missing-id entries; at most MAX_SAMPLES_PER_REASON (3) samples are kept.
+    let page: Vec<Value> = (0..5).map(|_| json!({ "environment": "vire" })).collect();
+    let api = MockApi::with_pages("vire", vec![page]);
+    let s = run_import(&api, &c, &local_vire(), &window());
+    let vire = s.iter().find(|x| x.environment == "vire").unwrap();
+
+    assert_eq!(reason_count(&vire.skip_reasons, "missing_trace_id"), 5);
+    let samples = vire
+        .skip_samples
+        .iter()
+        .filter(|s| s.reason == "missing_trace_id")
+        .count();
+    assert!(
+        samples <= 3,
+        "samples are bounded per reason, got {samples}"
+    );
+    assert!(samples >= 1, "at least one sample is kept");
+}
+
+/// SEC-011: the grouped reasons AND the structural samples carry no secret/value/content. A skipped
+/// trace and a degraded trace, each stuffed with secret-shaped values, prove none of it leaks — and
+/// the ID-list sample carries only the field's JSON TYPE name (`string`), never the ID value.
+#[test]
+fn skip_diagnostics_are_secret_free() {
+    let c = conn();
+    let degraded = json!({
+        "id": "deg",
+        "environment": "vire",
+        "timestamp": "2026-06-05T00:00:00Z",
+        "name": "sk-name-canary",
+        "sessionId": "session-Bearer-leak",
+        "metadata": {"Authorization": "Bearer pk-meta-leak", "secret": "sk-ant-oat01-leak"},
+        "observations": [{"type": "GENERATION", "model": "claude"}]
+    });
+    let idlist = trace_idlist_observations("idl", "vire", "2026-06-05T00:00:00Z");
+    let api = MockApi::with_pages("vire", vec![vec![degraded, idlist]]);
+    let summaries = run_import(&api, &c, &local_vire(), &window());
+    let report = ImportReport::from_summaries(&summaries);
+
+    // Not vacuous: a degrade and an informational reason were both recorded.
+    let vire = report
+        .environments
+        .iter()
+        .find(|e| e.environment == "vire")
+        .unwrap();
+    assert!(reason_count(&vire.skip_reasons, "generation_lacks_usage_and_cost") >= 1);
+    assert!(reason_count(&vire.skip_reasons, "observations_not_embedded") >= 1);
+
+    // The ID-list sample names only the field type, never the ID value.
+    let idlist_sample = vire
+        .skip_samples
+        .iter()
+        .find(|s| s.reason == "observations_not_embedded")
+        .expect("an observations_not_embedded sample is kept");
+    assert_eq!(idlist_sample.field.as_deref(), Some("observations"));
+    assert_eq!(idlist_sample.field_type.as_deref(), Some("array"));
+    assert_eq!(idlist_sample.element_type.as_deref(), Some("string"));
+
+    let serialized = serde_json::to_string(&report).unwrap();
+    for needle in [
+        "sk-",
+        "pk-",
+        "Bearer",
+        "Authorization",
+        "canary",
+        "leak",
+        "session-",
+        "oat01",
+    ] {
+        assert!(
+            !serialized.contains(needle),
+            "skip diagnostics must be secret-free (SEC-011), found {needle}"
+        );
+    }
+}
+
+// ----- Workstream C: import range, incremental cursor, resumable backfill --------------------
+
+#[test]
+fn import_range_parses_validates_and_floors() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-06-30T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    assert_eq!(ImportRange::parse("last_7d").unwrap(), ImportRange::Last7d);
+    assert_eq!(
+        ImportRange::parse("LAST_30D").unwrap(),
+        ImportRange::Last30d
+    );
+    assert_eq!(ImportRange::parse("all").unwrap(), ImportRange::All);
+    // A valid `since:` is accepted and normalized to UTC RFC3339.
+    let since = ImportRange::parse("since:2026-01-15T12:00:00Z").unwrap();
+    assert_eq!(since, ImportRange::Since("2026-01-15T12:00:00Z".into()));
+
+    // Malformed / unknown values are rejected with a fixed, secret-free error.
+    assert!(ImportRange::parse("since:not-a-timestamp").is_err());
+    assert!(ImportRange::parse("since:").is_err());
+    assert!(ImportRange::parse("yesterday").is_err());
+    let err = ImportRange::parse("since:secret-value-xyz").unwrap_err();
+    assert!(
+        !err.contains("secret-value-xyz"),
+        "error never echoes the input"
+    );
+
+    // Floors: last_7d → now-7d; all → epoch; since → the timestamp.
+    assert_eq!(ImportRange::Last7d.floor(now), "2026-06-23T00:00:00Z");
+    assert_eq!(ImportRange::All.floor(now), "1970-01-01T00:00:00Z");
+    assert_eq!(since.floor(now), "2026-01-15T12:00:00Z");
+}
+
+#[test]
+fn incremental_window_resumes_from_cursor_floored_by_range() {
+    let now = "2026-06-30T00:00:00Z";
+    let floor = "2026-06-01T00:00:00Z";
+
+    // No cursor → first import starts at the range floor.
+    let w = incremental_window(floor, None, now);
+    assert_eq!(w.from, floor);
+    assert_eq!(w.to, now);
+
+    // Cursor newer than the floor → from = cursor − 1h overlap (re-sees late traces).
+    let w = incremental_window(floor, Some("2026-06-20T10:00:00Z"), now);
+    assert_eq!(w.from, "2026-06-20T09:00:00Z");
+
+    // Cursor older than the floor → the floor wins (never reach below the configured range).
+    let w = incremental_window(floor, Some("2026-05-01T00:00:00Z"), now);
+    assert_eq!(w.from, floor);
+}
+
+#[test]
+fn first_import_uses_range_floor_then_resumes_from_cursor() {
+    let c = conn();
+    let floor = "2026-06-01T00:00:00Z";
+    let api = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_with_generation(
+            "A",
+            "vire",
+            "2026-06-20T00:00:00Z",
+            1.0,
+            10,
+        )]],
+    );
+    let resolver = |_env: &str, cursor: Option<&str>| {
+        incremental_window(floor, cursor, "2026-06-30T00:00:00Z")
+    };
+
+    // First import: no cursor → window.from is the range floor.
+    run_import_with(&api, &c, &local_vire(), &resolver);
+    let first_from = api
+        .trace_windows
+        .borrow()
+        .iter()
+        .find(|(env, _, _)| env == "vire")
+        .map(|(_, from, _)| from.clone())
+        .unwrap();
+    assert_eq!(
+        first_from, floor,
+        "first import floors at the configured range"
+    );
+
+    // Second import: cursor is now established → window.from resumes from cursor − overlap.
+    api.trace_windows.borrow_mut().clear();
+    run_import_with(&api, &c, &local_vire(), &resolver);
+    let second_from = api
+        .trace_windows
+        .borrow()
+        .iter()
+        .find(|(env, _, _)| env == "vire")
+        .map(|(_, from, _)| from.clone())
+        .unwrap();
+    assert_eq!(
+        second_from, "2026-06-19T23:00:00Z",
+        "second import resumes from the cursor less the overlap"
+    );
+}
+
+#[test]
+fn backfill_imports_history_in_chunks_and_is_resumable() {
+    let c = conn();
+    // A wide range → multiple atomic chunks. Two traces returned regardless of window (the mock
+    // ignores the window), so chunk 1 imports both and later chunks re-see them as duplicates.
+    let api = MockApi::with_pages(
+        "vire",
+        vec![vec![
+            trace_with_generation("A", "vire", "2026-05-15T00:00:00Z", 1.0, 10),
+            trace_with_generation("B", "vire", "2026-05-16T00:00:00Z", 2.0, 20),
+        ]],
+    );
+    let floor = "2026-03-01T00:00:00Z";
+    let now = "2026-06-01T00:00:00Z";
+
+    let summaries = run_backfill(&api, &c, &local_vire(), floor, now);
+    let vire = summaries.iter().find(|x| x.environment == "vire").unwrap();
+
+    // More than one chunk ran (newest→oldest), proving the backfill is NOT one giant window.
+    let vire_calls = api
+        .calls
+        .borrow()
+        .iter()
+        .filter(|call| call.as_str() == "get_traces:vire:1")
+        .count();
+    assert!(
+        vire_calls >= 2,
+        "backfill ran multiple bounded chunks, got {vire_calls}"
+    );
+
+    // Both traces imported exactly once (durable dedup across chunks); duplicates from later chunks.
+    assert_eq!(vire.unique, 2);
+    assert!(
+        vire.duplicates >= 2,
+        "later chunks re-see imported traces as duplicates"
+    );
+    assert_eq!(raw_trace_rows(&c, "vire"), 2, "no duplicate rows persisted");
+    let cursor_after_first = vire.cursor_ts.clone();
+    assert!(cursor_after_first.is_some());
+
+    // Re-running the backfill converges: nothing new, no duplicate rows, cursor does not regress.
+    let summaries2 = run_backfill(&api, &c, &local_vire(), floor, now);
+    let vire2 = summaries2.iter().find(|x| x.environment == "vire").unwrap();
+    assert_eq!(vire2.unique, 0, "a re-run imports nothing new");
+    assert_eq!(
+        raw_trace_rows(&c, "vire"),
+        2,
+        "still exactly two rows after re-run"
+    );
+    assert_eq!(
+        vire2.cursor_ts, cursor_after_first,
+        "the cursor does not regress on re-run"
+    );
+}
+
+#[test]
+fn backfill_reports_bounded_run_rather_than_truncating_silently() {
+    let c = conn();
+    // A page source that always reports far more pages than it will ever serve, with non-empty data,
+    // so a single window hits the MAX_PAGES backstop. The reached_page_limit flag must surface it.
+    let api = MockApi {
+        infinite_pages: Some(trace_with_generation(
+            "A",
+            "vire",
+            "2026-06-05T00:00:00Z",
+            1.0,
+            10,
+        )),
+        ..Default::default()
+    };
+    let s = run_import(&api, &c, &local_vire(), &window());
+    let vire = s.iter().find(|x| x.environment == "vire").unwrap();
+    assert!(
+        vire.reached_page_limit,
+        "a window that hits the page backstop reports it (no silent truncation)"
+    );
+    let report = ImportReport::from_summaries(&s);
+    assert!(report.reached_page_limit);
+}
+
+// ----- range setting persistence (app-configuration) ----------------------------------------
+
+#[test]
+fn import_range_setting_persists_validates_and_defaults() {
+    let c = conn_with_settings();
+
+    // Absent → default last_30d.
+    assert_eq!(
+        crate::settings::resolve_import_range(&c),
+        ImportRange::Last30d
+    );
+    assert_eq!(
+        crate::settings::get_langfuse_import_range_repo(&c).unwrap(),
+        "last_30d"
+    );
+
+    // Set + read back a valid value.
+    let stored = crate::settings::set_langfuse_import_range_repo(&c, "last_90d".into()).unwrap();
+    assert_eq!(stored, "last_90d");
+    assert_eq!(
+        crate::settings::resolve_import_range(&c),
+        ImportRange::Last90d
+    );
+
+    // A malformed value is rejected with a secret-free error and does not overwrite the stored value.
+    let err =
+        crate::settings::set_langfuse_import_range_repo(&c, "since:nope-leak".into()).unwrap_err();
+    assert!(!err.contains("nope-leak"), "error never echoes the input");
+    assert_eq!(
+        crate::settings::resolve_import_range(&c),
+        ImportRange::Last90d,
+        "the prior valid value is unchanged after a rejected write"
+    );
+
+    // A malformed value written directly resolves to the default rather than failing the import.
+    crate::settings::set_langfuse_import_range_repo(&c, "last_7d".into()).unwrap();
+    c.execute(
+        "UPDATE settings SET value = 'garbage' WHERE key = 'langfuse_import_range'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        crate::settings::resolve_import_range(&c),
+        ImportRange::Last30d,
+        "a malformed stored value resolves to the default"
+    );
 }
