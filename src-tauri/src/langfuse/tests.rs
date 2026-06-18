@@ -2204,6 +2204,365 @@ fn page_limited_backfill_resumes_below_boundary_on_rerun() {
     );
 }
 
+// ----- SW-4 Blocker 1: continuation makes monotonic progress without skipping --------------
+
+/// A page source that never runs dry (claims `u32::MAX` pages → the window hits the `MAX_PAGES`
+/// backstop) and returns one trace per page across THREE distinct instants, newest-first: the newest on
+/// page 1, a middle instant on the interior pages, and the oldest on the final (backstop) page —
+/// modelling a page-limited window whose OLDEST reached instant was cut mid-instant (more of it lies
+/// unread below the backstop). The continuation boundary must be the SECOND-oldest distinct instant (the
+/// middle one), so the exclusive resume re-reads the oldest instant rather than skipping it.
+struct ThreeInstantDenseMock {
+    env: String,
+    newest: Value,
+    middle: Value,
+    oldest: Value,
+}
+
+impl LangfuseApi for ThreeInstantDenseMock {
+    fn probe(&self) -> Result<(), ApiError> {
+        Ok(())
+    }
+    fn get_traces(
+        &self,
+        environment: &str,
+        _from: &str,
+        _to: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<TracePage, ApiError> {
+        if environment != self.env {
+            return Ok(TracePage {
+                data: vec![],
+                meta: super::model::PageMeta {
+                    page,
+                    limit,
+                    total_items: 0,
+                    total_pages: 0,
+                },
+            });
+        }
+        let data = if page == 1 {
+            vec![self.newest.clone()]
+        } else if page >= super::importer::MAX_PAGES {
+            vec![self.oldest.clone()]
+        } else {
+            vec![self.middle.clone()]
+        };
+        Ok(TracePage {
+            data,
+            meta: super::model::PageMeta {
+                page,
+                limit,
+                total_items: 0,
+                total_pages: u32::MAX,
+            },
+        })
+    }
+    fn get_traces_any_env(
+        &self,
+        _from: &str,
+        _to: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<TracePage, ApiError> {
+        Ok(TracePage {
+            data: vec![],
+            meta: super::model::PageMeta {
+                page,
+                limit,
+                total_items: 0,
+                total_pages: 0,
+            },
+        })
+    }
+    fn get_observations(&self, _trace_id: &str) -> Result<Vec<Observation>, ApiError> {
+        Ok(vec![])
+    }
+}
+
+#[test]
+fn page_limited_backfill_boundary_is_second_oldest_instant_so_cut_instant_is_not_skipped() {
+    let c = conn();
+    let floor = "2026-05-01T00:00:00Z";
+    let now = "2026-05-20T00:00:00Z"; // < 30 days → a single chunk.
+    let t_new = "2026-05-18T00:00:00Z";
+    let t_mid = "2026-05-15T00:00:00Z";
+    let t_old = "2026-05-10T00:00:00Z";
+    let api = ThreeInstantDenseMock {
+        env: "vire".into(),
+        newest: trace_with_generation("NEW", "vire", t_new, 1.0, 10),
+        middle: trace_with_generation("MID", "vire", t_mid, 2.0, 20),
+        oldest: trace_with_generation("OLD", "vire", t_old, 3.0, 30),
+    };
+
+    let s = run_backfill(&api, &c, &local_vire(), floor, now);
+    let vire = s.iter().find(|x| x.environment == "vire").unwrap();
+    assert!(
+        vire.reached_page_limit,
+        "the dense window hits the page backstop"
+    );
+
+    let boundary = store::backfill_resume_to(&c).unwrap();
+    assert_eq!(
+        boundary.as_deref(),
+        Some(t_mid),
+        "the boundary is the SECOND-oldest distinct instant (the oldest fully-drained one)"
+    );
+    assert_ne!(
+        boundary.as_deref(),
+        Some(t_old),
+        "the boundary is NOT the oldest (possibly partially-read) instant — using it would make the \
+         exclusive resume skip the unread traces at the cut instant"
+    );
+}
+
+/// A page source modelling a SINGLE instant that holds more traces than the page backstop can drain
+/// (the equal-timestamp collision the SW-4 review called out). While the exclusive `toTimestamp` is
+/// still above that instant, every page returns a fresh trace id all stamped with the same instant and
+/// the source claims `u32::MAX` pages (so the window page-limits); once the resume ceiling drops to/below
+/// the instant, the finite older history below it becomes reachable.
+struct SaturatedInstantMock {
+    env: String,
+    instant: chrono::DateTime<chrono::Utc>,
+    instant_str: String,
+    older: Vec<Vec<Value>>,
+}
+
+impl LangfuseApi for SaturatedInstantMock {
+    fn probe(&self) -> Result<(), ApiError> {
+        Ok(())
+    }
+    fn get_traces(
+        &self,
+        environment: &str,
+        _from: &str,
+        to: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<TracePage, ApiError> {
+        let meta = |total_pages| super::model::PageMeta {
+            page,
+            limit,
+            total_items: 0,
+            total_pages,
+        };
+        if environment != self.env {
+            return Ok(TracePage {
+                data: vec![],
+                meta: meta(0),
+            });
+        }
+        // `toTimestamp` is exclusive: a window whose ceiling is strictly above the instant still sees
+        // the saturated block; a ceiling at/below the instant reads the older history below it.
+        if ts(to) > self.instant {
+            let id = format!("SAT-{page}");
+            return Ok(TracePage {
+                data: vec![trace_with_generation(
+                    &id,
+                    &self.env,
+                    &self.instant_str,
+                    1.0,
+                    10,
+                )],
+                meta: meta(u32::MAX),
+            });
+        }
+        let total_pages = self.older.len() as u32;
+        let data = self
+            .older
+            .get((page.saturating_sub(1)) as usize)
+            .cloned()
+            .unwrap_or_default();
+        Ok(TracePage {
+            data,
+            meta: meta(total_pages),
+        })
+    }
+    fn get_traces_any_env(
+        &self,
+        _from: &str,
+        _to: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<TracePage, ApiError> {
+        Ok(TracePage {
+            data: vec![],
+            meta: super::model::PageMeta {
+                page,
+                limit,
+                total_items: 0,
+                total_pages: 0,
+            },
+        })
+    }
+    fn get_observations(&self, _trace_id: &str) -> Result<Vec<Observation>, ApiError> {
+        Ok(vec![])
+    }
+}
+
+#[test]
+fn page_limited_backfill_at_a_saturated_single_instant_advances_then_clears_without_looping() {
+    let c = conn();
+    let floor = "2026-05-01T00:00:00Z";
+    let now = "2026-05-20T00:00:00Z";
+    let instant = "2026-05-15T00:00:00Z";
+    let api = SaturatedInstantMock {
+        env: "vire".into(),
+        instant: ts(instant),
+        instant_str: instant.into(),
+        older: vec![vec![
+            trace_with_generation("OLD1", "vire", "2026-05-10T00:00:00Z", 2.0, 20),
+            trace_with_generation("OLD2", "vire", "2026-05-05T00:00:00Z", 3.0, 30),
+        ]],
+    };
+
+    // Run 1: the whole window is the saturated single instant → the page backstop is hit and the boundary
+    // is that instant. A naive inclusive re-scan would re-walk the same block forever (the loop the SW-4
+    // review described); the exclusive resume below must escape it.
+    let s1 = run_backfill(&api, &c, &local_vire(), floor, now);
+    let vire1 = s1.iter().find(|x| x.environment == "vire").unwrap();
+    assert!(vire1.reached_page_limit, "run 1 hits the page backstop");
+    assert_eq!(
+        store::backfill_resume_to(&c).unwrap().as_deref(),
+        Some(instant),
+        "a saturated single instant persists that instant as the boundary"
+    );
+
+    // Run 2: resumes at `[floor, instant)` (exclusive) → the saturated instant is skipped and the older
+    // history below it is finally reached. Strict progress, no infinite loop. The unreachable
+    // same-instant excess is surfaced via run 1's reached_page_limit, never silently retried forever.
+    let s2 = run_backfill(&api, &c, &local_vire(), floor, now);
+    let vire2 = s2.iter().find(|x| x.environment == "vire").unwrap();
+    assert!(
+        vire2.unique >= 2,
+        "the re-run reaches the older history strictly below the saturated instant, got {}",
+        vire2.unique
+    );
+    assert!(
+        store::backfill_resume_to(&c).unwrap().is_none(),
+        "the re-run drains the remainder and clears the boundary — the loop is broken"
+    );
+}
+
+#[test]
+fn page_limited_backfill_with_no_usable_timestamp_preserves_boundary_never_clears() {
+    let c = conn();
+    // Pre-seed a continuation boundary as if a prior page-limited run left one.
+    store::set_backfill_resume_to(&c, "2026-05-10T00:00:00Z", "2026-06-01T00:00:00Z").unwrap();
+    // A dense source whose traces carry NO timestamp at all → the run page-limits but yields no usable
+    // boundary instant. The driver must NOT clear the boundary (clearing would restart from `now` and
+    // make the prior progress permanently unreachable).
+    let api = MockApi {
+        infinite_pages: Some(json!({
+            "id": "no-ts",
+            "environment": "vire",
+            "observations": []
+        })),
+        ..Default::default()
+    };
+    let floor = "2026-05-01T00:00:00Z";
+    let now = "2026-06-01T00:00:00Z";
+
+    let s = run_backfill(&api, &c, &local_vire(), floor, now);
+    let vire = s.iter().find(|x| x.environment == "vire").unwrap();
+    assert!(
+        vire.reached_page_limit,
+        "the run still reports it was page-limited (truthful / incomplete)"
+    );
+    assert_eq!(
+        store::backfill_resume_to(&c).unwrap().as_deref(),
+        Some("2026-05-10T00:00:00Z"),
+        "a page-limited run with no usable timestamp preserves the prior boundary, never clears it"
+    );
+}
+
+// ----- SW-4 Blocker 2: continuation persistence failures surface in-band -------------------
+
+#[test]
+fn continuation_boundary_persistence_failure_surfaces_in_band_not_a_false_resumable_claim() {
+    let c = conn();
+    // Drop the continuation table so every backfill_resume_to read AND write/clear errors. This models
+    // a store that cannot durably record the boundary.
+    c.execute("DROP TABLE langfuse_backfill_progress", [])
+        .unwrap();
+    // A page-limiting source so the driver attempts to WRITE a boundary (exercising the set path, on top
+    // of the failed initial read).
+    let api = MockApi {
+        infinite_pages: Some(trace_with_generation(
+            "A",
+            "vire",
+            "2026-05-15T00:00:00Z",
+            1.0,
+            10,
+        )),
+        ..Default::default()
+    };
+    let s = run_backfill(
+        &api,
+        &c,
+        &local_vire(),
+        "2026-05-01T00:00:00Z",
+        "2026-06-01T00:00:00Z",
+    );
+    assert!(
+        s.iter().any(|x| x
+            .warnings
+            .iter()
+            .any(|w| w == super::importer::PERSIST_FAILURE_MSG)),
+        "a continuation read/write failure injects the in-band persist-failure sentinel"
+    );
+    assert!(
+        super::import_result(&s).is_err(),
+        "the manual-import IPC collapses the run to an Err, so the UI/report cannot claim resumability \
+         after a failed boundary persist"
+    );
+}
+
+// ----- SW-4 Blocker 3: malformed timestamps are ignored, never lexically ordered -----------
+
+#[test]
+fn malformed_trace_timestamp_is_ignored_for_cursor_and_delayed_not_lexically_ordered() {
+    let c = conn();
+    // First import establishes a valid cursor at 09:30:00Z.
+    let api1 = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_with_generation(
+            "base",
+            "vire",
+            "2026-06-10T09:30:00Z",
+            1.0,
+            10,
+        )]],
+    );
+    run_import(&api1, &c, &local_vire(), &window());
+
+    // A new trace whose timestamp is GARBAGE. A lexical compare would rank it ('n' 0x6E > '2' 0x32),
+    // corrupting the cursor and/or the delayed classification. It must be IGNORED for both decisions.
+    let api2 = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_with_generation(
+            "garbage",
+            "vire",
+            "not-a-timestamp",
+            2.0,
+            20,
+        )]],
+    );
+    let s = run_import(&api2, &c, &local_vire(), &window());
+    let vire = s.iter().find(|e| e.environment == "vire").unwrap();
+    assert_eq!(
+        vire.cursor_ts.as_deref(),
+        Some("2026-06-10T09:30:00Z"),
+        "an unparseable timestamp never advances or regresses the cursor (no lexical fallback)"
+    );
+    assert_ne!(
+        vire.health,
+        HealthState::Delayed,
+        "an unparseable timestamp is not classified delayed (the comparison yields None, not a byte order)"
+    );
+}
+
 // ----- range setting persistence (app-configuration) ----------------------------------------
 
 #[test]
