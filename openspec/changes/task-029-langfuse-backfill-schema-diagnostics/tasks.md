@@ -67,15 +67,22 @@ suggestion is built here** — that is TASK-030 (see `proposal.md` *Out of scope
 - [x] C3. Discovery stays on a bounded `recent_window(DISCOVERY_WINDOW_DAYS=7)` (no full-history scan
   per import).
 - [x] C4. Chunked **resumable atomic backfill** (`importer::run_backfill` + `backfill_chunks`): a wide
-  range is an ordered newest→oldest sequence of bounded sub-windows (≥30d, ≤24 chunks), each run through
-  the single-window engine and persisted atomically as its own run (S-3 + TASK-021 surfacing preserved).
-  A window hitting the `MAX_PAGES` backstop sets `reached_page_limit` (surfaced on the report — no silent
-  truncation).
-  - [x] C4a. **SW-4 fix — page-limit continuation.** A page-limited backfill now persists a durable
-    continuation boundary (`ImportSummary.page_limit_floor_ts` → `langfuse_backfill_progress` via
-    `store::{set,clear,backfill_resume_to}`); `run_backfill` resumes at `[range_floor, boundary]` so each
-    re-run reaches strictly-older history beyond the prior page limit (monotonic progress), and a clean
-    run clears the boundary. The report's "re-run to continue" note is therefore truthful. See design §4.3.
+  range is an ordered sequence of bounded sub-windows (≥30d, ≤24 chunks), each run through the single-window
+  engine and persisted atomically as its own run (S-3 + TASK-021 surfacing preserved). A window hitting the
+  `MAX_PAGES` backstop sets `reached_page_limit` (surfaced on the report — no silent truncation).
+  *(Chunk order flipped to **oldest→newest** under DEC-032 C4a.)*
+  - [ ] C4a. **DEC-032 REDESIGN (supersedes the SW-4 second-oldest-instant fix — `arch-review.md` §8).**
+    Replace the exclusive-`toTimestamp` / `min_ts2` continuation with an **ascending `orderBy=timestamp.asc`
+    sweep + inclusive `fromTimestamp` resume-cursor**: persist `resume_from = max_reached` (the chronological
+    max parseable `timestamp` of a page-limited run) to `langfuse_backfill_progress`; `run_backfill` resumes
+    at `fromTimestamp = resume_from` (**inclusive**), re-reading the **whole boundary instant** so
+    equal-timestamp traces are never skipped (dedupe ⇒ exactly once, no tie-breaker needed); a clean run
+    clears the cursor. Add `orderBy` to `ApiPath::Traces` + `get_traces` (fixed literal `timestamp.asc`; no
+    new egress, GET-only). **Delete** `note_oldest_instants`/`min_ts`/`min_ts2`/`page_limit_floor_ts`.
+    Single-instant saturation (`≥ D = MAX_PAGES×PAGE_LIMIT = 50 000` traces at one instant; `max_reached ==
+    resume_from`) is a **distinct secret-free terminal diagnostic** (count, no timestamp value) — never a
+    silent skip, never a loop. In-band `PERSIST_FAILURE_MSG` for store faults retained. See design §4.3 +
+    `arch-review.md` §8.3–§8.4.
 - [x] C5. IPC `backfill_langfuse_now` (backfill mode + larger `BACKFILL_TIMEOUT_SECS=300` bound);
   honours `langfuse_enabled` short-circuit, SEC-002 loopback (same `build_url`/`get_traces` path),
   `import_lock` serialization, off-UI dedicated thread — identical posture to `import_langfuse_now`.
@@ -89,12 +96,18 @@ suggestion is built here** — that is TASK-030 (see `proposal.md` *Out of scope
   re-run, cursor non-regressing, no duplicate rows); `backfill_reports_bounded_run_rather_than_
   truncating_silently`; `import_range_parses_validates_and_floors` (incl. malformed `since:`);
   `import_range_setting_persists_validates_and_defaults`.
-  - [x] C7a. **SW-4 fix tests.** `page_limited_backfill_resumes_below_boundary_on_rerun` (proves a re-run
-    reaches older/beyond-page-limit history, not just dedupe; boundary persisted then cleared);
-    `cursor_advances_by_instant_not_lexically_across_offsets_and_precision` and
-    `delayed_classification_and_cursor_compare_instants_across_offsets` (mixed timezone offset / fractional
-    precision — cursor/`max`/`delayed` parse to `DateTime<Utc>`, never lexical compare). 136 Rust lib tests
-    green.
+  - [ ] C7a. **DEC-032 REDESIGN tests (`arch-review.md` §8.5).** **Delete** the tests that encode the defect
+    (`page_limited_backfill_at_a_saturated_single_instant_advances_then_clears_without_looping`,
+    `page_limited_backfill_with_no_usable_timestamp_preserves_boundary_never_clears`,
+    `page_limited_backfill_resumes_below_boundary_on_rerun`, and the second-oldest-instant test). **Add:**
+    (1) `backfill_page_limited_resumes_forward_by_inclusive_from_cursor` (union over runs == full set, each
+    trace exactly once — no skip, no dup); (2) `backfill_equal_timestamp_block_at_boundary_is_fully_
+    reimported_not_skipped` (the direct equal-timestamp regression); (3) `backfill_single_instant_at_or_
+    above_page_depth_is_surfaced_terminal_not_looping` (cursor not advanced past unread, distinct saturation
+    diagnostic, bounded-iteration proof of no loop); (4) `backfill_boundary_timestamp_is_robustly_parsed_
+    else_imported_but_excluded_from_cursor`. **Retain** `cursor_advances_by_instant_not_lexically_across_
+    offsets_and_precision`, `delayed_classification_and_cursor_compare_instants_across_offsets`, and the
+    `cmp_ts` `Option<Ordering>` no-lexical-fallback guarantee. Update VF-3 test to the inclusive cursor.
 
 ## Workstream D — Grouped, actionable import summary  *(frontend developer)*
 

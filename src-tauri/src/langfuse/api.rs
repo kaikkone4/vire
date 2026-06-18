@@ -16,7 +16,9 @@ pub trait LangfuseApi {
     /// unreachable — which must surface as `unavailable`, never as zero usage/cost.
     fn probe(&self) -> Result<(), ApiError>;
 
-    /// One page of `GET /api/public/traces` for an environment + time window.
+    /// One page of `GET /api/public/traces` for an environment + time window, ordered explicitly by
+    /// `order_by` (a fixed `[field].[asc|desc]` literal — the importer always passes `timestamp.asc`
+    /// so the inclusive-`fromTimestamp` resume-cursor walks oldest → newest, DEC-032).
     fn get_traces(
         &self,
         environment: &str,
@@ -24,6 +26,7 @@ pub trait LangfuseApi {
         to: &str,
         page: u32,
         limit: u32,
+        order_by: &str,
     ) -> Result<TracePage, ApiError>;
 
     /// One page of `GET /api/public/traces` over a time window **without** the `environment`
@@ -103,6 +106,7 @@ impl LangfuseApi for ReqwestLangfuseApi {
         to: &str,
         page: u32,
         limit: u32,
+        order_by: &str,
     ) -> Result<TracePage, ApiError> {
         let value = self.get_json(ApiPath::Traces {
             environment,
@@ -110,6 +114,7 @@ impl LangfuseApi for ReqwestLangfuseApi {
             to,
             page,
             limit,
+            order_by,
         })?;
         serde_json::from_value(value).map_err(|_| {
             ApiError::new(

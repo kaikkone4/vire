@@ -80,13 +80,18 @@ impl fmt::Debug for Credentials {
 pub enum ApiPath<'a> {
     /// Availability probe (cheap read used to detect a down/unreachable stack).
     Health,
-    /// `GET /api/public/traces` with environment + time-window + pagination params.
+    /// `GET /api/public/traces` with environment + time-window + pagination + explicit ordering. The
+    /// `order_by` value is a fixed `[field].[asc|desc]` literal the importer always sets to
+    /// `timestamp.asc` (DEC-032) so the inclusive-`fromTimestamp` resume-cursor walks oldest → newest;
+    /// the undocumented default sort is never relied on. Same allowlisted `/api/public/traces` path —
+    /// no new endpoint or host (SEC-002).
     Traces {
         environment: &'a str,
         from: &'a str,
         to: &'a str,
         page: u32,
         limit: u32,
+        order_by: &'a str,
     },
     /// `GET /api/public/traces` over a time window **without** the `environment` filter, so the
     /// page spans every environment (TASK-027 C, environment discovery). The `environment` query
@@ -232,6 +237,7 @@ impl ImporterConfig {
                 to,
                 page,
                 limit,
+                order_by,
             } => {
                 let mut q = url.query_pairs_mut();
                 q.append_pair("environment", environment);
@@ -239,6 +245,8 @@ impl ImporterConfig {
                 q.append_pair("toTimestamp", to);
                 q.append_pair("page", &page.to_string());
                 q.append_pair("limit", &limit.to_string());
+                // Explicit ordering (DEC-032): never rely on the undocumented default sort.
+                q.append_pair("orderBy", order_by);
             }
             ApiPath::TracesAllEnvironments {
                 from,

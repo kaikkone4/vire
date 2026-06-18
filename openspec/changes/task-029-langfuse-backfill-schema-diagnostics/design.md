@@ -161,19 +161,42 @@ each window small enough that this backstop is not hit in practice; if a window 
 **says so** (a `reached_page_limit` note) and the user re-runs to continue — **never silent truncation**
 (no-silent-caps).
 
-**Page-limit continuation (SW-4 fix).** Pagination always restarts at page 1 and the source returns
-traces newest-first, so a naive re-run of a page-limited window would re-walk the same first `MAX_PAGES`
-pages forever and history beyond the backstop would stay permanently unreachable — durable dedupe
-suppresses the rows but never advances the page offset. To make re-runs **monotonic**, a page-limited
-backfill persists a durable **continuation boundary**: the oldest instant it actually reached
-(`ImportSummary.page_limit_floor_ts`, the chronological min over every entry the dense window returned).
-`run_backfill` resumes by re-scanning `[range_floor, boundary]` instead of `[range_floor, now]`, so each
-re-run pages strictly-older traces the prior run could not reach (every page-limit gap lies below the
-boundary). The boundary is the newest stopping point across environments, so re-scanning down to it never
-skips a sparser environment's older history. A run that completes without hitting the backstop **clears**
-the boundary (the configured range is then fully covered), so a later "Backfill now" starts fresh; a
-hard-down stop leaves any boundary untouched. The boundary is a single UTC RFC3339 timestamp — a position
-marker, never trace content or a credential.
+**Page-limit continuation (DEC-032 — supersedes the SW-4 second-oldest-instant scheme; see
+`arch-review.md` §8).** Pagination restarts at page 1, so a naive re-run of a page-limited window would
+re-walk the same first `MAX_PAGES` pages forever and history beyond the backstop would stay unreachable —
+durable dedupe suppresses rows but never advances the offset. The continuation uses the API's **inclusive**
+`fromTimestamp` (verified: `fromTimestamp` is "on or after" ≥; `toTimestamp` is "before" <):
+
+- Every trace-import page request is ordered **`orderBy=timestamp.asc`** (oldest → newest; the default order
+  is undocumented so it is set explicitly). Backfill chunks run **oldest → newest**.
+- A page-limited backfill persists a single durable **inclusive resume-cursor** `resume_from` =
+  `max_reached`, the chronological **maximum** parseable `timestamp` the run returned (the same `max_ts` the
+  incremental cursor already computes — no oldest-instant tracking).
+- The next run resumes with `fromTimestamp = resume_from` (**inclusive**), so it **re-reads the entire
+  boundary instant** from page 1; durable `(environment, trace_id)` dedupe suppresses the overlap and
+  pagination advances into strictly-newer history. Because the whole boundary instant is re-scanned each run
+  (never resumed mid-instant), **equal-timestamp traces at the cut are fully re-read, never skipped, and no
+  stable tie-breaker is needed** — the verified API offers no page-token and no guaranteed secondary sort,
+  so a keyset cursor is not available and the inclusive-re-read obviates it.
+- A run that drains `[resume_from, now)` without hitting the backstop **clears** the cursor (range fully
+  covered); a hard-down stop leaves it untouched. Store read/write/clear faults still surface in-band via
+  `PERSIST_FAILURE_MSG`.
+
+**Single-instant saturation (the one unreachable corner).** Let reachable depth `D = MAX_PAGES × PAGE_LIMIT
+= 50 000`. The only case the inclusive cursor cannot drain is a single `timestamp` instant holding `≥ D`
+traces (then `max_reached == resume_from`, cursor cannot advance). This is handled as an **explicit terminal
+state**: detect (backstop hit AND cursor did not advance), **never push the cursor past unread data** (no
+skip), and surface a **distinct secret-free terminal diagnostic** (a count, no timestamp value) meaning the
+instant exceeds the page-depth limit — **never an infinite "re-run to continue" loop**. Because Langfuse
+timestamps are millisecond-precision and the cursor stores the source value verbatim, saturation needs
+≥ 50 000 traces at one millisecond — unreachable for this single-user prototype; the terminal-surface exists
+for the invariant, not because it fires. The resume-cursor is a single UTC RFC3339 timestamp — a position
+marker, never trace content or a credential (excluded from every serialized/rendered/logged surface).
+
+**Invariant.** Every trace whose `timestamp`-instant is shared by fewer than `D` traces is eventually
+imported **exactly once** (dedupe ⇒ exactly once); an instant with `≥ D` traces is surfaced as a named
+terminal diagnostic, never silently skipped or looped. No instant in this product approaches `D`, so the
+operative guarantee is unconditional: every trace is eventually imported exactly once.
 
 ### 4.4 Efficiency at backfill scale
 
@@ -222,11 +245,11 @@ via `import_lock`, identical to manual import.
 ## 7. Compatibility & rollback
 
 - **Additive data model:** one new `settings` row (`langfuse_import_range`) and one new importer-owned
-  table `langfuse_backfill_progress` (a single global continuation-boundary row, §4.3 SW-4 fix). Both are
-  created by the existing idempotent `store::migrate`; no existing table/column is altered. The boundary
-  table holds only a UTC RFC3339 timestamp + the fixed marker key — no trace content or credential. Fresh
-  installs and reopens converge via the same migration; an absent boundary means "start a backfill from
-  now". Absent range setting → `last_30d`.
+  table `langfuse_backfill_progress` (a single global continuation-cursor row, §4.3 / DEC-032). Both are
+  created by the existing idempotent `store::migrate`; no existing table/column is altered. The row holds
+  only a UTC RFC3339 timestamp (the **inclusive `resume_from`** cursor) + the fixed marker key — no trace
+  content or credential. Fresh installs and reopens converge via the same migration; an absent cursor means
+  "start a fresh backfill from the configured range floor". Absent range setting → `last_30d`.
 - **Behaviour change to flag:** the first-import / range floor moves from a fixed **7 days** to **30
   days** (default), and the incremental `from` is now cursor-driven (previously the window ignored the
   cursor). Re-importing a trace already stored is a durable-dedupe no-op, so the change is safe to apply
@@ -244,9 +267,11 @@ via `import_lock`, identical to manual import.
   the classifier shows a different dominant reason, B targets that instead.
 - **VF-2:** After §2, the 611 previously-skipped traces import as `healthy` (usage/cost read from fetched
   observations) or `schema_changed` (genuinely unreadable) — **none silently dropped**; new-trace count > 0.
-- **VF-3:** A backfill over `last_90d` is resumable: interrupting and re-running converges (no duplicate
-  rows, cursor advances), and a window that hits the page backstop reports it rather than truncating
-  silently.
+- **VF-3:** A backfill over `last_90d` is resumable via the inclusive `resume_from` cursor (DEC-032):
+  interrupting and re-running converges (no duplicate rows, cursor advances monotonically forward), a
+  page-limited window re-reads the whole boundary instant so equal-timestamp traces are never skipped, and a
+  single instant exceeding the page-depth limit `D` is surfaced as a distinct terminal diagnostic rather
+  than silently truncated or looped (see `arch-review.md` §8.4 invariant).
 - **VF-4 (SEC-011):** the serialized report + samples contain no secret/prompt/session/value material
   (negative fixture test).
 
