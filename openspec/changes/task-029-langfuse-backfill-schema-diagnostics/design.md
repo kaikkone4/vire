@@ -161,6 +161,20 @@ each window small enough that this backstop is not hit in practice; if a window 
 **says so** (a `reached_page_limit` note) and the user re-runs to continue — **never silent truncation**
 (no-silent-caps).
 
+**Page-limit continuation (SW-4 fix).** Pagination always restarts at page 1 and the source returns
+traces newest-first, so a naive re-run of a page-limited window would re-walk the same first `MAX_PAGES`
+pages forever and history beyond the backstop would stay permanently unreachable — durable dedupe
+suppresses the rows but never advances the page offset. To make re-runs **monotonic**, a page-limited
+backfill persists a durable **continuation boundary**: the oldest instant it actually reached
+(`ImportSummary.page_limit_floor_ts`, the chronological min over every entry the dense window returned).
+`run_backfill` resumes by re-scanning `[range_floor, boundary]` instead of `[range_floor, now]`, so each
+re-run pages strictly-older traces the prior run could not reach (every page-limit gap lies below the
+boundary). The boundary is the newest stopping point across environments, so re-scanning down to it never
+skips a sparser environment's older history. A run that completes without hitting the backstop **clears**
+the boundary (the configured range is then fully covered), so a later "Backfill now" starts fresh; a
+hard-down stop leaves any boundary untouched. The boundary is a single UTC RFC3339 timestamp — a position
+marker, never trace content or a credential.
+
 ### 4.4 Efficiency at backfill scale
 
 - **N+1 observations fetch.** `normalize_trace` fetches `/api/public/observations?traceId=` per trace
@@ -207,14 +221,20 @@ via `import_lock`, identical to manual import.
 
 ## 7. Compatibility & rollback
 
-- **Additive data model:** one new `settings` row (`langfuse_import_range`); no table/column change. Fresh
-  installs and reopens converge via the existing idempotent migration. Absent setting → `last_30d`.
+- **Additive data model:** one new `settings` row (`langfuse_import_range`) and one new importer-owned
+  table `langfuse_backfill_progress` (a single global continuation-boundary row, §4.3 SW-4 fix). Both are
+  created by the existing idempotent `store::migrate`; no existing table/column is altered. The boundary
+  table holds only a UTC RFC3339 timestamp + the fixed marker key — no trace content or credential. Fresh
+  installs and reopens converge via the same migration; an absent boundary means "start a backfill from
+  now". Absent range setting → `last_30d`.
 - **Behaviour change to flag:** the first-import / range floor moves from a fixed **7 days** to **30
   days** (default), and the incremental `from` is now cursor-driven (previously the window ignored the
   cursor). Re-importing a trace already stored is a durable-dedupe no-op, so the change is safe to apply
   to an existing store.
 - **Rollback:** revert the importer/settings/UI changes; the new `settings` row is inert to older builds
-  (unknown key ignored), and the durable cursor/dedupe rows are forward/back compatible. RELEASE.md (SW-6)
+  (unknown key ignored), and the durable cursor/dedupe rows are forward/back compatible. The new
+  `langfuse_backfill_progress` table is likewise inert to older builds (an unknown table is simply never
+  read), so a downgrade silently ignores it and a re-upgrade re-creates it idempotently. RELEASE.md (SW-6)
   records this as additive with a partial-automated rollback, consistent with the TASK-026/027 posture.
 
 ## 8. Verification flags (confirm during SW-2, not assumed here)

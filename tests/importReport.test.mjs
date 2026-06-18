@@ -94,6 +94,10 @@ test('a page-limit run says so rather than truncating silently', () => {
   const html = renderImportReport(r, 'backfill');
   assert.match(html, /reached the pagination limit/i);
   assert.match(html, /Re-run to continue — no data was truncated silently/);
+  // The "re-run to continue" claim is truthful: the backend persists a continuation boundary, so the
+  // note states that repeated runs reach progressively further back (not the same page 1 every time).
+  assert.match(html, /resumes from the oldest history already fetched/);
+  assert.match(html, /reach progressively further back/);
   assert.match(html, /<b>vire<\/b>:[^<]*<b>reached page limit — re-run to continue<\/b>/);
 });
 

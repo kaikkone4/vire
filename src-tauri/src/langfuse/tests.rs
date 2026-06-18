@@ -1543,6 +1543,29 @@ fn raw_trace_rows(c: &Connection, env: &str) -> i64 {
     .unwrap()
 }
 
+/// The persisted raw-trace ids for an environment, sorted, so a test can assert exactly which traces a
+/// run reached (not just how many).
+fn trace_id_rows(c: &Connection, env: &str) -> Vec<String> {
+    let mut stmt = c
+        .prepare(
+            "SELECT trace_id FROM langfuse_raw_traces WHERE environment = ?1 ORDER BY trace_id",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map(rusqlite::params![env], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<String>, _>>()
+        .unwrap();
+    rows
+}
+
+/// Parse an RFC3339 timestamp to `DateTime<Utc>` for the mocks/tests that compare instants directly.
+fn ts(value: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
 /// An in-memory connection with the importer tables AND a minimal `settings` table, for the
 /// range-resolution tests (which read/write the key-value `settings` rows).
 fn conn_with_settings() -> Connection {
@@ -1842,6 +1865,82 @@ fn incremental_window_resumes_from_cursor_floored_by_range() {
 }
 
 #[test]
+fn cursor_advances_by_instant_not_lexically_across_offsets_and_precision() {
+    // Two traces whose RFC3339 strings sort the OPPOSITE way lexically vs chronologically:
+    //   X: 2026-06-10T10:00:00+02:00  == 08:00:00Z  (earlier instant, but lexically "T10…" > "T09…")
+    //   Y: 2026-06-10T09:30:00Z                       (later instant)
+    // A lexicographic max picks X; the chronological max must pick Y.
+    let c = conn();
+    let x = trace_with_generation("X", "vire", "2026-06-10T10:00:00+02:00", 1.0, 10);
+    let y = trace_with_generation("Y", "vire", "2026-06-10T09:30:00Z", 2.0, 20);
+    let api = MockApi::with_pages("vire", vec![vec![x, y]]);
+    let s = run_import(&api, &c, &local_vire(), &window());
+    let vire = s.iter().find(|e| e.environment == "vire").unwrap();
+    assert_eq!(
+        vire.cursor_ts.as_deref(),
+        Some("2026-06-10T09:30:00Z"),
+        "the cursor is the chronologically-latest instant, not the lexically-largest string"
+    );
+
+    // Fractional precision: a value WITH a fraction is a later instant than the whole-second value it
+    // extends, even though 'Z' (0x5A) sorts after '.' (0x2E) lexically.
+    let c2 = conn();
+    let p = trace_with_generation("P", "vire", "2026-06-10T09:30:05Z", 1.0, 10);
+    let q = trace_with_generation("Q", "vire", "2026-06-10T09:30:05.250Z", 2.0, 20);
+    let api2 = MockApi::with_pages("vire", vec![vec![p, q]]);
+    let s2 = run_import(&api2, &c2, &local_vire(), &window());
+    let vire2 = s2.iter().find(|e| e.environment == "vire").unwrap();
+    assert_eq!(
+        vire2.cursor_ts.as_deref(),
+        Some("2026-06-10T09:30:05.250Z"),
+        "fractional-second precision orders by instant, not by string bytes"
+    );
+}
+
+#[test]
+fn delayed_classification_and_cursor_compare_instants_across_offsets() {
+    let c = conn();
+    // First import establishes a cursor at 09:30:00Z.
+    let api1 = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_with_generation(
+            "base",
+            "vire",
+            "2026-06-10T09:30:00Z",
+            1.0,
+            10,
+        )]],
+    );
+    run_import(&api1, &c, &local_vire(), &window());
+
+    // Second import: a NEW trace whose instant is EARLIER than the cursor (10:00:00+02:00 == 08:00:00Z)
+    // but whose RFC3339 string sorts AFTER it lexically. It is a late/delayed arrival a lexicographic
+    // compare would miss, and the cursor must not regress to it.
+    let api2 = MockApi::with_pages(
+        "vire",
+        vec![vec![trace_with_generation(
+            "late",
+            "vire",
+            "2026-06-10T10:00:00+02:00",
+            2.0,
+            20,
+        )]],
+    );
+    let s = run_import(&api2, &c, &local_vire(), &window());
+    let vire = s.iter().find(|e| e.environment == "vire").unwrap();
+    assert_eq!(
+        vire.health,
+        HealthState::Delayed,
+        "an earlier-instant arrival is classified delayed, not healthy"
+    );
+    assert_eq!(
+        vire.cursor_ts.as_deref(),
+        Some("2026-06-10T09:30:00Z"),
+        "the cursor never regresses to the earlier-instant late trace"
+    );
+}
+
+#[test]
 fn first_import_uses_range_floor_then_resumes_from_cursor() {
     let c = conn();
     let floor = "2026-06-01T00:00:00Z";
@@ -1967,6 +2066,142 @@ fn backfill_reports_bounded_run_rather_than_truncating_silently() {
     );
     let report = ImportReport::from_summaries(&s);
     assert!(report.reached_page_limit);
+}
+
+/// Models a page-limited backfill whose older history is reachable only after the persisted
+/// continuation boundary narrows the re-scan window (TASK-029 C4). For the dense environment, a window
+/// whose `to` is strictly newer than `boundary` page-limits forever (returns `newest` on every page
+/// with an effectively unbounded `total_pages`, so the importer walks to its `MAX_PAGES` backstop); a
+/// window at/below `boundary` returns the finite `older` pages. Every other environment gets nothing,
+/// keeping the test on one environment.
+struct ContinuationMock {
+    env: String,
+    boundary: chrono::DateTime<chrono::Utc>,
+    newest: Value,
+    older: Vec<Vec<Value>>,
+}
+
+impl LangfuseApi for ContinuationMock {
+    fn probe(&self) -> Result<(), ApiError> {
+        Ok(())
+    }
+
+    fn get_traces(
+        &self,
+        environment: &str,
+        _from: &str,
+        to: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<TracePage, ApiError> {
+        let meta = |total_pages| super::model::PageMeta {
+            page,
+            limit,
+            total_items: 0,
+            total_pages,
+        };
+        if environment != self.env {
+            return Ok(TracePage {
+                data: vec![],
+                meta: meta(0),
+            });
+        }
+        if ts(to) > self.boundary {
+            // Dense top: every page is full and the source claims far more pages than it serves, so the
+            // importer walks to its MAX_PAGES backstop and sets reached_page_limit.
+            return Ok(TracePage {
+                data: vec![self.newest.clone()],
+                meta: meta(u32::MAX),
+            });
+        }
+        // At/below the boundary: the older history a narrowed re-run can finally reach.
+        let total_pages = self.older.len() as u32;
+        let data = self
+            .older
+            .get((page.saturating_sub(1)) as usize)
+            .cloned()
+            .unwrap_or_default();
+        Ok(TracePage {
+            data,
+            meta: meta(total_pages),
+        })
+    }
+
+    fn get_traces_any_env(
+        &self,
+        _from: &str,
+        _to: &str,
+        page: u32,
+        limit: u32,
+    ) -> Result<TracePage, ApiError> {
+        Ok(TracePage {
+            data: vec![],
+            meta: super::model::PageMeta {
+                page,
+                limit,
+                total_items: 0,
+                total_pages: 0,
+            },
+        })
+    }
+
+    fn get_observations(&self, _trace_id: &str) -> Result<Vec<Observation>, ApiError> {
+        Ok(vec![])
+    }
+}
+
+#[test]
+fn page_limited_backfill_resumes_below_boundary_on_rerun() {
+    let c = conn();
+    let range_floor = "2026-05-01T00:00:00Z";
+    let now = "2026-05-20T00:00:00Z"; // < 30 days → a single chunk, so run 1 only queries [floor, now].
+    let boundary = "2026-05-15T00:00:00Z";
+
+    let api = ContinuationMock {
+        env: "vire".into(),
+        boundary: ts(boundary),
+        newest: trace_with_generation("NEW", "vire", boundary, 1.0, 10),
+        older: vec![vec![
+            trace_with_generation("OLD1", "vire", "2026-05-10T00:00:00Z", 2.0, 20),
+            trace_with_generation("OLD2", "vire", "2026-05-05T00:00:00Z", 3.0, 30),
+        ]],
+    };
+
+    // Run 1: the whole window is the dense top → the page backstop is hit. Only the newest trace is
+    // reached; OLD1/OLD2 sit beyond the page limit and are NOT imported yet. A naive design (re-walk
+    // page 1..MAX every run) would leave them permanently unreachable.
+    let s1 = run_backfill(&api, &c, &local_vire(), range_floor, now);
+    let vire1 = s1.iter().find(|x| x.environment == "vire").unwrap();
+    assert!(vire1.reached_page_limit, "run 1 hits the page backstop");
+    assert_eq!(
+        trace_id_rows(&c, "vire"),
+        vec!["NEW".to_string()],
+        "run 1 reaches only the newest trace; older history is still beyond the page limit"
+    );
+    assert_eq!(
+        store::backfill_resume_to(&c).unwrap().as_deref(),
+        Some(boundary),
+        "run 1 persists the continuation boundary at the oldest page it reached"
+    );
+
+    // Run 2: re-running resumes at [range_floor, boundary] and pages the OLDER history the page-limited
+    // first run could not reach — monotonic progress across re-runs, NOT just dedupe of the same data.
+    let s2 = run_backfill(&api, &c, &local_vire(), range_floor, now);
+    let vire2 = s2.iter().find(|x| x.environment == "vire").unwrap();
+    assert!(
+        vire2.unique >= 2,
+        "the re-run imports older traces beyond the previous page limit, got {}",
+        vire2.unique
+    );
+    assert_eq!(
+        trace_id_rows(&c, "vire"),
+        vec!["NEW".to_string(), "OLD1".to_string(), "OLD2".to_string()],
+        "after the re-run the older history is finally reached"
+    );
+    assert!(
+        store::backfill_resume_to(&c).unwrap().is_none(),
+        "a re-run that completes without a page limit clears the boundary (range fully covered)"
+    );
 }
 
 // ----- range setting persistence (app-configuration) ----------------------------------------

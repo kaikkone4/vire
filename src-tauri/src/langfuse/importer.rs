@@ -2,6 +2,7 @@
 //! observations → classify a health state → persist. Pure orchestration over the `LangfuseApi`
 //! trait, so the whole flow is unit-tested against an in-memory mock (no network, no credentials).
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
@@ -66,6 +67,13 @@ pub struct ImportSummary {
     /// True when at least one window for this environment hit the [`MAX_PAGES`] pagination backstop,
     /// so the run was bounded and the user should re-run to continue (no silent truncation, TASK-029 C4).
     pub reached_page_limit: bool,
+    /// When [`reached_page_limit`](Self::reached_page_limit) is set, the oldest (chronologically
+    /// minimum) trace timestamp the page-limited window actually reached. A backfill persists this as a
+    /// durable **continuation boundary** so the next "Backfill now" re-scans `[range_floor, this]` and
+    /// reaches strictly-older history instead of re-walking the same first `MAX_PAGES` pages forever
+    /// (TASK-029 C4). `None` for any run that did not hit the page backstop. Internal to the importer —
+    /// never serialized into the secret-free report.
+    pub page_limit_floor_ts: Option<String>,
     pub cursor_ts: Option<String>,
     pub evidence: Vec<AiEvidence>,
     pub warnings: Vec<String>,
@@ -400,6 +408,15 @@ fn backfill_chunks(floor: DateTime<Utc>, now: DateTime<Utc>) -> Vec<ImportWindow
 /// non-regressing cursor. Per-environment summaries are merged across chunks into one report. Honors
 /// the same boundaries as a normal import (the caller probes/serializes/bounds identically). If the
 /// stack is hard-down on a chunk, the run stops early rather than probing every remaining chunk.
+///
+/// **Page-limit continuation (TASK-029 C4).** Because pagination always restarts at page 1 and the
+/// source returns traces newest-first, a window dense enough to hit the [`MAX_PAGES`] backstop would,
+/// on a naive re-run, re-walk the same first `MAX_PAGES` pages forever — older history beyond the
+/// backstop would stay permanently unreachable. To make re-runs monotonic, a page-limited run persists
+/// a durable **continuation boundary** (the oldest instant it reached). The next backfill resumes by
+/// re-scanning `[range_floor, boundary]` instead of `[range_floor, now]`, so it pages strictly-older
+/// traces the prior run could not reach. A run that completes without hitting the backstop clears the
+/// boundary, so the configured range is then fully covered and a later "Backfill now" starts fresh.
 pub fn run_backfill(
     api: &dyn LangfuseApi,
     conn: &Connection,
@@ -407,17 +424,26 @@ pub fn run_backfill(
     range_floor: &str,
     now: &str,
 ) -> Vec<ImportSummary> {
-    let chunks = match (parse_ts(range_floor), parse_ts(now)) {
-        (Some(floor), Some(now_dt)) => backfill_chunks(floor, now_dt),
+    // Resume below a previously-persisted continuation boundary if a prior page-limited backfill left
+    // one; otherwise scan from `now`. A boundary at/after `now` (or unparseable) is ignored.
+    let ceiling = match store::backfill_resume_to(conn).ok().flatten() {
+        Some(resume_to) if cmp_ts(&resume_to, now) == Ordering::Less => resume_to,
+        _ => now.to_string(),
+    };
+
+    let chunks = match (parse_ts(range_floor), parse_ts(&ceiling)) {
+        (Some(floor), Some(top)) => backfill_chunks(floor, top),
         // Unparseable bounds: fall back to one window over the literal range rather than nothing.
         _ => vec![ImportWindow {
             from: range_floor.to_string(),
-            to: now.to_string(),
+            to: ceiling.clone(),
         }],
     };
     if chunks.is_empty() {
-        // Range floor is already at/after now: nothing to backfill. Run one incremental-style pass so
+        // The boundary has reached the range floor (or the floor is already at/after now): the
+        // configured range is fully covered. Clear any boundary and run one incremental-style pass so
         // the environments still surface an explicit health state rather than a blank result.
+        let _ = store::clear_backfill_resume_to(conn);
         return run_import(
             api,
             conn,
@@ -429,6 +455,11 @@ pub fn run_backfill(
         );
     }
     let mut merged: Vec<ImportSummary> = Vec::new();
+    // The newest stopping point across any environment that hit the page backstop this run. Re-scanning
+    // `[range_floor, that point]` next run covers every page-limit gap (each gap lies below it) without
+    // skipping a sparser environment's older history.
+    let mut limited_floor: Option<String> = None;
+    let mut hard_down_stop = false;
     for window in &chunks {
         let chunk = run_import(api, conn, config, window);
         let hard_down = !chunk.is_empty()
@@ -438,12 +469,27 @@ pub fn run_backfill(
                     HealthState::Unavailable | HealthState::AuthOrNetworkError
                 )
             });
+        for summary in &chunk {
+            if summary.reached_page_limit {
+                limited_floor = later_ts(limited_floor.take(), summary.page_limit_floor_ts.clone());
+            }
+        }
         merge_summaries(&mut merged, chunk);
         if hard_down {
             // Stack is down/unreachable — re-probing every remaining chunk would just repeat the
-            // failure. The committed chunks (if any) persist; re-running continues.
+            // failure. The committed chunks (if any) persist; the existing boundary is preserved so a
+            // re-run resumes rather than restarting.
+            hard_down_stop = true;
             break;
         }
+    }
+    // Advance or clear the continuation boundary. A page-limited run records the oldest point it
+    // reached so the next run continues strictly below it. A clean, fully-covered run clears it. A
+    // hard-down stop leaves any existing boundary untouched (it did not finish scanning).
+    if let Some(floor_ts) = limited_floor {
+        let _ = store::set_backfill_resume_to(conn, &floor_ts, now);
+    } else if !hard_down_stop {
+        let _ = store::clear_backfill_resume_to(conn);
     }
     merged
 }
@@ -474,6 +520,10 @@ fn merge_into(acc: &mut ImportSummary, next: ImportSummary) {
     acc.duplicates += next.duplicates;
     acc.skipped_schema += next.skipped_schema;
     acc.reached_page_limit |= next.reached_page_limit;
+    // Keep the newest stopping point across chunks as a representative boundary (the per-chunk value
+    // the backfill driver actually persists is recomputed there; this just keeps the merged summary
+    // self-consistent).
+    acc.page_limit_floor_ts = later_ts(acc.page_limit_floor_ts.take(), next.page_limit_floor_ts);
     acc.health = merge_health(acc.health, next.health);
     acc.cursor_ts = later_ts(acc.cursor_ts.take(), next.cursor_ts);
     acc.skip_reasons = merge_reason_counts(&acc.skip_reasons, &next.skip_reasons);
@@ -486,25 +536,14 @@ fn merge_into(acc: &mut ImportSummary, next: ImportSummary) {
     }
 }
 
-/// The chronologically-later of two optional RFC3339 timestamps (the cursor never regresses).
+/// The chronologically-later of two optional RFC3339 timestamps, compared by instant (`cmp_ts`) so the
+/// cursor never regresses across mixed offsets/precisions.
 fn later_ts(a: Option<String>, b: Option<String>) -> Option<String> {
     match (a, b) {
-        (Some(a), Some(b)) => Some(match (parse_ts(&a), parse_ts(&b)) {
-            (Some(da), Some(db)) => {
-                if db > da {
-                    b
-                } else {
-                    a
-                }
-            }
-            // Unparseable: fall back to lexicographic max to stay deterministic.
-            _ => {
-                if b.as_str() > a.as_str() {
-                    b
-                } else {
-                    a
-                }
-            }
+        (Some(a), Some(b)) => Some(if cmp_ts(&b, &a) == Ordering::Greater {
+            b
+        } else {
+            a
         }),
         (Some(a), None) => Some(a),
         (None, b) => b,
@@ -595,6 +634,7 @@ fn unavailable_summary(conn: &Connection, env: &str, err: &ApiError) -> ImportSu
         skip_reasons: Vec::new(),
         skip_samples: Vec::new(),
         reached_page_limit: false,
+        page_limit_floor_ts: None,
         cursor_ts,
         evidence: Vec::new(),
         warnings: vec![err.message.clone()],
@@ -623,6 +663,11 @@ fn import_environment(
     let mut classifier = SkipClassifier::default();
     let mut delayed = 0usize;
     let mut max_ts: Option<String> = None;
+    // Oldest (chronologically minimum) trace timestamp this window reached, over *every* entry the
+    // source returned (duplicates included), so a page-limited run knows exactly how far back it got —
+    // the durable backfill continuation boundary (TASK-029 C4). Tracked even for duplicates because a
+    // re-run re-walks the already-imported newest pages, and the boundary must still advance.
+    let mut min_ts: Option<String> = None;
     let mut api_error: Option<ApiErrorKind> = None;
     let mut reached_page_limit = false;
 
@@ -640,6 +685,17 @@ fn import_environment(
                         classifier.record(SkipReason::MissingTraceId, value, None);
                         continue;
                     };
+                    // Track the oldest instant the window reached, over every id-bearing entry the
+                    // source returned (before the dedup short-circuit), so the page-limit continuation
+                    // boundary is accurate even when a re-run re-walks already-imported pages.
+                    if let Some(ts) = value.get("timestamp").and_then(|v| v.as_str()) {
+                        if min_ts
+                            .as_deref()
+                            .is_none_or(|m| cmp_ts(ts, m) == Ordering::Less)
+                        {
+                            min_ts = Some(ts.to_string());
+                        }
+                    }
                     // Dedup by (environment, trace_id) across pages, re-imports, and overlap.
                     if !seen.insert(id.clone()) {
                         duplicates += 1;
@@ -676,12 +732,15 @@ fn import_environment(
                     };
 
                     if let (Some(ts), Some(cur)) = (&trace.timestamp, &prior_cursor) {
-                        if ts.as_str() < cur.as_str() {
+                        if cmp_ts(ts, cur) == Ordering::Less {
                             delayed += 1;
                         }
                     }
                     if let Some(ts) = &trace.timestamp {
-                        if max_ts.as_deref().map_or(true, |m| ts.as_str() > m) {
+                        if max_ts
+                            .as_deref()
+                            .is_none_or(|m| cmp_ts(ts, m) == Ordering::Greater)
+                        {
                             max_ts = Some(ts.clone());
                         }
                     }
@@ -720,12 +779,21 @@ fn import_environment(
     }
 
     // Advance the checkpoint to the latest trace seen, but never move it backward — a delayed
-    // (late-arriving, older) trace is reconciled without regressing the cursor.
+    // (late-arriving, older) trace is reconciled without regressing the cursor. Compared by instant
+    // (`cmp_ts`), so a late trace carrying a different offset/precision can never lexically out-sort
+    // and regress the cursor.
     let cursor_ts = match (max_ts, prior_cursor.clone()) {
-        (Some(a), Some(b)) => Some(if a.as_str() >= b.as_str() { a } else { b }),
+        (Some(a), Some(b)) => Some(if cmp_ts(&a, &b) != Ordering::Less {
+            a
+        } else {
+            b
+        }),
         (Some(a), None) => Some(a),
         (None, b) => b,
     };
+    // The continuation boundary is only meaningful when the run was actually bounded by the page
+    // backstop; otherwise the window was fully drained and there is nothing to resume.
+    let page_limit_floor_ts = if reached_page_limit { min_ts } else { None };
     let stale = is_stale(&cursor_ts, &window.to);
 
     let schema_issues = classifier.schema_issue_count();
@@ -754,6 +822,7 @@ fn import_environment(
             skip_reasons,
             skip_samples,
             reached_page_limit,
+            page_limit_floor_ts,
             cursor_ts,
             evidence,
             warnings,
@@ -910,6 +979,20 @@ fn parse_ts(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// Chronological comparison of two RFC3339 timestamps. Both are parsed to `DateTime<Utc>` so values
+/// with different UTC offsets or fractional-second precision order by real **instant**, not by byte
+/// sequence — a lexicographic compare mis-orders e.g. `…T10:00:00+02:00` (08:00Z) against `…T09:30:00Z`,
+/// or `…05Z` against `…05.250Z` (`'Z'` 0x5A sorts after `'.'` 0x2E). Falls back to a lexicographic
+/// compare only when a value is unparseable, so the ordering stays total and deterministic. This is the
+/// single instant-comparison primitive behind every cursor/`max`/`delayed`/`stale` decision (TASK-029 —
+/// the cursor non-regression guarantee must hold across mixed offsets and precisions).
+fn cmp_ts(a: &str, b: &str) -> Ordering {
+    match (parse_ts(a), parse_ts(b)) {
+        (Some(da), Some(db)) => da.cmp(&db),
+        _ => a.cmp(b),
+    }
 }
 
 fn is_stale(cursor_ts: &Option<String>, window_to: &str) -> bool {

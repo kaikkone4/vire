@@ -114,7 +114,7 @@ function envLine(env: EnvImportLine): string {
 export function renderImportReport(report: ImportReport | null, mode: ImportMode = 'incremental'): string {
   if (!report) return '';
   const limitNote = report.reached_page_limit
-    ? `<p class="import-warn">Some environments reached the pagination limit, so this run is incomplete. Re-run to continue — no data was truncated silently.</p>`
+    ? `<p class="import-warn">Some environments reached the pagination limit, so this run is incomplete. Re-run to continue — no data was truncated silently. Each re-run resumes from the oldest history already fetched, so repeated runs reach progressively further back.</p>`
     : '';
   const diag = report.total_skip_reasons.length
     ? `<p class="import-diag"><b>Diagnostics (grouped):</b> ${groupedReasons(report.total_skip_reasons)}</p>`

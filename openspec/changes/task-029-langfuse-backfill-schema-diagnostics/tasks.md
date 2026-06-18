@@ -71,6 +71,11 @@ suggestion is built here** — that is TASK-030 (see `proposal.md` *Out of scope
   the single-window engine and persisted atomically as its own run (S-3 + TASK-021 surfacing preserved).
   A window hitting the `MAX_PAGES` backstop sets `reached_page_limit` (surfaced on the report — no silent
   truncation).
+  - [x] C4a. **SW-4 fix — page-limit continuation.** A page-limited backfill now persists a durable
+    continuation boundary (`ImportSummary.page_limit_floor_ts` → `langfuse_backfill_progress` via
+    `store::{set,clear,backfill_resume_to}`); `run_backfill` resumes at `[range_floor, boundary]` so each
+    re-run reaches strictly-older history beyond the prior page limit (monotonic progress), and a clean
+    run clears the boundary. The report's "re-run to continue" note is therefore truthful. See design §4.3.
 - [x] C5. IPC `backfill_langfuse_now` (backfill mode + larger `BACKFILL_TIMEOUT_SECS=300` bound);
   honours `langfuse_enabled` short-circuit, SEC-002 loopback (same `build_url`/`get_traces` path),
   `import_lock` serialization, off-UI dedicated thread — identical posture to `import_langfuse_now`.
@@ -84,6 +89,12 @@ suggestion is built here** — that is TASK-030 (see `proposal.md` *Out of scope
   re-run, cursor non-regressing, no duplicate rows); `backfill_reports_bounded_run_rather_than_
   truncating_silently`; `import_range_parses_validates_and_floors` (incl. malformed `since:`);
   `import_range_setting_persists_validates_and_defaults`.
+  - [x] C7a. **SW-4 fix tests.** `page_limited_backfill_resumes_below_boundary_on_rerun` (proves a re-run
+    reaches older/beyond-page-limit history, not just dedupe; boundary persisted then cleared);
+    `cursor_advances_by_instant_not_lexically_across_offsets_and_precision` and
+    `delayed_classification_and_cursor_compare_instants_across_offsets` (mixed timezone offset / fractional
+    precision — cursor/`max`/`delayed` parse to `DateTime<Utc>`, never lexical compare). 136 Rust lib tests
+    green.
 
 ## Workstream D — Grouped, actionable import summary  *(frontend developer)*
 
