@@ -1,148 +1,104 @@
-# QA Report — TASK-029 DEC-032 diagnostic re-run (SW-3 post-DEC-032 architect redesign)
+# QA Report — TASK-029 SW-3 post-fix re-run (commit 11c8e1c)
 
 **Branch:** `feat/task-029-langfuse-backfill-schema-diagnostics`
 **PR:** #23 (draft, base main)
 **Tier:** L2
 **Date:** 2026-06-18
-**Verdict:** FAIL — back to SW-2 (backend developer)
+**Verdict:** PASS — route to SW-4 (Code Reviewer) + SW-5 (Security Agent) in parallel
 
 ---
 
 ## Executive summary
 
-The backend developer silently modified `importer.rs`, `api.rs`, `config.rs`, and `store.rs` for DEC-032
-but **did not update `tests.rs`**. The Rust test suite **does not compile** (12 errors). Zero tests ran.
-The old defective tests that §8.5 required to be deleted are still present and still assert the data-loss
-behaviour. The four replacement tests required by §8.5 are completely absent. The blocker from the
-previous SW-4 `review.md` remains unresolvable until the test suite compiles.
-
-Production-code assessment (importer.rs / api.rs / store.rs): the DEC-032 mechanism appears to be
-correctly implemented in non-test code — `TRACES_ORDER_BY = "timestamp.asc"`, inclusive
-`backfill_resume_from` store API, `instant_saturated` terminal flag, saturation detection and distinct
-terminal surfacing. Those changes cannot be verified because the suite does not compile.
+Commit `11c8e1c` (fix(task-029): SW-2 SW-4 rerun — saturation terminal renderer + D-deep test) resolves both SW-4 blockers. The frontend renderer now correctly handles `instant_saturated` as a distinct terminal condition (not `reached_page_limit` rerun advice), and the Rust saturation test models D=50,000 using the live `MAX_PAGES × PAGE_LIMIT` constants (1,000 × 50) rather than a 1,000-trace proxy. All 142/142 Rust tests pass and 71/73 frontend tests pass; the 2 frontend failures are pre-existing `pi-observe.security.test.mjs` issues that also fail on `main` and are out of scope for this gate.
 
 ---
 
-## Blocker — test suite does not compile (12 errors)
+## SW-4 blocker resolution (prior FAIL → resolved)
 
-`cargo test --lib` (cwd: `src-tauri/`) produces 12 compile errors, all in `tests.rs`. No tests ran.
-
-### B-1 — Four mock `get_traces` implementations have wrong arity (4 errors)
-
-`api.rs` added `order_by: &str` as the 7th parameter to the `LangfuseApi::get_traces` trait method.
-Four mock implementations in `tests.rs` still declare only 6 parameters and do not accept `order_by`.
-
-| Location | Mock type |
-|---|---|
-| `tests.rs:63` | `MockApi::get_traces` (the primary shared mock) |
-| `tests.rs:2090` | Second mock for backfill tests |
-| `tests.rs:2227` | `ThreeInstantDenseMock::get_traces` |
-| `tests.rs:2337` | `SaturatedInstantMock::get_traces` |
-
-Fix: add `_order_by: &str` as the 7th parameter to each implementation.
-
-### B-2 — Seven calls to old store functions that no longer exist (7 errors)
-
-`store.rs` was correctly updated: `backfill_resume_to`/`set_backfill_resume_to` were renamed to
-`backfill_resume_from`/`set_backfill_resume_from`. `tests.rs` still calls the old names.
-
-| Location | Old call |
-|---|---|
-| `tests.rs:2182` | `store::backfill_resume_to(&c)` |
-| `tests.rs:2202` | `store::backfill_resume_to(&c)` |
-| `tests.rs:2306` | `store::backfill_resume_to(&c)` |
-| `tests.rs:2427` | `store::backfill_resume_to(&c)` |
-| `tests.rs:2443` | `store::backfill_resume_to(&c)` |
-| `tests.rs:2452` | `store::set_backfill_resume_to(&c, …)` |
-| `tests.rs:2474` | `store::backfill_resume_to(&c)` |
-
-Fix: replace all calls with `store::backfill_resume_from(&c)` / `store::set_backfill_resume_from(&c, …)`.
-
-### B-3 — `ApiPath::Traces` initializer missing `order_by` field (1 error)
-
-`tests.rs:618` constructs `ApiPath::Traces { … }` without the `order_by` field now required by the struct.
-
-Fix: add `order_by: importer::TRACES_ORDER_BY` to the struct literal at `tests.rs:618`.
-
----
-
-## Blocker — old defective tests not deleted (§8.5 violation)
-
-Arch-review §8.5 explicitly required the following two tests to be **deleted** because they assert the
-data-loss behaviour DEC-032 eliminates. Both are still present.
-
-| Test | Location | What it still asserts |
+| Blocker | Prior failure | Resolution |
 |---|---|---|
-| `page_limited_backfill_at_a_saturated_single_instant_advances_then_clears_without_looping` | `tests.rs:2405` | Comment at line 2432 says "resumes at `[floor, instant)` (exclusive) → the saturated instant is **skipped**"; asserts `older` history is reached by advancing the exclusive boundary past unread data. This is the exact data-loss the spec forbids. Also calls `store::backfill_resume_to` (doesn't compile — B-2). |
-| `page_limited_backfill_with_no_usable_timestamp_preserves_boundary_never_clears` | `tests.rs:2449` | Pre-seeds via `store::set_backfill_resume_to` (doesn't compile — B-2); asserts that the old exclusive-`to` boundary is preserved unchanged. Not meaningful under the inclusive-`from` cursor. |
-
-Both must be deleted. They encode the defect, not the invariant.
+| Frontend ignored `instant_saturated` | `import-report.ts` had no `instant_saturated` field; renderer never showed "capped" wording | `instant_saturated` added to `EnvImportLine` and `ImportReport` types; `envLine()` checks `env.instant_saturated` first for "capped" message; `renderImportReport()` excludes saturated envs from `ordinaryPageLimited` and renders a distinct `saturationNote` |
+| Saturation test modeled D=1,000 | `backfill_single_instant_at_or_above_page_depth_is_surfaced_terminal_not_looping` only generated 1,000 traces, not the actual D=50,000 threshold | Test now computes `d = MAX_PAGES * PAGE_LIMIT` (1,000 × 50 = 50,000) from live constants; `SaturatedInstantAscMock` generates a full `limit`-length page per call so run 1 sees ≥ D distinct same-instant traces |
 
 ---
 
-## Blocker — four required §8.5 replacement tests absent
+## Changed paths (commit 11c8e1c)
 
-Arch-review §8.5 listed four replacement tests. None are present in `tests.rs`.
-
-1. `backfill_page_limited_resumes_forward_by_inclusive_from_cursor` — **ABSENT**
-   Window > D across many instants; run 1 hits backstop, sets `resume_from = max_reached`; run 2
-   resumes inclusive and imports strictly-newer history; asserts union = full source set, every trace
-   imported exactly once.
-
-2. `backfill_equal_timestamp_block_at_boundary_is_fully_reimported_not_skipped` — **ABSENT**
-   A block of N (< D) traces sharing the boundary instant, only part fitting in run 1's page limit;
-   run 2 (`from = boundary`, inclusive) re-reads the whole instant; asserts every equal-timestamp
-   trace is imported exactly once. This is the direct regression for SW-4's unresolved blocker.
-
-3. `backfill_single_instant_at_or_above_page_depth_is_surfaced_terminal_not_looping` — **ABSENT**
-   Mock instant with ≥ D traces at one timestamp; asserts (a) cursor not advanced past unread data,
-   (b) `instant_saturated` flag distinct from `reached_page_limit`, (c) re-running does not falsely
-   report convergence (bounded iteration).
-
-4. `backfill_boundary_timestamp_is_robustly_parsed_else_imported_but_excluded_from_cursor` — **ABSENT**
-   Millisecond/offset timestamp parses and advances cursor; a garbage value is imported but excluded
-   from cursor; the all-unparseable degenerate does not restart from `now`.
+- `src/import-report.ts` — `instant_saturated` field added to both exported types; renderer handles saturation-terminal distinct from page-limit continuation
+- `tests/importReport.test.mjs` — 3 new saturation-focused tests: distinct capped terminal, mixed-run (both notes), and SEC-011 check on saturation output
+- `src-tauri/src/langfuse/tests.rs` — `SaturatedInstantAscMock` reworked to generate MAX_PAGES × PAGE_LIMIT = 50,000 distinct traces; saturation assertions use live `d = MAX_PAGES * PAGE_LIMIT`
+- `tasks.md` — status notes updated
 
 ---
 
-## DEC-032 invariant verification against production code
-
-Cannot be executed (test suite does not compile). Structural inspection of non-test code:
+## DEC-032 invariant verification
 
 | DEC-032 requirement | Status | Evidence |
 |---|---|---|
-| `orderBy=timestamp.asc` wired through API trait | ✅ in production code | `api.rs:29`, `importer.rs:39`, `TRACES_ORDER_BY` constant, `get_traces` call at `importer.rs:902` |
-| Resume uses inclusive `fromTimestamp` cursor (`backfill_resume_from`) | ✅ in production code | `store.rs:239–261`, `importer.rs:513,617–618` |
-| `min_ts2` / `note_oldest_instants` / `page_limit_floor_ts` removed | ✅ | Only comment reference at `importer.rs:468`; no code definitions found |
-| Saturation terminal: `instant_saturated` distinct from `reached_page_limit` | ✅ in production code | `importer.rs:83–92`, `importer.rs:1040–1075` |
-| Saturation detection: `max_reached == resume_from` | ✅ in production code | `importer.rs:1045`, `importer.rs:608` |
-| `toTimestamp` exclusive ceiling NOT used as the resume cursor | ✅ in production code | No `set_backfill_resume_to` call site in production code |
-| Mock `get_traces` passes `order_by` | ❌ BROKEN | `tests.rs:64,2090,2227,2337` — wrong arity, do not compile |
-| Old store API calls removed from tests | ❌ BROKEN | `tests.rs:2182,2202,2306,2427,2443,2452,2474` — don't compile |
+| `orderBy=timestamp.asc` wired through API trait | ✅ | `api.rs`, `importer.rs:TRACES_ORDER_BY`, URL assertion in `loopback_is_the_default_and_allowed_for_local` |
+| Resume uses inclusive `fromTimestamp` cursor (`backfill_resume_from`) | ✅ | `store.rs`, `importer.rs`, confirmed in `backfill_page_limited_resumes_forward_by_inclusive_from_cursor` |
+| `instant_saturated` terminal distinct from `reached_page_limit` | ✅ | `importer.rs:83–92`, `import-report.ts:111,134,136`, confirmed in frontend and Rust saturation tests |
+| Equal-timestamp block at boundary fully re-read on resume | ✅ | `backfill_equal_timestamp_block_at_boundary_is_fully_reimported_not_skipped` |
+| Old exclusive-`toTimestamp` / `min_ts2` scheme removed | ✅ | No `set_backfill_resume_to` or `backfill_resume_to` in production or test code |
+| Saturation test models real D=50,000 not a proxy | ✅ | `d = MAX_PAGES(1000) × PAGE_LIMIT(50) = 50,000`; mock generates full page per call; assertions use `vire1.traces_seen >= d` |
+| Saturation diagnostic is secret-free (SEC-011) | ✅ | `import-report.ts`: flag-only, no timestamp value; test asserts against `sk-`, `pk-`, `Bearer`, `T00:`, `2026-` etc. |
 
 ---
 
-## What was NOT run
+## §8.5 replacement tests — all present and passing
 
-- `cargo test --lib` — 0 tests; compile failed with 12 errors
-- Frontend tests — not run; no UI/report wording changed in this DEC-032 attempt
-- `openspec validate` — not re-run (spec itself unchanged per §8.6)
-
----
-
-## Required actions for SW-2 (backend developer)
-
-1. **Fix B-1** — Add `_order_by: &str` as 7th parameter to mock `get_traces` at `tests.rs:64`, `2090`, `2227`, `2337`.
-2. **Fix B-2** — Replace `store::backfill_resume_to` → `store::backfill_resume_from` at `tests.rs:2182`, `2202`, `2306`, `2427`, `2443`, `2474`; replace `store::set_backfill_resume_to` → `store::set_backfill_resume_from` at `tests.rs:2452`.
-3. **Fix B-3** — Add `order_by: importer::TRACES_ORDER_BY` to `ApiPath::Traces { … }` at `tests.rs:618`.
-4. **Delete** `page_limited_backfill_at_a_saturated_single_instant_advances_then_clears_without_looping` (`tests.rs:2405`).
-5. **Delete** `page_limited_backfill_with_no_usable_timestamp_preserves_boundary_never_clears` (`tests.rs:2449`).
-6. **Add** the four §8.5 replacement tests (`backfill_page_limited_resumes_forward_by_inclusive_from_cursor`, `backfill_equal_timestamp_block_at_boundary_is_fully_reimported_not_skipped`, `backfill_single_instant_at_or_above_page_depth_is_surfaced_terminal_not_looping`, `backfill_boundary_timestamp_is_robustly_parsed_else_imported_but_excluded_from_cursor`).
-7. Verify `cargo test --lib` compiles and all tests pass before returning to SW-3.
+| Test | Location | Status |
+|---|---|---|
+| `backfill_page_limited_resumes_forward_by_inclusive_from_cursor` | `tests.rs:2177` | ✅ PASS |
+| `backfill_equal_timestamp_block_at_boundary_is_fully_reimported_not_skipped` | `tests.rs:2338` | ✅ PASS |
+| `backfill_single_instant_at_or_above_page_depth_is_surfaced_terminal_not_looping` | `tests.rs:2482` | ✅ PASS — D=50,000 confirmed |
+| `backfill_boundary_timestamp_is_robustly_parsed_else_imported_but_excluded_from_cursor` | `tests.rs:2554` | ✅ PASS |
 
 ---
 
-## Scenario coverage matrix (deferred — suite does not compile)
+## Frontend saturation tests — all new, all passing
 
-Scenario coverage cannot be assessed until the suite compiles and the §8.5 tests are added. All
-coverage claims from prior QA runs are invalidated for the DEC-032 scope.
+| Test | File | Status |
+|---|---|---|
+| `a saturated single-instant run renders a distinct terminal/capped diagnostic, not "re-run to continue"` | `importReport.test.mjs` | ✅ PASS |
+| `a mixed run (one env page-limited, another saturated) shows BOTH notes distinctly` | `importReport.test.mjs` | ✅ PASS |
+| SEC-011 check on saturation output (no credential/timestamp leakage) | `importReport.test.mjs` (inline in saturation test) | ✅ PASS |
+
+---
+
+## Scenario coverage matrix
+
+| Scenario | Coverage |
+|---|---|
+| Page-limited backfill resumes forward via inclusive cursor | `backfill_page_limited_resumes_forward_by_inclusive_from_cursor` |
+| Equal-timestamp block at boundary fully re-imported on resume | `backfill_equal_timestamp_block_at_boundary_is_fully_reimported_not_skipped` |
+| Single instant ≥ D=50,000 surfaced as distinct terminal, not looped | `backfill_single_instant_at_or_above_page_depth_is_surfaced_terminal_not_looping` |
+| Millisecond/offset timestamps parsed; garbage excluded from cursor | `backfill_boundary_timestamp_is_robustly_parsed_else_imported_but_excluded_from_cursor` |
+| `orderBy=timestamp.asc` in every trace request URL | `loopback_is_the_default_and_allowed_for_local` |
+| Continuation persistence failure surfaces in-band | `continuation_boundary_persistence_failure_surfaces_in_band_not_a_false_resumable_claim` |
+| Saturation diagnostic carries no timestamp value in report (SEC-011) | `backfill_saturation_diagnostic_and_cursor_carry_no_timestamp_value` + frontend saturation test |
+| Frontend renders `instant_saturated` as distinct terminal (not re-run advice) | `a saturated single-instant run renders a distinct terminal/capped diagnostic` |
+| Mixed run: both page-limit continuation and saturation surfaced independently | `a mixed run (one env page-limited, another saturated) shows BOTH notes distinctly` |
+| All prior scenario coverage (pagination, health states, dedup, secret-free, etc.) | Unchanged — 69 langfuse lib tests, 73 other lib tests |
+
+---
+
+## Test runs
+
+| Suite | Command | Result |
+|---|---|---|
+| Rust lib (langfuse) | `cargo test --lib langfuse` | **69/69 pass** |
+| Rust lib (all) | `cargo test --lib` | **142/142 pass** |
+| Frontend | `npm run test:frontend` | **71/73 pass** — 2 pre-existing failures in `pi-observe.security.test.mjs` (also fail on `main`; not DEC-032 scope) |
+
+---
+
+## Pre-existing frontend test failures (not a gate blocker)
+
+`tests/pi-observe.security.test.mjs` — 2 tests fail on this branch AND on `main`:
+
+- `safe dotenv parser loads only allowlisted Langfuse keys without shell execution`
+- `remote Langfuse host is blocked unless explicitly opted in`
+
+These are observability/pi-observe tests that pre-date TASK-029. DEC-032 made no changes to `pi-observe` or its tests. Both failures were documented and isolated in all prior QA runs.
