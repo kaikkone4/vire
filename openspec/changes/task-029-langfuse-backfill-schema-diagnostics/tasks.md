@@ -87,16 +87,29 @@ suggestion is built here** — that is TASK-030 (see `proposal.md` *Out of scope
 
 ## Workstream D — Grouped, actionable import summary  *(frontend developer)*
 
-- [ ] D1. Extend the report types in `src/main.ts:16` (`ImportReport`/`EnvImportLine`) with
-  `skip_reasons`/`skip_samples` and the bounded/backfill indicators.
-- [ ] D2. Rewrite `importReportLine()` (`src/main.ts:55`): per-env **seen / new / duplicate / skipped**
-  + grouped reason breakdown (e.g. *"611 skipped: 611 observations-not-embedded"*) + bounded-sample
-  hint; incremental-vs-backfill headline; never the repeated string. `aria-live` preserved.
-- [ ] D3. Settings: import-range control + "Backfill now" button wired to `set_langfuse_import_range` /
-  `backfill_langfuse_now`; range-control helpers in `src/langfuse-settings.ts` (pure, unit-tested);
-  list styling in `src/style.css`.
-- [ ] D4. Tests: `langfuse-settings.ts` range helpers; report renderer groups reasons and shows
-  per-env seen/new/dup/skipped; **SEC-011** — rendered DOM/string contains no secret/prompt/value.
+- [x] D1. Extended the report types (`ImportReport`/`EnvImportLine` + `SkipReasonCount`/`SkipSample`)
+  with `skip_reasons`/`skip_samples`/`total_skip_reasons` and the `reached_page_limit` indicator.
+  Moved out of `src/main.ts` into a pure, Tauri-free `src/import-report.ts` so the renderer is
+  unit-testable; `main.ts` imports the types/renderer from there.
+- [x] D2. Replaced `importReportLine()` with `renderImportReport()` (`src/import-report.ts`): per-env
+  **seen / new / duplicate / skipped** + a grouped reason breakdown (one line per reason, e.g.
+  *"611 observations not embedded"*) + a bounded structural-sample `<details>` (key/type names only) +
+  an incremental-vs-backfill headline + a `reached_page_limit` "re-run to continue, nothing truncated"
+  note; never the repeated per-trace string. `aria-live="polite"` preserved. All env/reason/sample
+  text escaped (SEC-011).
+- [x] D3. Settings: import-range control (`last_7d|last_30d|last_90d|all|custom since date`, default
+  display `last_30d`) wired to `get_langfuse_import_range`/`set_langfuse_import_range`, plus a
+  **"Backfill now"** button wired to `backfill_langfuse_now` alongside the kept "Import from Langfuse
+  now"; both buttons show progress text and disable while in flight and honour the disabled-source
+  short-circuit. Pure range-control helpers (`canonicalImportRange`/`parseImportRangeControl`/
+  `importRangeLabel`/`IMPORT_RANGE_PRESETS`) in `src/langfuse-settings.ts`; report + range styling in
+  `src/style.css`. No CSP/capability change, no renderer network calls.
+- [x] D4. Tests: `tests/langfuseSettings.test.mjs` range-helper canonicalization + round-trip + label;
+  `tests/importReport.test.mjs` — report groups reasons (no repeated-warning spam), shows per-env
+  seen/new/dup/skipped, distinguishes backfill, surfaces the page-limit note, escapes injected text,
+  and **SEC-011** asserts the rendered string carries no secret/prompt/value/`oat01`/`Bearer` material
+  and samples show only key/type names. `tsc --noEmit` + `vite build` green; 21 focused frontend tests
+  pass (11 new report + 10 settings incl. 7 new range).
 
 ## Cross-cutting
 
