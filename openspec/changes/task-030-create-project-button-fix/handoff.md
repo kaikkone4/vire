@@ -18,7 +18,7 @@ no button label reference, no change needed.
 documented in `RELEASE.md §Tag signing`. Manual action required before finalizing release:
 
 ```
-git tag -s task-030/v0.3.1 -m "release(task-030): v0.3.1 patch — in-app input for env create-and-map" db29bae
+git tag -s task-030/v0.3.1 -m "release(task-030): v0.3.1 patch — in-app input for env create-and-map" f3b8eed
 git push origin task-030/v0.3.1
 ```
 
