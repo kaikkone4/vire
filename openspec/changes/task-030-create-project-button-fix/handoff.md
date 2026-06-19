@@ -2,15 +2,15 @@
 
 - **Change dir:** `openspec/changes/task-030-create-project-button-fix/`
 - **Branch / PR:** `feat/task-030-create-project-button-fix` / PR #25
-- **Phase / gate:** SW-6 Release COMPLETE
+- **Phase / gate:** SW-6 Docs COMPLETE (all gates done)
 - **Tier:** L2 project (this task L1-equivalent: no new backend/egress/deps)
 
 ## Last gate result
 
-SW-6 Release COMPLETE. RELEASE.md written with all three required declarations (deployment size:
-patch, rollback strategy: partial-automated, compatibility matrix: inherits v0.3.0 unchanged).
-Root `RELEASE.md` updated with v0.3.1 entry. PR #25 base updated from
-`feat/task-029-langfuse-backfill-schema-diagnostics` to `main`; promoted draft → ready-for-review.
+SW-6 Docs COMPLETE. README.md updated: button label reference corrected from "Create project for
+`<env>`" (old `window.prompt()` single-button label) to describe the new inline input + **Create &
+map** button. One line changed (`README.md:54`). `docs/langfuse-local-setup.md` verified clean —
+no button label reference, no change needed.
 
 ## Tag status — BLOCKED (SSH private key absent)
 
@@ -46,6 +46,7 @@ produce a cleaner diff but is not strictly required.
 - Cargo: 142 unit + 3 integration tests passed.
 - Full frontend: 72/74 passed; two unrelated socket-based tests hit sandbox `EPERM`.
 - No `prompt()` calls in `src/`; `git diff --check` passed.
+- Docs gate: README.md button label corrected; `docs/langfuse-local-setup.md` verified clean.
 
 ## Required files
 
@@ -54,3 +55,4 @@ produce a cleaner diff but is not strictly required.
 - `sec.md` — SW-5 Security
 - `qa.md` — SW-3 QA
 - Root `RELEASE.md` — v0.3.1 entry added
+- `README.md` — docs gate: button label updated (line 54)
