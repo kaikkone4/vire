@@ -34,10 +34,10 @@ git push origin task-030/v0.3.1
 
 ## Merge ordering
 
-PR #24 already merged to `main` (2026-06-19). PR #25 base updated to `main`; no ordering
-dependency remains. Janne merges PR #25 at will. Branch carries some TASK-029 gate-artifact
-commits as diff noise (see `RELEASE.md §Merge ordering`); a rebase onto origin/main would
-produce a cleaner diff but is not strictly required.
+PR #24 already merged to `main` (2026-06-19). PR #25 base is `main`; no ordering dependency
+remains. **Branch is clean** (PR hygiene recovery 2026-06-19): force-rebased onto `origin/main`,
+TASK-029 commits removed, 5 TASK-030-only commits remain (fix + qa + release + docs ×2).
+PR #25 is open and ready-for-review — Janne merges at will.
 
 ## Checks
 
