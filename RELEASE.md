@@ -1,5 +1,104 @@
 # Vire — Release Notes
 
+## v0.3.0 — Langfuse schema diagnostics, backfill, and tolerant v3 import (TASK-029)
+
+**Branch:** `feat/task-029-langfuse-backfill-schema-diagnostics`
+**PR:** #23 (draft)
+
+### What changed
+
+**Tolerant v3 trace identification (Workstream B)**
+
+- The import loop no longer drops a whole trace because `observations` arrives as an ID-string array (the
+  Langfuse v3 list-endpoint shape). Identification reads `id`, `timestamp`, `environment`, and `sessionId`
+  from the raw JSON, tolerating unknown shapes in peripheral fields. A trace with a usable `id` is always
+  imported; if usage/cost remain unreadable after the observations fetch it is imported as `schema_changed`
+  (counted, surfaced for review) — never silently dropped.
+- This resolves the previously observed 611/640 skip rate against a live v3 Langfuse stack.
+
+**Schema diagnostics (Workstream A)**
+
+- Import results now surface **grouped skip-reason counts** and bounded **structural shape samples** (key
+  names and JSON type names only — no field values, no credentials, no raw `serde` error strings). The old
+  repeated free-string warning is removed in favour of this classified breakdown.
+- Diagnostic data is secret-free by construction (SEC-011): samples carry only the list of top-level JSON
+  key names, the offending field name, and the JSON type name — nothing from field values, payloads, or
+  session/prompt/credential material.
+
+**Configurable import range + incremental cursor (Workstream C)**
+
+- A new Settings row `langfuse_import_range` accepts `last_7d`, `last_30d` (default; was `last_7d`),
+  `last_90d`, `all`, or `since:<RFC3339>`. The range floor is resolved at import time; each environment
+  tracks its own persistent cursor so normal imports are incremental (resume from cursor, no redundant
+  re-scan).
+- New IPC commands: `get_langfuse_import_range` / `set_langfuse_import_range`.
+
+**Backfill (Workstream C)**
+
+- **Backfill now** re-scans floor→now regardless of the cursor. Large backfills are broken into ordered
+  monthly chunks, each committed atomically (S-3 invariant preserved). An interruption loses at most the
+  in-flight chunk; re-running resumes via the inclusive DEC-032 cursor and skips already-imported traces
+  via durable `(environment, trace_id)` dedupe.
+- New IPC command: `backfill_langfuse_now` (larger timeout bound than a manual import).
+
+**DEC-032 inclusive-from cursor and page-limit continuation**
+
+- All trace-list requests use `orderBy=timestamp.asc` (oldest→newest; explicit to avoid relying on an
+  undocumented default). When a run hits `MAX_PAGES`, the inclusive resume cursor (`fromTimestamp`) is set
+  to the chronological maximum timestamp returned; the next run re-reads the full boundary instant from
+  page 1 and durable dedupe suppresses the overlap.
+- **Single-instant saturation** (≥ 50 000 traces at one millisecond): detected, cursor is parked (never
+  pushed past unread data), and a distinct **terminal/capped diagnostic** is surfaced — never an infinite
+  re-run loop. The operative invariant is unconditional: every trace is eventually imported exactly once.
+
+### Known limitations
+
+- **N+1 observations fetch** — a backfill over thousands of traces issues one `GET /api/public/observations`
+  per trace. A future windowed-scan optimization is documented (design.md §4.4) but not built here; the
+  per-trace path is correct (just slower) and chunked backfill limits the concurrency.
+- **`seen_trace_ids` memory** — all trace IDs for an environment are loaded into a `HashSet` per run; flag
+  for a bounded-cursor approach if histories grow large (single-user prototype, acceptable now).
+- **Pre-existing pi-observe test failures (2)** in `tests/pi-observe.security.test.mjs` — unrelated to this
+  task, file unchanged from `main` since before any TASK-029 commit.
+
+### Compatibility and rollback
+
+- **Data model (additive):** one new `settings` row (`langfuse_import_range`, default `last_30d`) and one
+  new table `langfuse_backfill_progress` (a single-row inclusive resume cursor, DEC-032). No existing
+  table or column is altered. Both use the idempotent `CREATE TABLE IF NOT EXISTS` posture.
+- **Default window change:** import range floor moves from 7 days to 30 days. Re-importing a trace already
+  in the store is a durable-dedupe no-op — no duplicate rows, no data loss.
+- **Rollback:** revert the importer/settings/UI changes. The new `settings` row is inert to older builds
+  (unknown key ignored). `langfuse_backfill_progress` is inert to older builds (unknown table never read)
+  and re-created idempotently on re-upgrade. No destructive migration.
+- **Security:** SEC-011 holds (diagnostic/sample surfaces are key/type names and counts only — no field
+  values or credentials). SEC-002 loopback boundary, GET-only contract, disabled short-circuit, and
+  absence-≠-zero invariant are all preserved. No new crate, egress host, permission, or capability added.
+
+### Tests
+
+**Rust** (`cargo test --manifest-path src-tauri/Cargo.toml`): **142 passed / 0 failed**
+(includes new TASK-029 tests covering tolerant v3 identification, skip-reason classifier, SEC-011 secret-free
+diagnostics, inclusive DEC-032 cursor, page-limit continuation, saturation terminal diagnostic and fixture,
+backfill chunked resumability, equal-timestamp boundary dedup, multi-environment page-limit, and
+continuation-store fault surfacing)
+
+**Frontend** (`npm run test:frontend`): **71 passed / 2 pre-existing failures (unrelated)**
+(new TASK-029 tests in `tests/importReport.test.mjs` covering range/backfill settings UI, grouped
+diagnostics rendering, saturation terminal/capped note, mixed-env distinct rendering, and SEC-011
+no-secret assertion; the 2 failures are in `tests/pi-observe.security.test.mjs`, unchanged from `main`)
+
+### Manual smoke steps before shipping
+
+1. With a live v3 Langfuse stack: confirm a manual import imports all traces (not 611/640 skipped).
+2. Set Import range to `last_90d` and run **Backfill now**; confirm progress is durable (interrupt and
+   re-run — no duplicate rows, run continues where it left off).
+3. Confirm the import report shows grouped skip reasons (if any) instead of repeated warning strings.
+4. Check Rollback smoke: open a prior Vire build on the same Mac — confirm no crash and the new settings
+   row / `langfuse_backfill_progress` table are silently ignored.
+
+---
+
 ## v0.1.0 — Desktop production readiness (TASK-026)
 
 **Branch:** `feat/task-026-desktop-production-readiness`

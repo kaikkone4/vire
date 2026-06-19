@@ -71,7 +71,7 @@ suggestion is built here** — that is TASK-030 (see `proposal.md` *Out of scope
   engine and persisted atomically as its own run (S-3 + TASK-021 surfacing preserved). A window hitting the
   `MAX_PAGES` backstop sets `reached_page_limit` (surfaced on the report — no silent truncation).
   *(Chunk order flipped to **oldest→newest** under DEC-032 C4a.)*
-  - [ ] C4a. **DEC-032 REDESIGN (supersedes the SW-4 second-oldest-instant fix — `arch-review.md` §8).**
+  - [x] C4a. **DEC-032 REDESIGN (supersedes the SW-4 second-oldest-instant fix — `arch-review.md` §8).**
     Replace the exclusive-`toTimestamp` / `min_ts2` continuation with an **ascending `orderBy=timestamp.asc`
     sweep + inclusive `fromTimestamp` resume-cursor**: persist `resume_from = max_reached` (the chronological
     max parseable `timestamp` of a page-limited run) to `langfuse_backfill_progress`; `run_backfill` resumes
@@ -96,15 +96,17 @@ suggestion is built here** — that is TASK-030 (see `proposal.md` *Out of scope
   re-run, cursor non-regressing, no duplicate rows); `backfill_reports_bounded_run_rather_than_
   truncating_silently`; `import_range_parses_validates_and_floors` (incl. malformed `since:`);
   `import_range_setting_persists_validates_and_defaults`.
-  - [ ] C7a. **DEC-032 REDESIGN tests (`arch-review.md` §8.5).** **Delete** the tests that encode the defect
+  - [x] C7a. **DEC-032 REDESIGN tests (`arch-review.md` §8.5).** **Delete** the tests that encode the defect
     (`page_limited_backfill_at_a_saturated_single_instant_advances_then_clears_without_looping`,
     `page_limited_backfill_with_no_usable_timestamp_preserves_boundary_never_clears`,
     `page_limited_backfill_resumes_below_boundary_on_rerun`, and the second-oldest-instant test). **Add:**
     (1) `backfill_page_limited_resumes_forward_by_inclusive_from_cursor` (union over runs == full set, each
     trace exactly once — no skip, no dup); (2) `backfill_equal_timestamp_block_at_boundary_is_fully_
     reimported_not_skipped` (the direct equal-timestamp regression); (3) `backfill_single_instant_at_or_
-    above_page_depth_is_surfaced_terminal_not_looping` (cursor not advanced past unread, distinct saturation
-    diagnostic, bounded-iteration proof of no loop); (4) `backfill_boundary_timestamp_is_robustly_parsed_
+    above_page_depth_is_surfaced_terminal_not_looping` (mock returns a **full `limit`-sized page** so the run
+    models ≥ `D = MAX_PAGES×PAGE_LIMIT = 50 000` distinct same-instant traces — the real §8.4 premise, not a
+    one-per-page proxy; cursor not advanced past unread, distinct saturation diagnostic, bounded-iteration
+    proof of no loop); (4) `backfill_boundary_timestamp_is_robustly_parsed_
     else_imported_but_excluded_from_cursor`. **Retain** `cursor_advances_by_instant_not_lexically_across_
     offsets_and_precision`, `delayed_classification_and_cursor_compare_instants_across_offsets`, and the
     `cmp_ts` `Option<Ordering>` no-lexical-fallback guarantee. Update VF-3 test to the inclusive cursor.
@@ -120,7 +122,10 @@ suggestion is built here** — that is TASK-030 (see `proposal.md` *Out of scope
   *"611 observations not embedded"*) + a bounded structural-sample `<details>` (key/type names only) +
   an incremental-vs-backfill headline + a `reached_page_limit` "re-run to continue, nothing truncated"
   note; never the repeated per-trace string. `aria-live="polite"` preserved. All env/reason/sample
-  text escaped (SEC-011).
+  text escaped (SEC-011). **(DEC-032)** The renderer also surfaces the `instant_saturated` single-instant
+  **saturation terminal** as a *distinct* capped/terminal note — it suppresses the rerunnable
+  "re-run to continue" continuation claim for the saturated environment (and per-env line), so a terminal
+  cap is never presented as ordinary progress. Flag-driven and secret-free (no timestamp value, SEC-011).
 - [x] D3. Settings: import-range control (`last_7d|last_30d|last_90d|all|custom since date`, default
   display `last_30d`) wired to `get_langfuse_import_range`/`set_langfuse_import_range`, plus a
   **"Backfill now"** button wired to `backfill_langfuse_now` alongside the kept "Import from Langfuse

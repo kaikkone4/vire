@@ -178,4 +178,14 @@ The in-app Settings panel is the correct path for all normal usage. Env vars rem
 | API public key | — | `VIRE_LANGFUSE_PUBLIC_KEY` (fallback: `LANGFUSE_PUBLIC_KEY`) | Never committed, logged, or exported; overridden by Keychain when set in-app |
 | API secret key | — | `VIRE_LANGFUSE_SECRET_KEY` (fallback: `LANGFUSE_SECRET_KEY`) | Never committed, logged, or exported; overridden by Keychain when set in-app |
 
+**Additional in-app settings (TASK-029):**
+
+| Setting | In-app location | Default | Notes |
+|---|---|---|---|
+| Import range | Settings → *Import range* | `last_30d` | `last_7d`, `last_30d`, `last_90d`, `all`, or `since:<RFC3339>`. Sets the range floor for normal and backfill imports; each environment tracks its own cursor. Malformed `since:` values are rejected without echoing the input. |
+
+The **Backfill now** button (Settings → AI evidence import, visible when integration is enabled) re-scans floor→now regardless of the existing cursor. Backfills run as ordered monthly chunks, each committed atomically; an interruption loses at most the in-flight chunk and re-running resumes via the durable DEC-032 cursor.
+
+**Schema diagnostics** — when traces are skipped, the import report groups skip reasons by count (e.g. `N skipped: N observations-not-embedded`) and includes bounded structural samples showing only JSON key names and JSON type names. No field values, credentials, or raw error strings are ever included (SEC-011).
+
 Langfuse Cloud (`https://cloud.langfuse.com`) is supported as an explicit non-default override only. Set source to `cloud` and base URL to `https://cloud.langfuse.com` in the in-app settings (or via `VIRE_LANGFUSE_SOURCE=cloud` + `VIRE_LANGFUSE_BASE_URL=https://cloud.langfuse.com` as dev fallback); omitting either leaves the importer at the local Docker default.
