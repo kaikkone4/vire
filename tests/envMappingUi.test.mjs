@@ -70,6 +70,8 @@ test('a mapped environment shows its project and a clear action, no project pick
   assert.match(html, /data-clear-map="vire"/);
   assert.doesNotMatch(html, /data-map-set/);
   assert.doesNotMatch(html, /data-create-map/);
+  // TASK-030: a mapped row must not render the in-app create input.
+  assert.doesNotMatch(html, /data-create-name/);
 });
 
 test('an unmapped environment offers a project picker AND an explicit create-and-map action', () => {
@@ -77,16 +79,27 @@ test('an unmapped environment offers a project picker AND an explicit create-and
   assert.match(html, /data-map-select="staging"/);
   assert.match(html, /data-map-set="staging"/);
   assert.match(html, /data-create-map="staging"/);
-  assert.match(html, /Create project for staging/);
+  assert.match(html, /Create &amp; map/);
   // existing projects are selectable, archived flagged
   assert.match(html, /value="p1"/);
   assert.match(html, /Old Work \(archived\)/);
 });
 
-test('unmapped with no projects still offers create-and-map but no empty picker', () => {
+test('TASK-030: an unmapped row renders an in-app create input pre-filled with the env name, not a native prompt', () => {
+  const html = mappingRow(unmappedEnv, projects);
+  // An inline <input> the handler reads — replaces the WKWebView-broken window.prompt().
+  assert.match(html, /<input[^>]*data-create-name="staging"/);
+  // Pre-filled with the environment name as the suggested project name.
+  assert.match(html, /data-create-name="staging"[^>]*value="staging"/);
+  // Paired with the create-and-map trigger.
+  assert.match(html, /data-create-map="staging"/);
+});
+
+test('unmapped with no projects still offers create-and-map (input + button) but no empty picker', () => {
   const html = mappingRow(unmappedEnv, []);
   assert.match(html, /No projects yet/);
   assert.match(html, /data-create-map="staging"/);
+  assert.match(html, /data-create-name="staging"/);
   assert.doesNotMatch(html, /data-map-set/);
 });
 
