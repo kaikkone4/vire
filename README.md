@@ -51,8 +51,9 @@ npm run tauri:build
    stores the union of the ticked boxes and any advanced entries.
 6. **Each environment maps to a Vire project** (TASK-027 D4): the *Environment → project mapping*
    panel shows every discovered environment as mapped or unmapped. An unmapped environment can be
-   mapped to an existing project, or you can use **Create project for `<env>`** to create a project and
-   map it in one explicit action. Vire never auto-creates a project or auto-maps an environment — every
+   mapped to an existing project, or you can type a project name in the inline input and click
+   **Create & map** to create a project and map it in one explicit action. Vire never auto-creates a
+   project or auto-maps an environment — every
    mapping is a deliberate user action (DEC-006). Clearing a mapping changes only the link; imported
    evidence rows are never rewritten.
 7. **Import results are explained, never blank** (TASK-027 A): after an import the source panel shows
