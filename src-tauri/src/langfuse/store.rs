@@ -54,6 +54,11 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             environment TEXT PRIMARY KEY,
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS langfuse_backfill_progress (
+            marker TEXT PRIMARY KEY,
+            resume_from TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );",
     )?;
     // Additive, idempotent: surface `session_id` on installs whose evidence table predates the
@@ -217,6 +222,55 @@ pub fn seen_trace_ids(conn: &Connection, environment: &str) -> rusqlite::Result<
         .query_map(params![environment], |r| r.get::<_, String>(0))?
         .collect::<Result<HashSet<String>, _>>()?;
     Ok(ids)
+}
+
+/// The fixed primary key of the single global backfill-continuation row. Backfill resumes are tracked
+/// globally (one inclusive cursor across all environments) — the cursor is always the *earliest*
+/// high-water any page-limited environment reached, so resuming forward from it never skips a sparser
+/// environment's history between its own high-water and that cursor (TASK-029 C4 / DEC-032).
+const BACKFILL_MARKER_KEY: &str = "resume_from";
+
+/// Read the persisted backfill inclusive resume-cursor, if any (TASK-029 C4 / DEC-032). When set, the
+/// next "Backfill now" resumes by scanning `[resume_from, now)` with an **inclusive** `fromTimestamp`
+/// (`orderBy=timestamp.asc`) instead of `[range_floor, now)`, so a page-limited backfill re-reads the
+/// whole boundary instant (durable dedup ⇒ exactly once) and then advances into strictly-newer history
+/// rather than re-walking the same first `MAX_PAGES` pages forever. The value is a UTC RFC3339 timestamp
+/// — a position cursor, never trace content or a credential.
+pub fn backfill_resume_from(conn: &Connection) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT resume_from FROM langfuse_backfill_progress WHERE marker = ?1",
+        params![BACKFILL_MARKER_KEY],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+}
+
+/// Persist the backfill inclusive resume-cursor — the chronological maximum timestamp a page-limited
+/// backfill reached (`max_reached`). Upsert on the fixed key so there is exactly one global cursor.
+pub fn set_backfill_resume_from(
+    conn: &Connection,
+    resume_from: &str,
+    updated_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO langfuse_backfill_progress (marker, resume_from, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(marker) DO UPDATE SET
+            resume_from = excluded.resume_from,
+            updated_at = excluded.updated_at",
+        params![BACKFILL_MARKER_KEY, resume_from, updated_at],
+    )?;
+    Ok(())
+}
+
+/// Clear the backfill resume-cursor once a backfill drains `[resume_from, now)` without hitting the page
+/// limit: the configured range is fully covered, so a later "Backfill now" starts fresh from the floor.
+pub fn clear_backfill_resume_from(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM langfuse_backfill_progress WHERE marker = ?1",
+        params![BACKFILL_MARKER_KEY],
+    )?;
+    Ok(())
 }
 
 /// A discovered Langfuse environment (TASK-027 C). Carries only the environment **name** and the

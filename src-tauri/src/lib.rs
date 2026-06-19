@@ -541,6 +541,22 @@ fn set_langfuse_settings(
     )
 }
 
+/// Read the configured Langfuse import range as its canonical string (TASK-029 C). Secret-free: the
+/// value is only ever a fixed range keyword or a timestamp.
+#[tauri::command]
+fn get_langfuse_import_range(state: State<AppState>) -> CmdResult<String> {
+    let db = db_conn(&state)?;
+    settings::get_langfuse_import_range_repo(&db)
+}
+
+/// Validate and persist the Langfuse import range (TASK-029 C1). A malformed value is rejected with a
+/// fixed, secret-free error; the canonical normalized value is returned for the form to re-render.
+#[tauri::command]
+fn set_langfuse_import_range(state: State<AppState>, range: String) -> CmdResult<String> {
+    let db = db_conn(&state)?;
+    settings::set_langfuse_import_range_repo(&db, range)
+}
+
 #[tauri::command]
 fn set_langfuse_secret(public_key: String, secret_key: String) -> CmdResult<()> {
     settings::set_langfuse_secret_repo(
@@ -640,6 +656,15 @@ fn list_evidence_projects(state: State<AppState>) -> CmdResult<Vec<env_mapping::
 const IMPORT_TIMEOUT_SECS: u64 = 30;
 const IMPORT_TIMEOUT_MSG: &str =
     "Langfuse import did not complete within the time limit — AI usage and cost are unknown, not zero";
+
+/// Ceiling for a **backfill** (TASK-029 C5). Backfill is inherently slower (it re-scans the full
+/// configured range in chunks), so it gets a larger bound than an incremental import. Because backfill
+/// is chunked-durable-resumable, a timeout is non-destructive: committed chunks persist and the user
+/// re-runs "Backfill now" to continue.
+const BACKFILL_TIMEOUT_SECS: u64 = 300;
+const BACKFILL_TIMEOUT_MSG: &str =
+    "Langfuse backfill did not complete within the time limit — already-imported history is saved; \
+     re-run Backfill now to continue";
 
 /// Ceiling for the in-app Test connection probe (TASK-026), above the reqwest 15s request / 5s
 /// connect ceilings so a normal slow probe is not cut off, but a hang cannot freeze the UI.
@@ -779,6 +804,42 @@ fn import_langfuse_now(state: State<AppState>) -> CmdResult<ImportOutcome> {
     })
 }
 
+/// Explicit "Backfill now" (TASK-029 C5): re-scan the configured range floor → now in bounded,
+/// atomically-committed, resumable chunks. Identical posture to [`import_langfuse_now`] — disabled
+/// short-circuit before any probe/Keychain, off-UI dedicated thread, `import_lock` serialization,
+/// SEC-002 loopback boundary, GET-only, secret-free report — but with a larger time bound. Because
+/// backfill is chunked-durable-resumable, a timeout is non-destructive (committed chunks persist).
+#[tauri::command]
+fn backfill_langfuse_now(state: State<AppState>) -> CmdResult<ImportOutcome> {
+    {
+        let db = db_conn(&state)?;
+        if !settings::langfuse_enabled(&db) {
+            let snapshot = settings::source_health_snapshot(&db)?;
+            return Ok(ImportOutcome {
+                snapshot,
+                report: None,
+            });
+        }
+    }
+    let db_path = state.db_path.clone();
+    let import_lock = state.import_lock.clone();
+    let report = run_bounded_result(
+        Duration::from_secs(BACKFILL_TIMEOUT_SECS),
+        BACKFILL_TIMEOUT_MSG,
+        move || {
+            // Serialize with any in-flight import (B3): one importer touches the local store at a time.
+            let _slot = acquire_import_slot(&import_lock);
+            langfuse::run_blocking_backfill(&db_path)
+        },
+    )?;
+    let db = db_conn(&state)?;
+    let snapshot = settings::source_health_snapshot(&db)?;
+    Ok(ImportOutcome {
+        snapshot,
+        report: Some(report),
+    })
+}
+
 fn validate_csv_destination(path: &Path) -> Result<(), String> {
     if path
         .extension()
@@ -843,9 +904,12 @@ pub fn run() {
             export_report_csv,
             get_langfuse_source_health,
             import_langfuse_now,
+            backfill_langfuse_now,
             get_runtime_reconciliation,
             get_langfuse_settings,
             set_langfuse_settings,
+            get_langfuse_import_range,
+            set_langfuse_import_range,
             set_langfuse_secret,
             clear_langfuse_secret,
             test_langfuse_connection,

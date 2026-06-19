@@ -95,6 +95,143 @@ impl ApiError {
     }
 }
 
+/// Fixed, secret-free taxonomy of **why** a trace or observation was skipped or degraded during an
+/// import (TASK-029 A / SEC-011 / DEC-031). Each variant maps to a stable `snake_case` label string
+/// in the import report — never a passed-through `serde` error, field value, or payload content.
+/// Classification is **structural**: it inspects the raw `serde_json::Value` shape (which keys are
+/// present, what JSON type the offending field has), never the field's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// No usable string `id` on the entry — cannot identify it; the only identification failure that
+    /// still drops a trace. Degrades the environment to `schema_changed` for review (counted).
+    MissingTraceId,
+    /// `observations` is present but its elements are identifier strings, not embedded objects — the
+    /// current Langfuse v3 list shape. **Informational**: usage/cost are read from the observations
+    /// fetch, so the trace is imported, not dropped.
+    ObservationsNotEmbedded,
+    /// An identification field carried an unexpected JSON type (e.g. a numeric `timestamp`). The
+    /// trace is still imported via the tolerant reader; this records the offending field **name**
+    /// only. **Informational** — a peripheral mismatch never drops an identifiable trace.
+    FieldTypeMismatch,
+    /// A generation observation had no token usage or cost in any supported location → the trace is
+    /// imported as `schema_changed` (counted, surfaced for review), never a numeric zero.
+    GenerationLacksUsageAndCost,
+    /// The per-trace observations fetch failed → the trace is imported as `schema_changed`.
+    ObservationsFetchFailed,
+}
+
+impl SkipReason {
+    /// Every variant, in a fixed order, so the report's per-reason breakdown is deterministic.
+    pub const ALL: [SkipReason; 5] = [
+        SkipReason::MissingTraceId,
+        SkipReason::ObservationsNotEmbedded,
+        SkipReason::FieldTypeMismatch,
+        SkipReason::GenerationLacksUsageAndCost,
+        SkipReason::ObservationsFetchFailed,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SkipReason::MissingTraceId => "missing_trace_id",
+            SkipReason::ObservationsNotEmbedded => "observations_not_embedded",
+            SkipReason::FieldTypeMismatch => "field_type_mismatch",
+            SkipReason::GenerationLacksUsageAndCost => "generation_lacks_usage_and_cost",
+            SkipReason::ObservationsFetchFailed => "observations_fetch_failed",
+        }
+    }
+
+    /// Whether this reason is a genuine **drop or degrade** (counted as a schema issue and surfaced
+    /// as `schema_changed`), as opposed to an **informational** anomaly the importer tolerates. Only
+    /// genuine reasons drive the `skipped_schema` count and the environment health state, so the
+    /// normal v3 list shape (`observations_not_embedded`) and tolerated field mismatches never force
+    /// `schema_changed`.
+    pub fn is_schema_issue(&self) -> bool {
+        matches!(
+            self,
+            SkipReason::MissingTraceId
+                | SkipReason::GenerationLacksUsageAndCost
+                | SkipReason::ObservationsFetchFailed
+        )
+    }
+}
+
+/// One reason's aggregated count in the import report (secret-free: a fixed label + an integer).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkipReasonCount {
+    pub reason: String,
+    pub count: usize,
+}
+
+/// A bounded, **secret-free** structural sample for a skip/degrade reason (SEC-011). It carries only
+/// *structure*, never *content*:
+/// - `keys`: the top-level JSON key **names** present on the entry (e.g. `["id","observations"]`);
+/// - `field`: the offending field's **name** (for the field-scoped reasons);
+/// - `field_type`: that field's JSON **type name** (`"string"`/`"array"`/…), never its value;
+/// - `element_type`: for an array field, the JSON type name of its first element.
+///
+/// A sample MUST NOT contain any field value, nested object/array contents, raw payload bytes, a
+/// `serde` error string, or any prompt/session/metadata/credential material. Type and key **names**
+/// are structure, not content — this is the SEC-011 invariant and is negative-tested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkipSample {
+    pub reason: String,
+    pub keys: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element_type: Option<String>,
+}
+
+/// True when a raw entry's `observations` field is the current Langfuse v3 **identifier-list**
+/// shape: a non-empty array carrying at least one non-object element (an observation ID string)
+/// rather than only embedded observation objects. Drives the informational `observations_not_embedded`
+/// classification — the trace is still imported (usage/cost come from the observations fetch).
+pub fn observations_is_id_list(value: &serde_json::Value) -> bool {
+    value
+        .get("observations")
+        .and_then(|v| v.as_array())
+        .map(|arr| !arr.is_empty() && arr.iter().any(|el| !el.is_object()))
+        .unwrap_or(false)
+}
+
+/// Name the first identification field on a raw entry whose JSON **type** is unexpected (a present,
+/// non-null value that is not the type the typed [`Trace`] expects: string for `timestamp`/
+/// `environment`/`name`/`sessionId`, number for `totalCost`). Returns `None` when every present
+/// identification field has an acceptable type. Used only to label a `field_type_mismatch` sample
+/// with the offending field **name** — never its value (SEC-011).
+pub fn offending_identification_field(value: &serde_json::Value) -> Option<&'static str> {
+    const STRING_FIELDS: [&str; 4] = ["timestamp", "environment", "name", "sessionId"];
+    for &field in &STRING_FIELDS {
+        if let Some(v) = value.get(field) {
+            if !v.is_null() && !v.is_string() {
+                return Some(field);
+            }
+        }
+    }
+    if let Some(v) = value.get("totalCost") {
+        if !v.is_null() && !v.is_number() {
+            return Some("totalCost");
+        }
+    }
+    None
+}
+
+/// The JSON **type name** of a value — pure structure, never the value itself (SEC-011). Used to
+/// describe an offending field in a [`SkipSample`] without copying any content.
+pub fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 /// A page of traces from `GET /api/public/traces`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TracePage {
@@ -142,8 +279,84 @@ pub struct Trace {
     pub total_cost: Option<f64>,
     #[serde(default)]
     pub metadata: serde_json::Value,
-    #[serde(default)]
+    /// Embedded observation objects when the source carries them (legacy/fast path), OR an empty
+    /// vec when the source used the current Langfuse v3 list shape (an array of observation **ID
+    /// strings**) — in which case usage/cost come from the `get_observations(trace_id)` fetch. The
+    /// tolerant deserializer keeps object elements and drops identifier strings, so the v3 shape
+    /// never fails the whole-trace parse (TASK-029 B / DEC-031).
+    #[serde(default, deserialize_with = "deserialize_tolerant_observations")]
     pub observations: Vec<Observation>,
+}
+
+/// Tolerantly deserialize the `observations` field across Langfuse shapes (TASK-029 B / DEC-031).
+/// The legacy/embedded shape carries observation **objects**; the current v3 list shape carries
+/// observation **ID strings**. This keeps every element that is a JSON object (the fast path) and
+/// silently drops non-object elements (ID strings, nulls). A non-array value (or `null`) yields an
+/// empty vec. The dropped/ID-only case falls through to the authoritative `get_observations`
+/// fetch, so the whole-trace parse never fails merely because the source used the identifier-list
+/// shape.
+fn deserialize_tolerant_observations<'de, D>(deserializer: D) -> Result<Vec<Observation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(observation_objects(&raw))
+}
+
+/// Extract embedded [`Observation`] objects from a raw `observations` value, ignoring identifier
+/// strings, nulls, and any non-array shape. Shared by the tolerant deserializer and the
+/// identification-first [`Trace::from_value_tolerant`] reader.
+fn observation_objects(value: &serde_json::Value) -> Vec<Observation> {
+    value
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|el| el.is_object())
+                .filter_map(|el| serde_json::from_value::<Observation>((*el).clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Read a usable string trace `id` from a raw list-payload entry, or `None` when it is absent,
+/// non-string, or blank. This is the single identification predicate (TASK-029 B1 / DEC-031): a
+/// trace with an id is always importable; one without is the only entry the importer still skips
+/// (classified `missing_trace_id`).
+pub fn trace_id(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+impl Trace {
+    /// Identification-first tolerant construction from a raw list-payload entry (TASK-029 B1 /
+    /// DEC-031). A peripheral field with an unexpected JSON type (e.g. a numeric `timestamp`) is
+    /// read as absent rather than dropping the whole trace; `observations` keeps embedded objects
+    /// and ignores identifier-string elements. Returns `None` only when the entry has no usable
+    /// string `id` — the sole identification failure. Usage/cost are NOT read here (they come from
+    /// observations), so a tolerated mismatch never fabricates a token or cost value.
+    pub fn from_value_tolerant(value: &serde_json::Value) -> Option<Trace> {
+        let id = trace_id(value)?;
+        let str_field = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        Some(Trace {
+            id,
+            timestamp: str_field("timestamp"),
+            environment: str_field("environment"),
+            name: str_field("name"),
+            session_id: str_field("sessionId"),
+            total_cost: value.get("totalCost").and_then(|v| v.as_f64()),
+            metadata: value
+                .get("metadata")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            observations: value
+                .get("observations")
+                .map(observation_objects)
+                .unwrap_or_default(),
+        })
+    }
 }
 
 /// A generation observation — where token usage and model cost actually live. Read by observed

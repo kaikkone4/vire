@@ -16,6 +16,7 @@ use crate::langfuse::config::{
     Credentials, ImporterConfig, Secret, Source, DEFAULT_BASE_URL, DEFAULT_ENVIRONMENT,
 };
 use crate::langfuse::store::{self, SourceHealthSnapshot};
+use crate::langfuse::ImportRange;
 use secret_store::{SecretStore, SecretStoreError};
 
 /// Keychain account names (service = bundle id `dev.vire.app`); distinct entries per key.
@@ -28,6 +29,9 @@ const KEY_BASE_URL: &str = "langfuse_base_url";
 const KEY_SOURCE: &str = "langfuse_source";
 const KEY_ENVIRONMENTS: &str = "langfuse_environments";
 const KEY_ENABLED: &str = "langfuse_enabled";
+/// How far back imports reach (TASK-029 C). Non-secret, additive — one key-value row alongside the
+/// other Langfuse settings; never a credential store.
+const KEY_IMPORT_RANGE: &str = "langfuse_import_range";
 
 type CmdResult<T> = Result<T, String>;
 
@@ -136,6 +140,42 @@ pub fn langfuse_enabled_with(conn: &Connection, env: &dyn EnvSource) -> bool {
             .map(|v| parse_bool(&v))
             .unwrap_or(true),
     }
+}
+
+/// Resolve the configured Langfuse import range (TASK-029 C). Settings-first, then the marked dev
+/// env fallback, then the default (`last_30d`). A stored or env value that fails to parse (an unknown
+/// keyword or a malformed `since:` timestamp) resolves to the **default** rather than failing the
+/// import — the import is never blocked by a bad range value.
+pub fn resolve_import_range(conn: &Connection) -> ImportRange {
+    resolve_import_range_with(conn, &ProcessEnv)
+}
+
+pub fn resolve_import_range_with(conn: &Connection, env: &dyn EnvSource) -> ImportRange {
+    let raw =
+        read_setting(conn, KEY_IMPORT_RANGE).or_else(|| env.get("VIRE_LANGFUSE_IMPORT_RANGE"));
+    match raw {
+        Some(value) => ImportRange::parse(&value).unwrap_or_else(|_| ImportRange::default_range()),
+        None => ImportRange::default_range(),
+    }
+}
+
+/// Read the import-range setting back as its canonical string for the Settings panel. Resolves the
+/// same way the importer does, so a malformed stored value reads back as the default rather than an
+/// invalid string.
+pub fn get_langfuse_import_range_repo(conn: &Connection) -> CmdResult<String> {
+    Ok(resolve_import_range(conn).as_setting())
+}
+
+/// Validate and persist the import-range setting (TASK-029 C1 / app-configuration). The value is
+/// validated through [`ImportRange::parse`]; a malformed value is rejected with a **fixed,
+/// secret-free** error that never echoes the input (so a malformed `since:` cannot leak content).
+/// The stored value is the canonical normalized form, which is also returned for the form to
+/// re-render from a single source.
+pub fn set_langfuse_import_range_repo(conn: &Connection, value: String) -> CmdResult<String> {
+    let range = ImportRange::parse(&value).map_err(|e| e.to_string())?;
+    let canonical = range.as_setting();
+    write_setting(conn, KEY_IMPORT_RANGE, &canonical).map_err(|e| e.to_string())?;
+    Ok(canonical)
 }
 
 /// Non-secret config (no credentials) for the health snapshot. Settings-first, then env, then the
