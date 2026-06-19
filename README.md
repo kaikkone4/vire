@@ -58,6 +58,20 @@ npm run tauri:build
 7. **Import results are explained, never blank** (TASK-027 A): after an import the source panel shows
    how many traces were imported, duplicated, or skipped, with per-environment health — an empty or
    partial result is explained rather than shown as zero.
+8. **Configurable import range** (TASK-029 C): Settings → *Import range* offers `last_7d`, `last_30d`
+   (default), `last_90d`, `all`, or `since:<RFC3339>`. A manual or automatic import uses this as the
+   range floor; each environment tracks its own cursor and resumes incrementally.
+9. **Backfill** (TASK-029 C): **Backfill now** re-scans floor→now regardless of the existing cursor.
+   Large backfills run as ordered monthly chunks, each persisted atomically; an interruption loses at
+   most the in-flight chunk and re-running continues where it left off (no duplicate rows — durable
+   dedupe is idempotent).
+10. **Schema diagnostics** (TASK-029 A): when traces are skipped, the import report surfaces grouped
+    reason counts and bounded structural shape samples (key names and JSON type names only — no field
+    values, no credentials). This replaces the previous repeated free-string warning.
+11. **Saturation terminal state** (TASK-029 C): if a single millisecond timestamp holds more traces than
+    one run can page through (≥ 50 000), the run surfaces a distinct *capped* terminal diagnostic — never
+    an infinite re-run loop. Re-running cannot advance past this point; it is an explicit terminal limit
+    of the source API's pagination, surfaced rather than silently truncated.
 
 > The build is a local prototype: it is **not** code-signed or notarized. On first launch macOS
 > Gatekeeper may require right-click → Open (or *System Settings → Privacy & Security → Open Anyway*).
@@ -91,13 +105,16 @@ This build is forward/backward compatible with prior Vire builds on the same Mac
 - **Data:** the packaged app uses the same local database, `app_data_dir()/vire.sqlite`, as the dev and
   prior builds. `init_db` is idempotent (`CREATE TABLE IF NOT EXISTS` + `INSERT OR IGNORE`), and the new
   Langfuse configuration persists as **additive rows in the existing key/value `settings` table** — no
-  schema change to `projects`/`time_entries`, no destructive migration.
+  schema change to `projects`/`time_entries`, no destructive migration. TASK-029 adds one new table
+  (`langfuse_backfill_progress`, a single-row resume cursor) and one new settings row
+  (`langfuse_import_range`); no existing table or column is altered.
 - **Secrets:** the Langfuse secret/public key live in app-scoped macOS Keychain entries (service
   `dev.vire.app`). They persist across reinstall and are **not** bundled in the artifact.
-- **Rollback:** reverting to the immediately prior build opens the same `vire.sqlite` and ignores the
-  unknown additive `settings` rows (key/value table, no schema dependency) → **no data loss, no
-  destructive migration**. A prior build simply falls back to environment variables (`VIRE_LANGFUSE_*`)
-  for Langfuse config, which remain a marked dev fallback.
+- **Rollback:** reverting to any prior build opens the same `vire.sqlite` and ignores unknown additive
+  `settings` rows and the new `langfuse_backfill_progress` table → **no data loss, no destructive
+  migration**. A prior build simply falls back to environment variables (`VIRE_LANGFUSE_*`) for Langfuse
+  config, which remain a marked dev fallback. The default import window changes from 7 days to 30 days
+  (TASK-029); re-importing a trace already stored is a durable-dedupe no-op.
 
 ## Tests
 
@@ -137,6 +154,15 @@ These steps require a macOS build; Keychain-backed paths cannot be verified in C
 9. **Test connection disabled guard:** turn the integration toggle off and save. Confirm the Test connection button is disabled (with tooltip). Confirm "Import from Langfuse now" is also disabled.
 10. **Clear credentials:** click Clear credentials → confirm both keys show `not set`. A subsequent import attempt reports `auth_or_network_error`, never zero AI usage or cost.
 11. **Rollback smoke (if a prior build is available):** open a prior Vire build on the same Mac — confirm the DB loads, the unknown additive `settings` rows are silently ignored, and no crash or data loss occurs.
+
+### Import range, backfill, and schema diagnostics (TASK-029 — required before release)
+
+These steps require an active local Langfuse stack.
+
+12. **Import range:** Settings → *Import range* — confirm options `last_7d`, `last_30d`, `last_90d`, `all`, `since:<RFC3339>` are present and `last_30d` is the default. Change to `last_90d`, click Save. Quit and relaunch — confirm `last_90d` persisted (SQLite round-trip).
+13. **Backfill now:** with integration enabled, confirm **Backfill now** is visible. Click it; confirm the import report appears on completion and shows incremental progress (not a blank or frozen UI).
+14. **Schema diagnostics:** if any traces were skipped, confirm the import report groups skip reasons (e.g. `N skipped: N observations-not-embedded`) rather than repeating the same free-string warning N times. Structural samples (if present) must show JSON key names and type names only — no field values, no credentials.
+15. **Rollback smoke (TASK-029 additions):** open a prior Vire build on the same Mac — confirm the `langfuse_import_range` settings row and the `langfuse_backfill_progress` table are silently ignored (no crash, no import failure, no data loss).
 
 ## Local Langfuse Docker stack
 

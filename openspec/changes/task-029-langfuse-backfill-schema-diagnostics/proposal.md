@@ -129,8 +129,9 @@ B: the parser is widened **only** for shapes the diagnostics prove are real. **T
 - **Affected code (D):** `src-tauri/src/langfuse/importer.rs` (report struct extension),
   `src/main.ts` (grouped report rendering), `src/style.css` (report list styling), `src/langfuse-settings.ts`
   (range-control helpers).
-- **Data model:** additive only — one new key-value `settings` row (`langfuse_import_range`); existing
-  `langfuse_*` tables unchanged (the durable cursor + dedupe already exist). Idempotent `init_db` /
+- **Data model:** additive only — one new key-value `settings` row (`langfuse_import_range`); one new
+  importer-owned table `langfuse_backfill_progress` (a single-row durable inclusive resume-cursor, DEC-032).
+  No existing `langfuse_*` table or column is altered. Idempotent `init_db` /
   `CREATE TABLE IF NOT EXISTS` posture preserved; forward/backward compatible.
 - **Affected specs:** **MODIFY `langfuse-importer`** (tolerant identification + reserved-`schema_changed`,
   forensic diagnostics, configurable range + incremental cursor + resumable backfill, grouped report);
