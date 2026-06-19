@@ -1,5 +1,46 @@
 # Vire — Release Notes
 
+## v0.3.1 — Create Project button fix: in-app input for env create-and-map (TASK-030)
+
+**Branch:** `feat/task-030-create-project-button-fix`
+**PR:** #25
+
+### What changed
+
+The **Create & map** action in the environment → project mapping panel now works in the packaged
+macOS app. Previously the action relied on `window.prompt()`, which returns `null` silently in the
+macOS WKWebView; the project name was never captured and no project was created.
+
+The fix replaces the single button with an inline `<input>` (pre-filled with the environment name,
+`maxlength="120"`) + **Create & map** button. The handler reads the input directly, trims it, and
+rejects empty names before calling `create_project` → `set_env_mapping` — the same IPC sequence as
+before, now with a working name source.
+
+No backend change. No new dependency. No DB schema change.
+
+### Compatibility and rollback
+
+Fully compatible with v0.3.0 (no DB migration, no IPC change). Rollback: reinstall the v0.3.0
+`.app` — no cleanup step. See [openspec/changes/task-030-create-project-button-fix/RELEASE.md](openspec/changes/task-030-create-project-button-fix/RELEASE.md)
+for the full rollback table and component compatibility matrix.
+
+### Tests
+
+**Rust** (`cargo test`): **142 passed / 0 failed** (backend unchanged)
+
+**Frontend** (`npm run test:frontend`): **72 passed / 2 pre-existing failures (unrelated)**
+(new test: `envMappingUi.test.mjs` — 11/11 markup assertions for the new input/button pair;
+the 2 failures are in `tests/pi-observe.security.test.mjs`, unrelated and present since before
+any TASK-030 commit)
+
+### Manual smoke steps before shipping
+
+T6 — Packaged macOS app: launch the signed `.app`, open Settings → env mapping panel, click
+**Create & map** for an unmapped environment, confirm a project is created and the environment
+is mapped. (Human-only; outstanding UAT gate — see `tasks.md`.)
+
+---
+
 ## v0.3.0 — Langfuse schema diagnostics, backfill, and tolerant v3 import (TASK-029)
 
 **Branch:** `feat/task-029-langfuse-backfill-schema-diagnostics`
