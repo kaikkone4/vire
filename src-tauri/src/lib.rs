@@ -2,6 +2,7 @@ mod env_mapping;
 mod langfuse;
 mod runtime_observer;
 mod settings;
+mod suggestions;
 
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -108,7 +109,10 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     langfuse::store::migrate(conn)?;
     // Additive env→project map; created after `projects` exists so its FK resolves (TASK-027 D1).
     env_mapping::migrate(conn)?;
-    runtime_observer::store::migrate(conn)
+    runtime_observer::store::migrate(conn)?;
+    // Additive suggestions table; created after `projects`/`time_entries`/`env_mapping` so its
+    // `project_id` FK resolves and the read-time evidence join has its inputs (TASK-032 A2).
+    suggestions::store::migrate(conn)
 }
 
 fn clean_opt(s: Option<String>) -> Option<String> {
