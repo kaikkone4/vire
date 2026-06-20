@@ -1,34 +1,51 @@
-<!-- handoff.md — compact per-task state. KEEP <= 2 KB. Reference files; never paste content. -->
+<!-- handoff.md — compact per-task state. KEEP <= 2 KB. -->
 
 # Handoff — TASK-033 reports-quick-ranges
 
-- **Change dir**: openspec/changes/task-033-reports-quick-ranges/
-- **Branch / PR**: feat/task-033-reports-quick-ranges · PR #28 (draft)
-- **Phase / gate**: SW-2 Frontend implementation (DONE) → ready for SW-3 QA
-- **Tier**: L1-equivalent (frontend-only, no backend/deps/schema/IPC)
+- **Change / branch / PR**: `task-033-reports-quick-ranges` · `feat/task-033-reports-quick-ranges` · PR #28
+- **Phase**: SW-6 Release PASS, 2026-06-20 → ready for Janne to tag + merge
+- **Scope**: frontend-only report presets; no backend/dependency/schema/IPC changes
 
 ## Last gate result
-SW-2 complete, 2026-06-20. Built on origin/main (task-032 already merged, PR #27). tsc+vite build PASS;
-new pure-helper test 5/5 PASS. Implements all 3 arch-review constraints.
+
+SW-5 Security PASS, 2026-06-20. No auto-fail; no design escalation. Tier 1 stack clean: gitleaks 0 leaks
+(167 commits); semgrep 0 ERROR on changed source; Trivy 0 secrets/0 misconfig. OSV: only pre-existing,
+zero-delta dev/transitive advisories (vite 8.2 dev-only/not shipped, glib 6.9 Linux-backend) — owned by
+TASK-043, not a task-033 auto-fail. Manual: XSS/DOM-injection clean (esc on static consts; dates pure
+YYYY-MM-DD via localDateInputValue → input `.value`, not innerHTML), no IPC/capability/egress/dep change,
+export closure rebinds on re-render, secret-free render path. Details: `sec.md`.
+
+SW-4 Code Review PASS, 2026-06-20. No blockers or architect escalations. Local-date arithmetic, inclusive
+windows, project-filter preservation, export closure rebinding, complexity, dead code, changed-path scope,
+and commit message were reviewed. One non-blocking suggestion: emit `aria-pressed="false"` for inactive
+preset buttons if retaining toggle semantics. Details: `review.md`.
+
+Validation: focused tests 5/5 PASS under `America/Los_Angeles` and `Pacific/Kiritimati`; build PASS;
+`git diff --check` PASS. GitHub API was unreachable, so remote PR-description verification is unavailable.
+
+## Prior gate
+
+SW-3 QA PASS, 2026-06-20. Full suite 88/90 with two documented pre-existing unrelated failures in
+`tests/pi-observe.security.test.mjs`; all eight spec scenarios covered. See `qa.md`.
+
+## Last gate result (SW-6)
+
+SW-6 Release PASS, 2026-06-20. RELEASE.md written with all three required declarations (minor
+deployment size, partial-automated rollback, full compatibility matrix). Root RELEASE.md updated
+with v0.5.0 section. PR #28 promoted to ready-for-review. Tag dry-run recorded; SSH key absent
+(same constraint as prior tasks).
 
 ## Active blockers
-- none
+
+- SSH signing key absent: Janne must run `git tag -s task-033/v0.5.0 ...` + push tag (see RELEASE.md §Tag signing).
+- Manual macOS UAT `tasks.md` §4.1–§4.4 outstanding (human-only, packaged `.app`).
 
 ## Exact next action
-sw-qa-engineer (SW-3): integration-test per `tasks.md` §4 (manual UAT, human-only) + verify the pure
-helper. Confirm preset buttons set #rStart/#rEnd, refresh totals+table, preserve #rProject, and that CSV
-export uses the preset window. No backend regression to check (no IPC/schema touched).
 
-## Required files (read these, not the whole tree)
-- `sw2-impl-notes.md` — what changed, constraints honoured, test/build results (PRIMARY)
-- `arch-review.md` — 3 mandatory constraints + rejected alternatives
-- `tasks.md` §4 — manual acceptance checklist
-- `src/report-ranges.ts` (new pure helper) · `tests/reportRanges.test.mjs`
-- `src/main.ts` `renderReports` (line ~60) — only render fn touched
+Janne: (1) create signed tag on commit `b77d767`, push tag; (2) merge PR #28; (3) run UAT §4.1–§4.4 on packaged app.
 
-## Notes carried forward
-- Pre-existing test noise: `tests/pi-observe.security.test.mjs` has 2 failures on the clean tree
-  (unrelated to TASK-033). `npm run test:frontend` will show them; not a SW-3 blocker for this change.
-- TOP DEFECT RISK was UTC off-by-one — mitigated by local-date math; locked by month/year-boundary tests.
-- Preset re-renders (`run(renderReports)`) so Export-CSV closure captures the new start/end.
-- Presets: Last 7/14/30/90 days only. Calendar-aware presets explicitly out of scope (arch-review §4).
+## Carry forward
+
+- Manual UAT `tasks.md` §4.1–§4.4 remains human-only.
+- Presets are Last 7/14/30/90 days; calendar-aware presets remain out of scope.
+- Review artifact: `openspec/changes/task-033-reports-quick-ranges/review.md`.
