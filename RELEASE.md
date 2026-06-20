@@ -1,5 +1,62 @@
 # Vire — Release Notes
 
+## v0.4.0 — AI time-entry suggestions (TASK-032)
+
+**Branch:** `feat/task-032-ai-time-suggestions`
+**PR:** #27
+
+### What changed
+
+Added an **AI time-entry suggestion system** — a local engine that reads Langfuse evidence from
+SQLite and proposes time-entry blocks per project-day, without any new network egress.
+
+**Workstream A — Suggestion engine + persistence:** new `src-tauri/src/suggestions/` module
+(engine, store, tests). Reads evidence at call time via LEFT JOIN (no evidence rewrite, DEC-001).
+New `time_entry_suggestions` table (additive, idempotent). IPC: `list_time_entry_suggestions`
+(atomic regeneration — delete-then-insert in one transaction, SW-4 fix).
+
+**Workstream B — Accept/dismiss + origin separation:** `accept_time_entry_suggestion` (atomic tx:
+insert entry + guarded-UPDATE suggestion) and `dismiss_time_entry_suggestion` (guarded pending-only
+update). New `origin TEXT NOT NULL DEFAULT 'manual'` column on `time_entries` (additive; backfills
+existing rows). Today/Reports SQL and CSV split on `origin` — AI minutes never counted in the
+human/billable total (DEC-003).
+
+**Workstream C — Suggestions review UI:** new `src/suggestions-ui.ts` pure builders,
+`'Suggestions'` view route in `src/main.ts`, `tests/suggestionsUi.test.mjs` (10 tests).
+
+No new crate or npm dependency. No new egress host or Tauri capability. Suggestion surface is
+secret-free (SEC-012); all UI output XSS-escaped; accept is TOCTOU-safe atomic transaction.
+
+### Compatibility and rollback
+
+Two additive schema changes: `time_entry_suggestions` table and `time_entries.origin` column
+(both `CREATE TABLE/ADD COLUMN IF NOT EXISTS`; rollback to v0.3.2 leaves them inert — TASK-031
+binary never reads them). AI-accepted entries created before rollback persist as plain entries
+in older builds. No data loss. See [openspec/changes/task-032-ai-time-suggestions/RELEASE.md](openspec/changes/task-032-ai-time-suggestions/RELEASE.md)
+for the full rollback table and component compatibility matrix.
+
+### Tests
+
+**Rust** (`cargo test`): **159 passed / 0 failed**
+(includes new TASK-032 tests: suggestion engine scoring, atomic regeneration rollback, accept
+atomicity, dismiss guard, secret-free surface assertion `surfaces_carry_no_secrets`)
+
+**Frontend** (`npm run test:frontend`): **73 passed / 2 pre-existing failures (unrelated)**
+(new tests: `tests/suggestionsUi.test.mjs` — 10/10; the 2 failures are in
+`tests/pi-observe.security.test.mjs`, unrelated and present on `main`)
+
+### Manual smoke steps before shipping
+
+- M1 — Open the Suggestions view; confirm the list renders (may be empty if no Langfuse evidence).
+- M2 — Accept a suggestion; confirm it appears in Today as an AI-badged entry, not counted in
+  billable human total.
+- M3 — Dismiss a suggestion; confirm it disappears and cannot be re-dismissed.
+- M4 — Export CSV; confirm the `origin` column shows `manual` / `ai_suggested` correctly.
+
+(Human-only; outstanding UAT gate — requires packaged `.app` on physical Mac.)
+
+---
+
 ## v0.3.2 — Settings scroll preservation + copy cleanup (TASK-031)
 
 **Branch:** `feat/task-031-settings-scroll-preservation`

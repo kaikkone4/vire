@@ -70,7 +70,9 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
 /// `ALTER TABLE … ADD COLUMN` that treats an already-present column as success. SQLite has no
 /// `ADD COLUMN IF NOT EXISTS`, so a duplicate-column error is the expected "already migrated" path.
-fn add_column_if_absent(
+/// `pub(crate)` so additive migrations elsewhere (e.g. `time_entries.origin`, TASK-032 B1) reuse the
+/// one idempotent helper rather than re-implementing the duplicate-column tolerance.
+pub(crate) fn add_column_if_absent(
     conn: &Connection,
     table: &str,
     column: &str,
