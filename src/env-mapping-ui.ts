@@ -70,9 +70,12 @@ function projectOptionsHtml(projects: PickerProject[]): string {
 }
 
 // One mapping row per discovered environment (D4). Mapped → show the project plus a Clear action.
-// Unmapped → a project picker that maps to an existing project AND a "Create project for <env>"
-// action. The create action is explicit only — the handler calls create_project then set_env_mapping;
-// nothing is auto-created or auto-mapped here (DEC-006).
+// Unmapped → a project picker that maps to an existing project AND an in-app "Create & map" affordance.
+// The create affordance is an inline text input (pre-filled with the environment name) plus a button —
+// NOT a native window.prompt dialog, which silently returns null in the macOS WKWebView (TASK-030). The
+// create action is explicit only — the handler calls create_project then set_env_mapping; nothing is
+// auto-created or auto-mapped here (DEC-006). This builder stays pure HTML (no DOM/IPC) so the markup is
+// unit-testable; the click wiring lives in main.ts bindEnvMapping().
 export function mappingRow(env: DiscoveredEnvState, projects: PickerProject[]): string {
   const e = esc(env.environment);
   if (env.mapped && env.project_id) {
@@ -81,7 +84,8 @@ export function mappingRow(env: DiscoveredEnvState, projects: PickerProject[]): 
   const picker = projects.length
     ? `<select data-map-select="${e}"><option value="">Choose a project…</option>${projectOptionsHtml(projects)}</select> <button data-map-set="${e}">Map</button>`
     : '<span class="empty">No projects yet — create one below.</span>';
-  return `<tr data-env-row="${e}"><td><b>${e}</b></td><td>Unmapped — ${picker}</td><td><button data-create-map="${e}">Create project for ${e}</button></td></tr>`;
+  const create = `<input type="text" class="env-create-name" data-create-name="${e}" value="${e}" maxlength="120" placeholder="New project name" aria-label="New project name for environment ${e}"> <button data-create-map="${e}">Create &amp; map</button>`;
+  return `<tr data-env-row="${e}"><td><b>${e}</b></td><td>Unmapped — ${picker}</td><td>${create}</td></tr>`;
 }
 
 // The mapping panel. Renders an explanatory empty state when discovery hasn't surfaced any
