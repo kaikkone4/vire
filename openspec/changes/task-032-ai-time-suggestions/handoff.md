@@ -4,21 +4,25 @@
 
 - **Change dir**: openspec/changes/task-032-ai-time-suggestions/
 - **Branch / PR**: `feat/task-032-ai-time-suggestions` · PR #27 (draft)
-- **Phase / gate**: SW-2 fix loop 1 done (2026-06-20) — **both SW-4 blockers fixed**. Re-route to SW-4.
+- **Phase / gate**: SW-3 QA recheck PASS (2026-06-20) — route to SW-4 + SW-5.
 - **Tier**: L2
 
 ## Last gate result
-**SW-4 FAIL (2026-06-20)**, now remediated. B1: `generate` is an atomic replace-set
-(`unchecked_transaction` wraps delete + guarded inserts + final read; rollback on insert failure) +
-new failure-path test. B2: dropped stale module-wide `allow(dead_code,unused_imports)` + the dead
-`EvidenceRow.trace_id` field/projection. Checks all green. Details: `fix-sw4-loop1.md`.
+**SW-3 QA PASS (recheck, 2026-06-20)** on HEAD `dc60924`. Full A+B+C re-run:
+- Rust `--lib` 159/159 PASS; suggestions 13/13 (+1 new failure-path test).
+- `cargo clippy --all-targets` → 0 warnings in suggestions/; langfuse pre-existing unchanged.
+- `cargo fmt --check` PASS. `git diff --check` clean.
+- Suggestions builder 10/10 PASS. `npm run build` PASS.
+- B1 atomic rollback verified: `failed_regeneration_preserves_the_original_pending_set` passes.
+- B2 dead-code clean: no `allow(dead_code)` in suggestions/; `EvidenceRow.trace_id` field gone.
+- All cross-cutting guarantees (absence≠zero, no-auto-post, AI≠human, secret-free, no egress) confirmed.
+- Details: `fix-sw4-loop1.md`; scenario matrix + recheck section: `qa-032.md`.
 
 ## Active blockers
-- None. Awaiting SW-4 recheck.
+- None.
 
 ## Exact next action
-**SW-4 Code Review:** re-review HEAD against the two fixed blockers (see `fix-sw4-loop1.md`). SW-5 may
-continue independently. Local changes are committed on `feat/task-032-ai-time-suggestions`.
+**SW-4 Code Review + SW-5 Security Agent** (parallel). Both receive HEAD `dc60924`.
 
 ## Required files (read these, not the whole tree)
 - fix-sw4-loop1.md — what changed + checks; review.md — original SW-4 blockers; sw2-*-notes.md — impl
