@@ -1,6 +1,6 @@
 # QA Report — TASK-034 Suggestions UAT polish
 
-**Gate**: SW-3  **Tier**: L1  **Branch**: `feat/task-034-suggestions-uat-polish`  **Date**: 2026-06-21 (recheck after DEC-035 SW-4 escalation fix)
+**Gate**: SW-3  **Tier**: L1  **Branch**: `feat/task-034-suggestions-uat-polish`  **Date**: 2026-06-21 (full recheck after consolidated fix-loop commit 51d52fb)
 
 ## Verdict: PASS
 
@@ -69,8 +69,8 @@ All spec scenarios have observable test coverage. All gates green. No blockers.
 | G1 | `cargo test --lib` (from `src-tauri/`) | **165 pass / 0 fail** |
 | G1 | `cargo fmt --check` | **clean (exit 0)** |
 | G1 | `cargo clippy --lib --all-targets` | **3 pre-existing warnings** (unnecessary `if let` ×2, `io::Error::other`) — no new warnings in TASK-034 touched code |
-| G2 | `npm run test:frontend` (`LANGFUSE_*` unset) | **103 pass / 0 fail** |
-| G2 | `npm run test:frontend` (env not unset) | **101 pass / 2 fail** — 2 pre-existing pi-observe env failures (see note) |
+| G2 | `npm run test:frontend` (`LANGFUSE_*` unset) | **105 pass / 0 fail** |
+| G2 | `npm run test:frontend` (env not unset) | **103 pass / 2 fail** — 2 pre-existing pi-observe env failures (see note) |
 | G2 | `npm run build` | **green** (tsc + vite, 32 kB JS) |
 | G3 | `openspec change validate task-034-suggestions-uat-polish --strict` | **valid** |
 

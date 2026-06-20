@@ -4,36 +4,50 @@
 
 - **Change / branch / PR**: `task-034-suggestions-uat-polish` /
   `feat/task-034-suggestions-uat-polish` / #29
-- **Phase / gate**: SW-2 fix loop 2 **done** (2026-06-21) → route to SW-3/SW-4 recheck
+- **Phase / gate**: SW-3 **PASS** (2026-06-21) → route to SW-4 ∥ SW-5
 - **Tier**: L1
 
 ## Gate result
 
-DEC-035 escalation resolved (backend + UI normalize a `23:59` same-minute suggestion to
-`23:58 → 23:59`). AI cost persistence/reporting/CSV, fixed 30-minute contract correction, and accept
-transaction boundaries pass review.
+Full SW-3 recheck after consolidated fix-loop commit 51d52fb. All 30 spec scenarios
+have observable test coverage. All gates green. No blockers.
 
-## Blocker resolved (SW-4 fix loop 2)
+## What was verified
 
-Disabled AI evidence source is now surfaced **even when pending suggestions exist**. New pure
-`sourceDisabledNotice()` (`src/suggestions-ui.ts`) renders above the groups with an Open-Settings action;
-`suggestionsBody` takes `{sourceDegraded, sourceDisabled}` and emits it for the non-empty path (empty
-state already names disabled, so no duplication). `renderSuggestions` (`src/main.ts`) computes
-`sourceDisabled` from `sourceHealth`. Down/stale were never the gap — the shared `sourceBanner()` already
-renders them above the body. **No backend change.** Test added: disabled source + non-empty list. Stale
-`Summary` comment + `tasks.md` checkboxes fixed. `engine.rs` comment left untouched (backend, out of scope).
-
-## Exact next action
-
-SW-3/SW-4: recheck the disabled-source surface fix and the cheap-suggestion cleanups; nothing else changed.
+- **A1/A2/A3 (DEC-034/035):** `normalize_same_minute_span` in lib.rs handles positive span
+  (unchanged), forward bump (`start → start+n`), and 23:59 day-end anchor (`23:58 → 23:59`).
+  `accept_suggestion_repo` calls it after derive. Frontend `suggestionRow` mirrors both branches
+  via `subMinutesHHMM`; DEC-035 23:59 pre-fill test passes.
+- **B1–B6 (AI cost):** `add_column_if_absent` for cost columns; accept INSERT carries cost;
+  `SUM(CASE WHEN origin='ai_suggested')` returns NULL (not 0) when no AI cost; CSV header +
+  rows carry cost columns; `summaryCards` shows "—" for absent cost, no AI sub-line for
+  manual-only projects, mixed-currency → "—".
+- **C1–C4 (source/trackability):** `unmappedNotice` copy and Settings link; `.hint` badge for
+  untimed rows; `emptyState` names every cause; `sourceDisabledNotice()` surfaces above a
+  non-empty pending list when `sourceDisabled=true` (gap not covered by `sourceBanner`).
+- **D1–D2 (fixed 30-min gap):** `GAP_MINUTES = 30` in engine.rs — no settings, no IPC, no UI;
+  clustering boundary test still passes.
+- **SEC:** No auto-post (accept is sole writer); absence ≠ zero (NULL cost renders "—");
+  SEC-012 render test passes (no sk-, Bearer, Authorization, payload, prompt in HTML).
 
 ## Checks
 
-- Rust: not re-run this pass (no backend change); last green 165/165, fmt clean, pre-existing Clippy only.
-- Focused `suggestionsUi`: 18/18 (+2 disabled-source tests); my-domain `suggestionsUi`+`summaryCards`: 25/25; build green.
-- Full frontend (`LANGFUSE_*` unset): 105/105 (+2 new).
-- OpenSpec strict validation and `git diff --check`: pass.
+- Rust (`src-tauri/`): `cargo test --lib` → **165/0**; `cargo fmt --check` → clean;
+  `cargo clippy --lib --all-targets` → 3 pre-existing warnings only.
+- Frontend (`LANGFUSE_*` unset): `npm run test:frontend` → **105/0**; `npm run build` → green.
+- OpenSpec: `openspec validate task-034-suggestions-uat-polish` → valid.
+- `git diff --check HEAD` → clean.
 
-## Review artifact
+## LANGFUSE_* note
 
-`openspec/changes/task-034-suggestions-uat-polish/review.md`
+`tests/pi-observe.security.test.mjs` lines 50 and 82 fail when `LANGFUSE_*` env vars are set
+(pre-existing, unrelated to TASK-034). With vars unset: 105/0.
+
+## Exact next action
+
+Route to **SW-4 (Code Reviewer)** ∥ **SW-5 (Security Agent)** in parallel.
+
+## Artifacts
+
+- `openspec/changes/task-034-suggestions-uat-polish/qa.md` — scenario coverage matrix
+- `openspec/changes/task-034-suggestions-uat-polish/review.md` — SW-4 review artifact
