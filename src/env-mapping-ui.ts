@@ -94,5 +94,5 @@ export function mappingPanel(envs: DiscoveredEnvState[], projects: PickerProject
   const rows = envs.length
     ? envs.map((env) => mappingRow(env, projects)).join('')
     : '<tr><td colspan="3" class="empty">No environments discovered yet. Run an import from Langfuse to discover environments, then map each one to a Vire project.</td></tr>';
-  return `<section class="panel"><h2>Environment → project mapping</h2><p>Each discovered Langfuse environment can be mapped to a Vire project. Vire never creates a project automatically — use “Create project for …” to make one and map it in a single explicit action.</p><table class="env-map"><tr><th>Environment</th><th>Mapping</th><th></th></tr>${rows}</table></section>`;
+  return `<section class="panel"><h2>Environment → project mapping</h2><p>Each discovered Langfuse environment can be mapped to a Vire project. Vire never creates a project automatically — use “Create &amp; map” to make one and map it in a single explicit action.</p><table class="env-map"><tr><th>Environment</th><th>Mapping</th><th></th></tr>${rows}</table></section>`;
 }
