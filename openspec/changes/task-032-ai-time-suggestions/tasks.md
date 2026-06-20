@@ -33,22 +33,22 @@ Do the minimum; no capture, no import-behaviour change, no extra refactors. Chec
 
 ## Workstream C — Review/Accept UI  (frontend)
 
-- [ ] C1. Add `'Suggestions'` to `View`/`views` (`src/main.ts:12,21`); `renderSuggestions()` + bind;
+- [x] C1. Add `'Suggestions'` to `View`/`views` (`src/main.ts:12,21`); `renderSuggestions()` + bind;
   route in `render()`.
-- [ ] C2. List grouped by project → date; each row: duration (or "needs manual time"), span,
+- [x] C2. List grouped by project → date; each row: duration (or "needs manual time"), span,
   tokens/cost ("—" when unknown), trace/session counts, health, confidence, reason; Accept / Edit /
   Dismiss. Edit reveals inline date/start/end/note (reuse `forms.ts`); Accept submits `edits`.
-- [ ] C3. "Refresh suggestions" → regenerate=true. Unmapped notice links to Settings. Absence/empty
+- [x] C3. "Refresh suggestions" → regenerate=true. Unmapped notice links to Settings. Absence/empty
   states explain the cause (no evidence / nothing mapped / all dismissed). Reuse `sourceBanner()`.
-- [ ] C4. Secret-free render (SEC-012): names, project refs, time, aggregate numbers, counts, health
+- [x] C4. Secret-free render (SEC-012): names, project refs, time, aggregate numbers, counts, health
   only — no payload/session-id/prompt/metadata.
-- [ ] C5. Frontend tests per `design.md` §7-C. `npm run test:frontend` + `npm run build` green.
+- [x] C5. Frontend tests per `design.md` §7-C. `npm run test:frontend` + `npm run build` green.
 
 ## Cross-cutting verification (before SW-3 QA)
 
-- [ ] V1. Re-read all changed files; confirm the §5 guarantees checklist holds end to end.
-- [ ] V2. No new network egress (engine is SQLite-only); Langfuse untouched.
-- [ ] V3. Update `handoff.md` with phase, gate result, next action.
+- [x] V1. Re-read all changed files; confirm the §5 guarantees checklist holds end to end.
+- [x] V2. No new network egress (engine is SQLite-only); Langfuse untouched.
+- [x] V3. Update `handoff.md` with phase, gate result, next action.
 
 ## Manual acceptance (packaged/dev macOS app — human-only)
 
