@@ -109,6 +109,13 @@ test('panel explains the empty state instead of rendering blank', () => {
   assert.match(html, /Run an import/i);
 });
 
+test('panel help text names the live "Create & map" affordance, not the old "Create project for …" copy (TASK-031)', () => {
+  // Empty state renders the help <p> but no mapping rows, so this isolates the help copy from the button.
+  const html = mappingPanel([], projects);
+  assert.match(html, /Create &amp; map/);
+  assert.doesNotMatch(html, /Create project for/);
+});
+
 test('mapping surfaces never leak a secret-shaped token', () => {
   const html = mappingPanel([mappedEnv, unmappedEnv], projects);
   for (const needle of ['sk-', 'pk-', 'Bearer', 'Authorization']) {

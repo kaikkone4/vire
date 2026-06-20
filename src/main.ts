@@ -7,6 +7,7 @@ import { CUSTOM_RANGE_PRESET, DEFAULT_IMPORT_RANGE, IMPORT_RANGE_PRESETS, canoni
 import { titlebar } from './shell-chrome';
 import { type DiscoveredEnvState, envPickerCheckboxes, mappingPanel, mergeSelectedEnvironments } from './env-mapping-ui';
 import { type ImportMode, type ImportReport, renderImportReport } from './import-report';
+import { nextScrollTop } from './scroll';
 
 type View='Today'|'Projects'|'Manual Entry'|'Reports'|'Settings';
 type Project={id:string;name:string;notes?:string|null;archived:boolean};
@@ -22,6 +23,9 @@ const today=()=>localDateInputValue();
 let current:View='Today', projects:Project[]=[], allProjects:Project[]=[], entries:Entry[]=[], summaries:Summary[]=[];
 let editingProject:Project|null=null, editingEntry:Entry|null=null, lastError='', sourceHealth:SourceHealth|null=null, runtimeRecon:RuntimeReconciliation|null=null;
 let langfuseSettings:LangfuseSettings|null=null, testConnResult:TestConnectionResult|null=null, lastImportReport:ImportReport|null=null, lastImportMode:ImportMode='incremental', langfuseImportRange:string=DEFAULT_IMPORT_RANGE, discoveredEnvs:DiscoveredEnvState[]=[];
+// Last view shell() rendered. Used to keep the user's scroll position across same-view re-renders and
+// reset to the top on a view change (TASK-031). null = nothing rendered yet → first render starts at top.
+let lastRenderedView:View|null=null;
 const degradedHealth=['unavailable','stale','unknown','auth_or_network_error'];
 
 const app=document.querySelector<HTMLDivElement>('#app')!;
@@ -36,7 +40,7 @@ async function call<T>(cmd:string,args:any={}):Promise<T>{try{return await invok
 async function load(){projects=await call('list_projects',{includeArchived:false}); allProjects=await call('list_projects',{includeArchived:true}); try{sourceHealth=await call<SourceHealth>('get_langfuse_source_health');}catch{sourceHealth=null;}}
 function sourceBanner(){if(!sourceHealth||!degradedHealth.includes(sourceHealth.health))return ''; return `<section class="banner danger-banner"><b>AI evidence source: ${esc(sourceHealth.health)}</b><p>${esc(sourceHealth.message)}</p></section>`;}
 async function loadRange(start=today(),end=today(),pid?:string){entries=await call('list_time_entries',{startDate:start,endDate:end,projectId:pid||null}); summaries=await call('get_summary',{startDate:start,endDate:end,projectId:pid||null});}
-function shell(content:string){app.innerHTML=`<div class="window">${titlebar('Vire','v0.1 local')}<div class="shell"><aside><div class="brand"><div class="mark">V</div><div><strong>Vire</strong><small>Manual Mode</small></div></div><nav>${views.map(v=>`<button class="nav ${v===current?'active':''}" data-view="${esc(v)}">${esc(v)}</button>`).join('')}</nav><div class="status"><b>Manual Mode / Capture deferred</b><p>No automatic activity capture runs in v0.1.</p></div></aside><main>${content}</main></div></div>`;document.querySelectorAll<HTMLButtonElement>('.nav').forEach(b=>b.onclick=()=>{current=b.dataset.view as View;rerender();});}
+function shell(content:string){const prevScroll=app.querySelector('main')?.scrollTop??0;const sameView=lastRenderedView===current;app.innerHTML=`<div class="window">${titlebar('Vire','v0.1 local')}<div class="shell"><aside><div class="brand"><div class="mark">V</div><div><strong>Vire</strong><small>Manual Mode</small></div></div><nav>${views.map(v=>`<button class="nav ${v===current?'active':''}" data-view="${esc(v)}">${esc(v)}</button>`).join('')}</nav><div class="status"><b>Manual Mode / Capture deferred</b><p>No automatic activity capture runs in v0.1.</p></div></aside><main>${content}</main></div></div>`;const m=app.querySelector('main');if(m)m.scrollTop=nextScrollTop(sameView,prevScroll);lastRenderedView=current;document.querySelectorAll<HTMLButtonElement>('.nav').forEach(b=>b.onclick=()=>{current=b.dataset.view as View;rerender();});}
 function capture(){return `<section class="banner"><b>Manual Mode / Capture deferred</b><p>Automatic active-window, idle, screenshot, keystroke, browser, terminal, URL, and screen capture are not implemented. Add time manually; data stays local.</p></section>`}
 function projectOptions(sel=''){const opts=[...projects];const selected=allProjects.find(p=>p.id===sel);if(selected&&!opts.some(p=>p.id===selected.id))opts.push(selected);return opts.map(p=>`<option value="${esc(p.id)}" ${p.id===sel?'selected':''}>${esc(p.name)}${p.archived?' (archived)':''}</option>`).join('')}
 async function render(){try{await load(); lastError=''; if(current==='Today')return await renderToday(); if(current==='Projects')return renderProjects(); if(current==='Manual Entry')return await renderManual(); if(current==='Reports')return await renderReports(); return await renderSettings();}catch(e){setError(e); shell(`${errorBanner()}<header><h1>${esc(current)}</h1><p>Vire could not load this view. Check the message above and try again.</p></header>`);}}
