@@ -42,6 +42,20 @@ pub fn generate(conn: &Connection) -> rusqlite::Result<SuggestionList> {
     })
 }
 
+/// Read the current `pending` suggestions together with a freshly-computed unmapped-env summary
+/// **without** regenerating — no `pending` row is deleted or inserted, no `time_entries` row is written.
+/// Backs the non-`regenerate` list path (Workstream B) so the "map this env" notice still shows when the
+/// user only opens the view and has not asked to refresh.
+pub fn current(conn: &Connection) -> rusqlite::Result<SuggestionList> {
+    let rows = store::load_evidence(conn)?;
+    let unmapped = unmapped_summary(&rows);
+    let suggestions = store::list_pending(conn)?;
+    Ok(SuggestionList {
+        suggestions,
+        unmapped,
+    })
+}
+
 /// A computed block before it is given an id/timestamps and persisted. Holds only secret-free
 /// aggregates. `block_start_ts`/`duration_minutes` are `None` for an untimed ("needs manual time")
 /// block — never a 0-minute span (absence ≠ zero).
@@ -116,12 +130,12 @@ struct Bucket<'a> {
 /// and surfaced as "needs manual time" — its duration stays `NULL`, never invented.
 fn cluster(rows: &[EvidenceRow]) -> (Vec<ComputedBlock>, Vec<UnmappedEnv>) {
     let fallback_date = local_date(&now_local());
-    let mut unmapped_counts: BTreeMap<String, i64> = BTreeMap::new();
     let mut buckets: BTreeMap<(String, String), Bucket<'_>> = BTreeMap::new();
 
     for row in rows {
         let Some(project_id) = row.project_id.clone() else {
-            *unmapped_counts.entry(row.environment.clone()).or_insert(0) += 1;
+            // Unmapped evidence is tallied by `unmapped_summary` and reported separately — never
+            // folded into a block (absence ≠ zero).
             continue;
         };
         let project_name = row.project_name.clone().unwrap_or_default();
@@ -164,14 +178,26 @@ fn cluster(rows: &[EvidenceRow]) -> (Vec<ComputedBlock>, Vec<UnmappedEnv>) {
         }
     }
 
-    let unmapped = unmapped_counts
+    (blocks, unmapped_summary(rows))
+}
+
+/// Per-environment count of evidence in **unmapped** environments — surfaced so the UI can prompt the
+/// user to map it (absence ≠ zero: never dropped, never zeroed). Kept independent of bucketing so the
+/// non-regenerate list path (`current`) can compute it without recomputing any block.
+fn unmapped_summary(rows: &[EvidenceRow]) -> Vec<UnmappedEnv> {
+    let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+    for row in rows {
+        if row.project_id.is_none() {
+            *counts.entry(row.environment.clone()).or_insert(0) += 1;
+        }
+    }
+    counts
         .into_iter()
         .map(|(environment, trace_count)| UnmappedEnv {
             environment,
             trace_count,
         })
-        .collect();
-    (blocks, unmapped)
+        .collect()
 }
 
 /// Cluster start-sorted timed rows into contiguous blocks: a new block opens when the next row starts

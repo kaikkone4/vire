@@ -28,9 +28,9 @@ pub mod store;
 #[cfg(test)]
 mod tests;
 
-pub use engine::generate;
+pub use engine::{current, generate};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One persisted, renderer-facing suggestion. Carries only secret-free fields (SEC-012): a project
 /// reference, local times, aggregate numbers, counts, and health/confidence labels. `Option` fields
@@ -72,4 +72,17 @@ pub struct UnmappedEnv {
 pub struct SuggestionList {
     pub suggestions: Vec<Suggestion>,
     pub unmapped: Vec<UnmappedEnv>,
+}
+
+/// Optional edits supplied on accept (Workstream B). Each field overrides the corresponding suggestion
+/// value before the time entry is committed. For an untimed ("needs manual time") suggestion the
+/// `start_time`/`end_time` overrides are *required* — accept never invents a duration (absence ≠ zero).
+/// Validated by the same rules as a manual entry (`parse_duration`, length caps); carries no secret.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SuggestionEdit {
+    pub project_id: Option<String>,
+    pub date: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub note: Option<String>,
 }

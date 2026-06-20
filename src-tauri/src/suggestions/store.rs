@@ -4,7 +4,7 @@
 //! credential. Evidence is associated to its project at read time via a LEFT JOIN (DEC-001), so no
 //! evidence row is ever rewritten.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::Suggestion;
 
@@ -166,6 +166,24 @@ pub fn list_pending(conn: &Connection) -> rusqlite::Result<Vec<Suggestion>> {
         .query_map([], row_to_suggestion)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// Read a single suggestion by id regardless of status (Workstream B accept/dismiss read the current
+/// `status`/`accepted_entry_id` to enforce the decided-once rule). Returns `None` when no such row
+/// exists. Joined to the project name for a consistent [`Suggestion`] shape.
+pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<Suggestion>> {
+    conn.query_row(
+        "SELECT s.id, s.project_id, p.name, s.date, s.block_start_ts, s.block_end_ts,
+                s.duration_minutes, s.trace_count, s.session_count, s.total_tokens,
+                s.cost_total, s.cost_currency, s.health, s.confidence, s.source, s.reason,
+                s.status, s.accepted_entry_id, s.created_at, s.updated_at
+           FROM time_entry_suggestions s
+           JOIN projects p ON p.id = s.project_id
+          WHERE s.id = ?1",
+        params![id],
+        row_to_suggestion,
+    )
+    .optional()
 }
 
 fn row_to_suggestion(r: &rusqlite::Row<'_>) -> rusqlite::Result<Suggestion> {

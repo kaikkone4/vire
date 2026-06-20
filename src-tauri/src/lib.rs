@@ -53,6 +53,9 @@ pub struct TimeEntry {
     pub end_time: String,
     pub duration_minutes: i64,
     pub note: Option<String>,
+    /// Provenance tag (DEC-003): `'manual'` for hand-entered time, `'ai_suggested'` for an accepted
+    /// suggestion. Manual entries never expose it on input; it defaults to `'manual'` at the DB layer.
+    pub origin: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -73,7 +76,12 @@ pub struct TimeEntryInput {
 pub struct SummaryRow {
     pub project_id: String,
     pub project_name: String,
+    /// Human-entered time only (origin='manual'). Meaning is unchanged from before TASK-032 so prior
+    /// numbers never silently shift: AI-suggested time is reported separately in `ai_minutes` (DEC-003).
     pub duration_minutes: i64,
+    /// Accepted AI-suggested time (origin='ai_suggested'), kept distinct so it is never tallied into the
+    /// billable human total.
+    pub ai_minutes: i64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureStatus {
@@ -106,6 +114,15 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         INSERT OR IGNORE INTO settings(key, value) VALUES ('capture_status', 'manual_mode_deferred');
         CREATE INDEX IF NOT EXISTS idx_entries_date_project ON time_entries(date, project_id);")?;
+    // Additive provenance tag (TASK-032 B1, DEC-003). Idempotent via the shared duplicate-column-tolerant
+    // helper; existing rows backfill to 'manual' so prior human totals are unchanged. Accepted AI
+    // suggestions are the only writer of 'ai_suggested'.
+    langfuse::store::add_column_if_absent(
+        conn,
+        "time_entries",
+        "origin",
+        "TEXT NOT NULL DEFAULT 'manual'",
+    )?;
     langfuse::store::migrate(conn)?;
     // Additive env→project map; created after `projects` exists so its FK resolves (TASK-027 D1).
     env_mapping::migrate(conn)?;
@@ -275,7 +292,7 @@ pub fn create_entry_repo(conn: &Connection, input: TimeEntryInput) -> Result<Tim
     get_entry(conn, &id)
 }
 fn get_entry(conn: &Connection, id: &str) -> Result<TimeEntry, String> {
-    conn.query_row("SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.id=?1", params![id], row_to_entry).map_err(|e| e.to_string())
+    conn.query_row("SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.origin,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.id=?1", params![id], row_to_entry).map_err(|e| e.to_string())
 }
 fn row_to_entry(r: &rusqlite::Row) -> rusqlite::Result<TimeEntry> {
     Ok(TimeEntry {
@@ -287,8 +304,9 @@ fn row_to_entry(r: &rusqlite::Row) -> rusqlite::Result<TimeEntry> {
         end_time: r.get(5)?,
         duration_minutes: r.get(6)?,
         note: r.get(7)?,
-        created_at: r.get(8)?,
-        updated_at: r.get(9)?,
+        origin: r.get(8)?,
+        created_at: r.get(9)?,
+        updated_at: r.get(10)?,
     })
 }
 pub fn update_entry_repo(
@@ -325,7 +343,7 @@ pub fn list_entries_repo(
     project_id: Option<String>,
 ) -> Result<Vec<TimeEntry>, String> {
     validate_date_range(&start, &end)?;
-    let mut sql = "SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2".to_string();
+    let mut sql = "SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.origin,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2".to_string();
     if project_id.is_some() {
         sql.push_str(" AND e.project_id=?3");
     }
@@ -349,7 +367,14 @@ pub fn summary_repo(
     project_id: Option<String>,
 ) -> Result<Vec<SummaryRow>, String> {
     validate_date_range(&start, &end)?;
-    let mut sql = "SELECT p.id,p.name,COALESCE(SUM(e.duration_minutes),0) FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2".to_string();
+    // DEC-003: human ('manual') and AI ('ai_suggested') minutes are summed into separate columns so AI
+    // time is never tallied into the billable human total. Anything not explicitly 'ai_suggested' counts
+    // as human (conservative — a legacy/unknown origin can never silently land in the AI column).
+    let mut sql = "SELECT p.id,p.name,\
+        COALESCE(SUM(CASE WHEN e.origin='ai_suggested' THEN 0 ELSE e.duration_minutes END),0),\
+        COALESCE(SUM(CASE WHEN e.origin='ai_suggested' THEN e.duration_minutes ELSE 0 END),0) \
+        FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2"
+        .to_string();
     if project_id.is_some() {
         sql.push_str(" AND e.project_id=?3");
     }
@@ -360,6 +385,7 @@ pub fn summary_repo(
             project_id: r.get(0)?,
             project_name: r.get(1)?,
             duration_minutes: r.get(2)?,
+            ai_minutes: r.get(3)?,
         })
     };
     let rows: Result<Vec<_>, _> = if let Some(pid) = project_id {
@@ -400,23 +426,161 @@ pub fn export_csv_repo(
     path: &Path,
 ) -> Result<usize, String> {
     let entries = list_entries_repo(conn, start, end, project_id)?;
+    // DEC-003: each row carries its `origin` so a consumer can separate AI-suggested time from billable
+    // human time; AI minutes are never folded into the human column.
     let mut out = String::from(
-        "date,project,start_time,end_time,duration_minutes,note,total_duration_hours\n",
+        "date,project,start_time,end_time,duration_minutes,note,origin,total_duration_hours\n",
     );
     for e in &entries {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{:.2}\n",
+            "{},{},{},{},{},{},{},{:.2}\n",
             e.date,
             csv_escape(&e.project_name),
             e.start_time,
             e.end_time,
             e.duration_minutes,
             csv_escape(e.note.as_deref().unwrap_or("")),
+            csv_escape(&e.origin),
             e.duration_minutes as f64 / 60.0
         ));
     }
     fs::write(path, out).map_err(|e| e.to_string())?;
     Ok(entries.len())
+}
+
+// ----- TASK-032 B: accept / dismiss a suggestion (the only writer of an `ai_suggested` entry) ------
+
+/// Extract a `HH:MM` clock time from a suggestion's local `block_start_ts`/`block_end_ts`
+/// (`'YYYY-MM-DD HH:MM:SS'`). `None` when the field is absent or malformed, so an untimed block falls
+/// through to the "edits required" path rather than fabricating a time.
+fn hhmm_from_block_ts(ts: &str) -> Option<String> {
+    let time = ts.split(' ').nth(1)?;
+    time.get(..5).map(str::to_string)
+}
+
+/// Resolve the note for an accepted suggestion. An explicit edit note (validated, same caps as a manual
+/// entry) wins; otherwise a secret-free provenance summary is recorded so the entry's AI origin is
+/// self-describing. `source`/`reason` are already secret-free (SEC-012); the default is capped
+/// defensively in case `reason` ever grows.
+fn resolve_ai_note(
+    suggestion: &suggestions::Suggestion,
+    edit_note: Option<String>,
+) -> Result<Option<String>, String> {
+    if let Some(note) = clean_opt(edit_note) {
+        validate_len(&note, MAX_ENTRY_NOTE_LEN, "Entry note")?;
+        return Ok(Some(note));
+    }
+    let provenance = format!(
+        "AI-suggested ({}): {}",
+        suggestion.source, suggestion.reason
+    );
+    Ok(Some(provenance.chars().take(MAX_ENTRY_NOTE_LEN).collect()))
+}
+
+/// Accept a suggestion: create the **one** `origin='ai_suggested'` time entry it implies and mark the
+/// suggestion `accepted` with its `accepted_entry_id`, atomically (single transaction). An untimed
+/// ("needs manual time") suggestion REQUIRES `edits` supplying start/end — accept never invents a
+/// duration (absence ≠ zero). Re-deciding an already accepted/dismissed suggestion is rejected. This is
+/// the sole writer of an `ai_suggested` entry (DEC-006: generation never posts; only accept does).
+pub fn accept_suggestion_repo(
+    conn: &mut Connection,
+    id: String,
+    edits: Option<suggestions::SuggestionEdit>,
+) -> Result<TimeEntry, String> {
+    let edits = edits.unwrap_or_default();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    let suggestion = suggestions::store::get_by_id(&tx, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Suggestion not found".to_string())?;
+    match suggestion.status.as_str() {
+        "pending" => {}
+        "accepted" => return Err("This suggestion has already been accepted".into()),
+        "dismissed" => {
+            return Err("This suggestion has been dismissed and cannot be accepted".into())
+        }
+        _ => return Err("This suggestion cannot be accepted".into()),
+    }
+
+    let project_id = edits
+        .project_id
+        .clone()
+        .unwrap_or_else(|| suggestion.project_id.clone());
+    let date = edits
+        .date
+        .clone()
+        .unwrap_or_else(|| suggestion.date.clone());
+    let start_time = edits.start_time.clone().or_else(|| {
+        suggestion
+            .block_start_ts
+            .as_deref()
+            .and_then(hhmm_from_block_ts)
+    });
+    let end_time = edits.end_time.clone().or_else(|| {
+        suggestion
+            .block_end_ts
+            .as_deref()
+            .and_then(hhmm_from_block_ts)
+    });
+    let (Some(start_time), Some(end_time)) = (start_time, end_time) else {
+        return Err(
+            "This suggestion has no usable time — add a start and end time before accepting".into(),
+        );
+    };
+
+    validate_date(&date)?;
+    let duration = parse_duration(&date, &start_time, &end_time)?;
+    if !project_exists_active(&tx, &project_id)? {
+        return Err("Accepted suggestions must reference an active project".into());
+    }
+    let note = resolve_ai_note(&suggestion, edits.note)?;
+
+    let entry_id = Uuid::new_v4().to_string();
+    let ts = now();
+    tx.execute(
+        "INSERT INTO time_entries(id,project_id,date,start_time,end_time,duration_minutes,note,origin,created_at,updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,'ai_suggested',?8,?8)",
+        params![entry_id, project_id, date, start_time, end_time, duration, note, ts],
+    )
+    .map_err(|e| e.to_string())?;
+    // Guarded UPDATE: the `status='pending'` predicate closes the door on a concurrent decision between
+    // the read above and here. If it matched no row, the suggestion was decided meanwhile — roll back.
+    let marked = tx
+        .execute(
+            "UPDATE time_entry_suggestions SET status='accepted', accepted_entry_id=?1, updated_at=?2
+             WHERE id=?3 AND status='pending'",
+            params![entry_id, ts, id],
+        )
+        .map_err(|e| e.to_string())?;
+    if marked != 1 {
+        return Err("This suggestion was already decided".into());
+    }
+    let entry = get_entry(&tx, &entry_id)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(entry)
+}
+
+/// Dismiss a suggestion: mark it `dismissed` and write **no** time entry. Idempotent — dismissing an
+/// already-dismissed suggestion is a no-op success. An already-accepted suggestion cannot be dismissed
+/// (its time entry exists), so that is rejected.
+pub fn dismiss_suggestion_repo(conn: &Connection, id: String) -> Result<(), String> {
+    let suggestion = suggestions::store::get_by_id(conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Suggestion not found".to_string())?;
+    match suggestion.status.as_str() {
+        "pending" => {
+            conn.execute(
+                "UPDATE time_entry_suggestions SET status='dismissed', updated_at=?1
+                 WHERE id=?2 AND status='pending'",
+                params![now(), id],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        "dismissed" => Ok(()),
+        "accepted" => Err("An accepted suggestion cannot be dismissed".into()),
+        _ => Err("This suggestion cannot be dismissed".into()),
+    }
 }
 
 #[tauri::command]
@@ -517,6 +681,40 @@ async fn export_report_csv(
     // Lock the DB only after the dialog resolves — never hold the MutexGuard across the `.await` above.
     let db = db_conn(&state)?;
     export_csv_repo(&db, start_date, end_date, project_id, &path).map(Some)
+}
+
+/// List AI time-entry suggestions (TASK-032 B). `regenerate=true` recomputes the pending set from the
+/// latest evidence (preserving decided rows); `false` returns the stored pending set. Both also return
+/// the unmapped-environment summary so the UI can prompt mapping. Reads SQLite only — no egress.
+#[tauri::command]
+fn list_time_entry_suggestions(
+    state: State<AppState>,
+    regenerate: bool,
+) -> CmdResult<suggestions::SuggestionList> {
+    let db = db_conn(&state)?;
+    if regenerate {
+        suggestions::generate(&db).map_err(|e| e.to_string())
+    } else {
+        suggestions::current(&db).map_err(|e| e.to_string())
+    }
+}
+
+/// Accept a suggestion, creating the single `ai_suggested` time entry it implies (TASK-032 B3).
+#[tauri::command]
+fn accept_time_entry_suggestion(
+    state: State<AppState>,
+    id: String,
+    edits: Option<suggestions::SuggestionEdit>,
+) -> CmdResult<TimeEntry> {
+    let mut db = db_conn(&state)?;
+    accept_suggestion_repo(&mut db, id, edits)
+}
+
+/// Dismiss a suggestion; writes no time entry (TASK-032 B3).
+#[tauri::command]
+fn dismiss_time_entry_suggestion(state: State<AppState>, id: String) -> CmdResult<()> {
+    let db = db_conn(&state)?;
+    dismiss_suggestion_repo(&db, id)
 }
 
 #[tauri::command]
@@ -921,7 +1119,10 @@ pub fn run() {
             list_env_mappings,
             set_env_mapping,
             clear_env_mapping,
-            list_evidence_projects
+            list_evidence_projects,
+            list_time_entry_suggestions,
+            accept_time_entry_suggestion,
+            dismiss_time_entry_suggestion
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vire");
@@ -1417,5 +1618,236 @@ mod tests {
         assert_eq!(AUTO_IMPORT_INTERVAL_SECS, 900);
         assert!(AUTO_IMPORT_MIN_INTERVAL_SECS <= AUTO_IMPORT_INTERVAL_SECS);
         assert!(auto_import_interval() >= Duration::from_secs(AUTO_IMPORT_MIN_INTERVAL_SECS));
+    }
+
+    // ----- TASK-032 B: accept / dismiss IPC + AI-origin entry + reporting separation -----------
+    // The engine→table path is covered by `suggestions/tests.rs`; these exercise the Workstream-B
+    // surface directly by seeding a `time_entry_suggestions` row, so they stay deterministic and
+    // independent of the importer.
+
+    /// Insert one pending suggestion row. `start_ts`/`end_ts` are local `'YYYY-MM-DD HH:MM:SS'` (or
+    /// `None` for an untimed "needs manual time" block); `duration` mirrors what the engine would store.
+    fn seed_suggestion(
+        c: &Connection,
+        id: &str,
+        project_id: &str,
+        date: &str,
+        start_ts: Option<&str>,
+        end_ts: Option<&str>,
+        duration: Option<i64>,
+    ) {
+        c.execute(
+            "INSERT INTO time_entry_suggestions
+                (id,project_id,date,block_start_ts,block_end_ts,duration_minutes,trace_count,
+                 session_count,total_tokens,cost_total,cost_currency,health,confidence,source,reason,
+                 status,accepted_entry_id,created_at,updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,2,1,100,1.5,'USD','healthy','high','langfuse:veronavi',
+                     '2 Langfuse traces, 1 session in env `veronavi`','pending',NULL,?7,?7)",
+            params![id, project_id, date, start_ts, end_ts, duration, now()],
+        )
+        .unwrap();
+    }
+
+    fn seeded_project(c: &Connection) -> String {
+        create_project_repo(
+            c,
+            ProjectInput {
+                name: "Vero".into(),
+                notes: None,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn accept_creates_exactly_one_ai_entry_marks_accepted_and_is_decided_once() {
+        let mut c = conn();
+        let pid = seeded_project(&c);
+        seed_suggestion(
+            &c,
+            "s1",
+            &pid,
+            "2026-04-01",
+            Some("2026-04-01 09:00:00"),
+            Some("2026-04-01 10:00:00"),
+            Some(60),
+        );
+
+        let entry = accept_suggestion_repo(&mut c, "s1".into(), None).unwrap();
+        assert_eq!(entry.duration_minutes, 60);
+        assert_eq!(entry.start_time, "09:00");
+        assert_eq!(entry.end_time, "10:00");
+        assert_eq!(entry.origin, "ai_suggested");
+        // The provenance note is recorded and secret-free.
+        assert!(entry.note.as_deref().unwrap().contains("AI-suggested"));
+
+        // Exactly one ai_suggested entry exists.
+        let ai: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM time_entries WHERE origin='ai_suggested'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ai, 1);
+
+        // The suggestion is marked accepted and linked to the entry.
+        let (status, eid): (String, Option<String>) = c
+            .query_row(
+                "SELECT status, accepted_entry_id FROM time_entry_suggestions WHERE id='s1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "accepted");
+        assert_eq!(eid.as_deref(), Some(entry.id.as_str()));
+
+        // Re-deciding an accepted suggestion is rejected, and no second entry is written.
+        assert!(accept_suggestion_repo(&mut c, "s1".into(), None).is_err());
+        assert!(dismiss_suggestion_repo(&c, "s1".into()).is_err());
+        let total: i64 = c
+            .query_row("SELECT COUNT(*) FROM time_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn accept_of_untimed_block_requires_edits_and_never_invents_a_duration() {
+        let mut c = conn();
+        let pid = seeded_project(&c);
+        seed_suggestion(&c, "s2", &pid, "2026-04-02", None, None, None);
+
+        // Without edits supplying a time, accept errors and writes nothing (absence ≠ zero).
+        let err = accept_suggestion_repo(&mut c, "s2".into(), None).unwrap_err();
+        assert!(err.contains("start and end time"));
+        let written: i64 = c
+            .query_row("SELECT COUNT(*) FROM time_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(written, 0);
+        // The suggestion is still pending — a failed accept did not decide it.
+        let status: String = c
+            .query_row(
+                "SELECT status FROM time_entry_suggestions WHERE id='s2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+
+        // Supplying start/end edits lets it be accepted with the user-provided span.
+        let edits = suggestions::SuggestionEdit {
+            start_time: Some("13:00".into()),
+            end_time: Some("14:30".into()),
+            ..Default::default()
+        };
+        let entry = accept_suggestion_repo(&mut c, "s2".into(), Some(edits)).unwrap();
+        assert_eq!(entry.duration_minutes, 90);
+        assert_eq!(entry.origin, "ai_suggested");
+    }
+
+    #[test]
+    fn dismiss_writes_no_entry_is_idempotent_and_cannot_undo_an_accept() {
+        let mut c = conn();
+        let pid = seeded_project(&c);
+        seed_suggestion(
+            &c,
+            "s3",
+            &pid,
+            "2026-04-03",
+            Some("2026-04-03 09:00:00"),
+            Some("2026-04-03 10:00:00"),
+            Some(60),
+        );
+
+        dismiss_suggestion_repo(&c, "s3".into()).unwrap();
+        let written: i64 = c
+            .query_row("SELECT COUNT(*) FROM time_entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(written, 0, "dismiss writes no time entry");
+        let status: String = c
+            .query_row(
+                "SELECT status FROM time_entry_suggestions WHERE id='s3'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "dismissed");
+
+        // Dismiss is idempotent; a dismissed suggestion can no longer be accepted.
+        assert!(dismiss_suggestion_repo(&c, "s3".into()).is_ok());
+        assert!(accept_suggestion_repo(&mut c, "s3".into(), None).is_err());
+
+        // An accepted suggestion cannot be dismissed.
+        seed_suggestion(
+            &c,
+            "s4",
+            &pid,
+            "2026-04-04",
+            Some("2026-04-04 09:00:00"),
+            Some("2026-04-04 10:00:00"),
+            Some(60),
+        );
+        accept_suggestion_repo(&mut c, "s4".into(), None).unwrap();
+        assert!(dismiss_suggestion_repo(&c, "s4".into())
+            .unwrap_err()
+            .contains("accepted"));
+    }
+
+    #[test]
+    fn summary_and_csv_report_human_and_ai_time_separately() {
+        let mut c = conn();
+        let pid = seeded_project(&c);
+        // 60 min of human time + 30 min of accepted AI time, same project and day.
+        create_entry_repo(
+            &c,
+            TimeEntryInput {
+                project_id: pid.clone(),
+                date: "2026-05-01".into(),
+                start_time: "09:00".into(),
+                end_time: "10:00".into(),
+                note: None,
+            },
+        )
+        .unwrap();
+        seed_suggestion(
+            &c,
+            "s5",
+            &pid,
+            "2026-05-01",
+            Some("2026-05-01 11:00:00"),
+            Some("2026-05-01 11:30:00"),
+            Some(30),
+        );
+        accept_suggestion_repo(&mut c, "s5".into(), None).unwrap();
+
+        // DEC-003: human total is unchanged in meaning; AI time is a distinct figure.
+        let s = summary_repo(
+            &c,
+            "2026-05-01".into(),
+            "2026-05-01".into(),
+            Some(pid.clone()),
+        )
+        .unwrap();
+        assert_eq!(s[0].duration_minutes, 60, "human minutes (manual only)");
+        assert_eq!(s[0].ai_minutes, 30, "AI minutes reported separately");
+
+        // CSV labels each row's origin so AI time is never folded into the human column.
+        let f = NamedTempFile::new().unwrap();
+        export_csv_repo(
+            &c,
+            "2026-05-01".into(),
+            "2026-05-01".into(),
+            Some(pid),
+            f.path(),
+        )
+        .unwrap();
+        let csv = std::fs::read_to_string(f.path()).unwrap();
+        assert!(
+            csv.lines().next().unwrap().contains("origin"),
+            "header has origin"
+        );
+        assert!(csv.contains(",manual,"), "manual row labeled");
+        assert!(csv.contains(",ai_suggested,"), "ai row labeled");
     }
 }

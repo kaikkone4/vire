@@ -19,17 +19,17 @@ Do the minimum; no capture, no import-behaviour change, no extra refactors. Chec
 
 ## Workstream B — Accept / dismiss IPC + AI-origin entry + reporting separation  (backend)
 
-- [ ] B1. `add_column_if_absent(conn, "time_entries", "origin", "TEXT NOT NULL DEFAULT 'manual'")` in
+- [x] B1. `add_column_if_absent(conn, "time_entries", "origin", "TEXT NOT NULL DEFAULT 'manual'")` in
   `init_db`; add `origin` to `TimeEntry` (manual path defaults `'manual'`).
-- [ ] B2. IPC `list_time_entry_suggestions(regenerate)`, `accept_time_entry_suggestion(id, edits?)`,
+- [x] B2. IPC `list_time_entry_suggestions(regenerate)`, `accept_time_entry_suggestion(id, edits?)`,
   `dismiss_time_entry_suggestion(id)` (`design.md` §3); register in `generate_handler!`.
-- [ ] B3. Accept = only writer of an `origin='ai_suggested'` `time_entries` row (+ secret-free
+- [x] B3. Accept = only writer of an `origin='ai_suggested'` `time_entries` row (+ secret-free
   provenance note), single transaction, marks suggestion `accepted` w/ `accepted_entry_id`.
   Unknown-duration block without start/end edits → error (never invent a duration). Dismiss writes
   nothing. Re-deciding a decided suggestion → rejected.
-- [ ] B4. DEC-003 reporting: `get_summary` + `export_report_csv` separate `'manual'` vs `'ai_suggested'`
+- [x] B4. DEC-003 reporting: `get_summary` + `export_report_csv` separate `'manual'` vs `'ai_suggested'`
   totals (human-minutes unchanged in meaning; AI-minutes a distinct figure/column). No silent conflation.
-- [ ] B5. Tests per `design.md` §7-B. `cargo test` + `fmt`/`clippy` clean.
+- [x] B5. Tests per `design.md` §7-B. `cargo test` + `fmt`/`clippy` clean.
 
 ## Workstream C — Review/Accept UI  (frontend)
 
