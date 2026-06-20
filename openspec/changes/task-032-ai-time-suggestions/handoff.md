@@ -3,36 +3,30 @@
 # Handoff — TASK-032 AI time-entry suggestions
 
 - **Change dir**: openspec/changes/task-032-ai-time-suggestions/
-- **Branch / PR**: `feat/task-032-ai-time-suggestions` · PR #27 (draft)
-- **Phase / gate**: SW-3 QA recheck PASS (2026-06-20) — route to SW-4 + SW-5.
+- **Branch / PR**: `feat/task-032-ai-time-suggestions` · PR #27 (ready-for-review)
+- **Phase / gate**: SW-6 Release (PASS, 2026-06-20)
 - **Tier**: L2
 
 ## Last gate result
-**SW-3 QA PASS (recheck, 2026-06-20)** on HEAD `dc60924`. Full A+B+C re-run:
-- Rust `--lib` 159/159 PASS; suggestions 13/13 (+1 new failure-path test).
-- `cargo clippy --all-targets` → 0 warnings in suggestions/; langfuse pre-existing unchanged.
-- `cargo fmt --check` PASS. `git diff --check` clean.
-- Suggestions builder 10/10 PASS. `npm run build` PASS.
-- B1 atomic rollback verified: `failed_regeneration_preserves_the_original_pending_set` passes.
-- B2 dead-code clean: no `allow(dead_code)` in suggestions/; `EvidenceRow.trace_id` field gone.
-- All cross-cutting guarantees (absence≠zero, no-auto-post, AI≠human, secret-free, no egress) confirmed.
-- Details: `fix-sw4-loop1.md`; scenario matrix + recheck section: `qa-032.md`.
+SW-6 PASS, 2026-06-20. RELEASE.md written (task + root). PR #27 promoted draft→ready.
+Tag `task-032/v0.4.0` dry-run only — SSH private key absent (same constraint as prior releases).
 
 ## Active blockers
-- None.
+- SSH signing key absent: Janne must run `git tag -s task-032/v0.4.0 ...` + push tag (see RELEASE.md §Tag signing).
+- Manual macOS UAT M1–M4 outstanding (human-only, packaged `.app`).
 
 ## Exact next action
-**SW-4 Code Review + SW-5 Security Agent** (parallel). Both receive HEAD `dc60924`.
+Janne: (1) create signed tag on commit `fd5cf12`, push tag; (2) merge PR #27; (3) run UAT M1–M4 on packaged app.
+Optionally: route to sw-documentation-engineer (L2 doc update trigger).
 
 ## Required files (read these, not the whole tree)
-- fix-sw4-loop1.md — what changed + checks; review.md — original SW-4 blockers; sw2-*-notes.md — impl
+- `RELEASE.md` — SW-6 output; three required declarations + tag dry-run + gate checklist
+- `sec.md` — SW-5 PASS + advisories (A1 vite, A2 GTK-RUSTSEC, A3 cross-midnight test)
+- `review.md` — SW-4 PASS
 
 ## Notes carried forward
-- C: `'Suggestions'` view in `src/main.ts` + pure builders `src/suggestions-ui.ts`;
-  consumes `list/accept/dismiss_time_entry_suggestion`; grouped list, Accept/Edit/Dismiss,
-  Refresh→regenerate, unmapped→Settings notice, absence/empty copy. `Summary.ai_minutes` + `summaryCards()`
-  show AI-vs-human separately in Today/Reports (DEC-003). No new CSS / no backend change. See `sw2-c-notes.md`.
-- A+B: `time_entries.origin`/`TimeEntry.origin`/`SummaryRow.ai_minutes`; 3 IPC cmds + accept/dismiss
-  repos; `suggestions::current`, `SuggestionEdit`. See `sw2-b-notes.md`.
-- Guarantees A+B+C: absence≠zero (DEC-004), no auto-post (DEC-006 — accept is the only writer), AI≠human
-  (DEC-003), secret-free (SEC-012), no egress (DEC-001/017).
+- v0.4.0: minor bump (new feature set A+B+C); base v0.3.2.
+- Two additive schema changes: `time_entry_suggestions` table + `time_entries.origin` column.
+- Zero dep delta vs `main` (Cargo.toml + package.json unchanged).
+- Pre-existing advisories: vite CVSS 8.2 dev-only → separate dep-bump task; GTK RUSTSEC → Tauri version bump task.
+- Non-blocking: cross-midnight policy test (review.md §Suggestions).
