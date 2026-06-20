@@ -3,7 +3,7 @@
 # Handoff — TASK-032 AI time-entry suggestions
 
 - **Change dir**: openspec/changes/task-032-ai-time-suggestions/
-- **Branch / PR**: `feat/task-032-ai-time-suggestions` · PR #<n> (draft)
+- **Branch / PR**: `feat/task-032-ai-time-suggestions` · PR #27 (draft)
 - **Phase / gate**: SW-2 Workstream A — **DONE** (A-checkpoint passed). B/C not started.
 - **Tier**: L2 (new capability; additive schema; backend + frontend; no egress)
 
