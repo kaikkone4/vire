@@ -1,5 +1,44 @@
 # Vire — Release Notes
 
+## v0.5.0 — Reports quick-range presets (TASK-033)
+
+**Branch:** `feat/task-033-reports-quick-ranges`
+**PR:** #28
+
+### What changed
+
+Added **four quick-range preset buttons** to the Reports view — Last 7 days, Last 14 days,
+Last 30 days, Last 90 days. Clicking a preset populates the start/end date inputs and
+re-renders the report immediately, including honouring the active project filter for CSV export.
+
+The date ranges are computed in local calendar time (no UTC conversion) and are correct across
+DST boundaries and the date line. No backend, IPC, schema, or dependency change.
+
+### Compatibility and rollback
+
+Fully compatible with v0.4.0 (no DB migration, no IPC change). Rollback: reinstall the v0.4.0
+`.app` — no cleanup step. See [openspec/changes/task-033-reports-quick-ranges/RELEASE.md](openspec/changes/task-033-reports-quick-ranges/RELEASE.md)
+for the full rollback table and component compatibility matrix.
+
+### Tests
+
+**Frontend** (`npm run test:frontend`): **88 passed / 2 pre-existing failures (unrelated)**
+(new tests: `tests/reportRanges.test.mjs` — 5/5 across `America/Los_Angeles` and
+`Pacific/Kiritimati`; the 2 failures are in `tests/pi-observe.security.test.mjs`,
+unrelated and present on `main`)
+
+### Manual smoke steps before shipping
+
+- M1 — Open Reports view; confirm four preset buttons appear above the date inputs.
+- M2 — Click **Last 7 days**; confirm start/end populate and the report re-renders.
+- M3 — Select a project filter, click **Last 30 days**; confirm the project filter is preserved
+  in the subsequent CSV export.
+- M4 — Manually edit the date range after clicking a preset; confirm no preset stays highlighted.
+
+(Human-only; outstanding UAT gate — requires packaged `.app` on physical Mac.)
+
+---
+
 ## v0.4.0 — AI time-entry suggestions (TASK-032)
 
 **Branch:** `feat/task-032-ai-time-suggestions`
