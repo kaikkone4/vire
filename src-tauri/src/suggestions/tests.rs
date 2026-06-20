@@ -511,6 +511,88 @@ fn regeneration_preserves_accepted_and_dismissed_and_does_not_duplicate() {
 }
 
 #[test]
+fn failed_regeneration_preserves_the_original_pending_set() {
+    // Atomic replace-set (SW-4 B1): regeneration deletes the prior pending rows, re-inserts the
+    // recomputed blocks, and reads the fresh set inside ONE transaction. If any insert fails the whole
+    // replace rolls back, so the ORIGINAL pending set survives — Refresh is never destructive under a
+    // partial write.
+    let c = conn();
+    let pid = make_project(&c, "Vire");
+    map_env(&c, "veronavi", &pid);
+    // Two timed blocks on one day (a >30-min gap splits them) → two pending suggestions.
+    add_evidence(
+        &c,
+        "veronavi",
+        "t1",
+        Some("s1"),
+        Some("2026-06-05 09:00:00"),
+        Some("2026-06-05 09:30:00"),
+        Some(10),
+        None,
+        None,
+        "healthy",
+    );
+    add_evidence(
+        &c,
+        "veronavi",
+        "t2",
+        Some("s2"),
+        Some("2026-06-05 11:00:00"),
+        Some("2026-06-05 11:30:00"),
+        Some(20),
+        None,
+        None,
+        "healthy",
+    );
+
+    // First generation establishes the original pending set.
+    let first = generate(&c).unwrap();
+    assert_eq!(first.suggestions.len(), 2);
+    let mut original_ids: Vec<String> = first.suggestions.iter().map(|s| s.id.clone()).collect();
+    original_ids.sort();
+
+    // Force the next regeneration's inserts to fail: a BEFORE INSERT trigger that always aborts. The
+    // delete runs first inside the transaction, then the first insert aborts → the transaction is
+    // dropped without commit and rolls back.
+    c.execute_batch(
+        "CREATE TRIGGER fail_suggestion_insert BEFORE INSERT ON time_entry_suggestions
+         BEGIN SELECT RAISE(ABORT, 'forced insert failure'); END;",
+    )
+    .unwrap();
+
+    let result = generate(&c);
+    assert!(
+        result.is_err(),
+        "regeneration must fail when an insert aborts"
+    );
+
+    // The original pending set survives unchanged: same count, same ids — nothing partially replaced
+    // and nothing left deleted.
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM time_entry_suggestions WHERE status='pending'"
+        ),
+        2,
+        "failed regeneration must not leave a partial or emptied pending set"
+    );
+    let mut surviving_ids: Vec<String> = {
+        let mut stmt = c
+            .prepare("SELECT id FROM time_entry_suggestions WHERE status='pending'")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    surviving_ids.sort();
+    assert_eq!(
+        surviving_ids, original_ids,
+        "the original pending rows survive a failed regeneration intact"
+    );
+}
+
+#[test]
 fn generation_never_writes_a_time_entry() {
     let c = conn();
     let pid = make_project(&c, "Vire");

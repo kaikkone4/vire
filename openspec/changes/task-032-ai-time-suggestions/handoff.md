@@ -4,27 +4,27 @@
 
 - **Change dir**: openspec/changes/task-032-ai-time-suggestions/
 - **Branch / PR**: `feat/task-032-ai-time-suggestions` · PR #27 (draft)
-- **Phase / gate**: SW-2 Workstreams A + B + **C** — **DONE** (A/B/C-checkpoints passed). All of SW-2 complete.
-- **Tier**: L2 (new capability; additive schema; backend + frontend; no egress)
+- **Phase / gate**: SW-2 fix loop 1 done (2026-06-20) — **both SW-4 blockers fixed**. Re-route to SW-4.
+- **Tier**: L2
 
 ## Last gate result
-SW-1 PASS; SW-3 QA PASS on A+B. **C built + self-verified (2026-06-20)**: C1–C5 done; 10 builder tests
-pass; `test:frontend` 85/83/2 (the 2 fails = pre-existing network `pi-observe.security`, also fail on
-`main`); `npm run build` green; §5 guarantees held. C evidence: `sw2-c-notes.md`.
+**SW-4 FAIL (2026-06-20)**, now remediated. B1: `generate` is an atomic replace-set
+(`unchecked_transaction` wraps delete + guarded inserts + final read; rollback on insert failure) +
+new failure-path test. B2: dropped stale module-wide `allow(dead_code,unused_imports)` + the dead
+`EvidenceRow.trace_id` field/projection. Checks all green. Details: `fix-sw4-loop1.md`.
 
 ## Active blockers
-- none.
+- None. Awaiting SW-4 recheck.
 
 ## Exact next action
-**SW-3 QA on Workstream C**, then **SW-4 (Code Review) + SW-5 (Security)** on the full A+B+C branch.
-M1–M3 (packaged macOS app) stay human-only/unchecked.
+**SW-4 Code Review:** re-review HEAD against the two fixed blockers (see `fix-sw4-loop1.md`). SW-5 may
+continue independently. Local changes are committed on `feat/task-032-ai-time-suggestions`.
 
 ## Required files (read these, not the whole tree)
-- sw2-c-notes.md — C evidence + reporting-separation surface + not-in-scope; sw2-b/a-notes.md — B/A
-- design.md §4/§7-C — frontend spec + C tests; §5 guarantees; tasks.md — A+B+C done
+- fix-sw4-loop1.md — what changed + checks; review.md — original SW-4 blockers; sw2-*-notes.md — impl
 
 ## Notes carried forward
-- C (frontend, secret-free): `'Suggestions'` view in `src/main.ts` + pure builders `src/suggestions-ui.ts`;
+- C: `'Suggestions'` view in `src/main.ts` + pure builders `src/suggestions-ui.ts`;
   consumes `list/accept/dismiss_time_entry_suggestion`; grouped list, Accept/Edit/Dismiss,
   Refresh→regenerate, unmapped→Settings notice, absence/empty copy. `Summary.ai_minutes` + `summaryCards()`
   show AI-vs-human separately in Today/Reports (DEC-003). No new CSS / no backend change. See `sw2-c-notes.md`.

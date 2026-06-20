@@ -16,12 +16,6 @@
 //!   time, aggregate number, count, or health/confidence label — never a raw session id, payload,
 //!   prompt/metadata, or credential.
 
-// Workstream A delivers the engine + persistence; the public surface (`generate`, the IPC DTOs) is
-// wired into Tauri commands and the renderer in Workstreams B/C. Until then these items are exercised
-// only by this module's unit tests, so the not-yet-consumed `dead_code`/`unused_imports` warnings are
-// expected — suppressed here rather than prematurely adding IPC, which is out of A-scope.
-#![allow(dead_code, unused_imports)]
-
 mod engine;
 pub mod store;
 

@@ -1,8 +1,8 @@
 # QA Report — TASK-032 Workstream A (SW-3)
 
-**Gate scope**: Workstream A only — suggestion engine, `time_entry_suggestions` table, unit tests.  
-**Branch / PR**: `feat/task-032-ai-time-suggestions` · PR #27 (draft)  
-**Date**: 2026-06-20  
+**Gate scope**: Workstream A only — suggestion engine, `time_entry_suggestions` table, unit tests.
+**Branch / PR**: `feat/task-032-ai-time-suggestions` · PR #27 (draft)
+**Date**: 2026-06-20
 **Verdict**: **PASS**
 
 ---
@@ -87,9 +87,9 @@ None.
 
 # QA Report — TASK-032 Workstream B (SW-3)
 
-**Gate scope**: Workstream B — accept/dismiss IPC, `time_entries.origin`, DEC-003 reporting separation.  
-**Branch / PR**: `feat/task-032-ai-time-suggestions` · PR #27  
-**Date**: 2026-06-20  
+**Gate scope**: Workstream B — accept/dismiss IPC, `time_entries.origin`, DEC-003 reporting separation.
+**Branch / PR**: `feat/task-032-ai-time-suggestions` · PR #27
+**Date**: 2026-06-20
 **Verdict**: **PASS**
 
 ---
@@ -103,7 +103,7 @@ None.
 | `dismiss_writes_no_entry_is_idempotent_and_cannot_undo_an_accept` | Dismiss writes 0 entries; re-dismiss = Ok (idempotent); accept-after-dismiss rejected; dismiss-of-accepted rejected with "accepted" | PASS |
 | `summary_and_csv_report_human_and_ai_time_separately` | `summary_repo`: `duration_minutes=60` (human), `ai_minutes=30` (AI); CSV header has `origin`; rows carry `,manual,` and `,ai_suggested,` | PASS |
 
-**`cargo test`: 158 passed / 0 failed** (+4 B tests vs A-checkpoint; 0 regressions).  
+**`cargo test`: 158 passed / 0 failed** (+4 B tests vs A-checkpoint; 0 regressions).
 `cargo fmt --check`: clean. `cargo clippy --all-targets`: no new findings.
 
 ---

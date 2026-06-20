@@ -24,18 +24,26 @@ const GAP_MINUTES: i64 = 30;
 /// summary. Idempotent: drops the prior `pending` rows, re-inserts the recomputed blocks, and never
 /// resurrects an `accepted`/`dismissed` block (the decided-row guard in `store::insert_if_not_decided`).
 /// Writes only `time_entry_suggestions` — never a `time_entries` row (DEC-006, no auto-posting).
+///
+/// **Atomic replace-set**: the delete, every guarded insert, and the final pending read run inside one
+/// transaction. If any insert fails the transaction is dropped without committing and rolls back, so
+/// the *original* pending set survives a failed regeneration — Refresh is never destructive under a
+/// partial write. `unchecked_transaction` is used because the engine borrows the connection immutably
+/// and runs only on the single-writer app connection (no outer transaction to nest under).
 pub fn generate(conn: &Connection) -> rusqlite::Result<SuggestionList> {
     let rows = store::load_evidence(conn)?;
     let (blocks, unmapped) = cluster(&rows);
 
-    store::delete_pending(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    store::delete_pending(&tx)?;
     let ts = now();
     for block in &blocks {
         let suggestion = block.to_suggestion(Uuid::new_v4().to_string(), ts.clone());
-        store::insert_if_not_decided(conn, &suggestion)?;
+        store::insert_if_not_decided(&tx, &suggestion)?;
     }
+    let suggestions = store::list_pending(&tx)?;
+    tx.commit()?;
 
-    let suggestions = store::list_pending(conn)?;
     Ok(SuggestionList {
         suggestions,
         unmapped,

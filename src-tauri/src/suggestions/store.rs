@@ -47,7 +47,6 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 #[derive(Debug, Clone)]
 pub struct EvidenceRow {
     pub environment: String,
-    pub trace_id: String,
     pub session_id: Option<String>,
     pub ai_start_ts: Option<String>,
     pub ai_end_ts: Option<String>,
@@ -63,8 +62,10 @@ pub struct EvidenceRow {
 /// mirrors `env_mapping::list_evidence_projects_repo` (D3): association is computed at read time, so
 /// changing or clearing a mapping changes only this result — the evidence rows are untouched.
 pub fn load_evidence(conn: &Connection) -> rusqlite::Result<Vec<EvidenceRow>> {
+    // `trace_id` is not projected (it feeds no block field), but it stays in `ORDER BY` so rows with
+    // equal `(environment)` keep a deterministic, stable order for clustering.
     let mut stmt = conn.prepare(
-        "SELECT e.environment, e.trace_id, e.session_id, e.ai_start_ts, e.ai_end_ts,
+        "SELECT e.environment, e.session_id, e.ai_start_ts, e.ai_end_ts,
                 e.total_tokens, e.cost_total, e.cost_currency, e.health,
                 m.project_id, p.name
            FROM langfuse_ai_evidence e
@@ -76,16 +77,15 @@ pub fn load_evidence(conn: &Connection) -> rusqlite::Result<Vec<EvidenceRow>> {
         .query_map([], |r| {
             Ok(EvidenceRow {
                 environment: r.get(0)?,
-                trace_id: r.get(1)?,
-                session_id: r.get(2)?,
-                ai_start_ts: r.get(3)?,
-                ai_end_ts: r.get(4)?,
-                total_tokens: r.get(5)?,
-                cost_total: r.get(6)?,
-                cost_currency: r.get(7)?,
-                health: r.get(8)?,
-                project_id: r.get(9)?,
-                project_name: r.get(10)?,
+                session_id: r.get(1)?,
+                ai_start_ts: r.get(2)?,
+                ai_end_ts: r.get(3)?,
+                total_tokens: r.get(4)?,
+                cost_total: r.get(5)?,
+                cost_currency: r.get(6)?,
+                health: r.get(7)?,
+                project_id: r.get(8)?,
+                project_name: r.get(9)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
