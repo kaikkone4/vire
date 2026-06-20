@@ -13,10 +13,13 @@ import { REPORT_RANGE_PRESETS, reportRange } from './report-ranges';
 
 type View='Today'|'Projects'|'Manual Entry'|'Reports'|'Suggestions'|'Settings';
 type Project={id:string;name:string;notes?:string|null;archived:boolean};
-type Entry={id:string;project_id:string;project_name:string;date:string;start_time:string;end_time:string;duration_minutes:number;note?:string|null};
+// origin/cost_* are carried for completeness (DEC-003 / TASK-034 B); cost is null for manual entries and
+// null-when-unknown for AI entries (absence ≠ zero → render "—"). Row rendering of cost is deferred.
+type Entry={id:string;project_id:string;project_name:string;date:string;start_time:string;end_time:string;duration_minutes:number;note?:string|null;origin?:string;cost_total?:number|null;cost_currency?:string|null};
 // duration_minutes is human/manual time only; ai_minutes is accepted AI-suggested time kept distinct so
-// AI time is never folded into the billable human total (DEC-003 / TASK-032 B4).
-type Summary={project_id:string;project_name:string;duration_minutes:number;ai_minutes:number};
+// AI time is never folded into the billable human total (DEC-003 / TASK-032 B4). ai_cost_* mirror the
+// backend SummaryRow cost fields (TASK-034 B); null → "—" (absence ≠ zero). Card rendering is deferred.
+type Summary={project_id:string;project_name:string;duration_minutes:number;ai_minutes:number;ai_cost_total?:number|null;ai_cost_currency?:string|null};
 type SourceHealth={base_url:string;source:string;environments:string[];last_import_at:string|null;latest_trace_ts:string|null;health:string;message:string};
 type ImportOutcome={snapshot:SourceHealth;report:ImportReport|null};
 type LangfuseSettings={base_url:string;source:string;environments:string[];langfuse_enabled:boolean;has_public_key:boolean;has_secret_key:boolean};
