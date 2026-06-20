@@ -1,5 +1,50 @@
 # Vire — Release Notes
 
+## v0.3.2 — Settings scroll preservation + copy cleanup (TASK-031)
+
+**Branch:** `feat/task-031-settings-scroll-preservation`
+**PR:** #26
+
+### What changed
+
+Fixed the **Settings UX bug** where pressing any control (Test connection, Save range,
+Import now, Map, Save settings, …) scrolled the panel back to the top.
+
+`shell()` is the single render chokepoint that re-assigns `app.innerHTML`. That destroyed
+and recreated the `<main>` scroll container, resetting its `scrollTop` to `0` on every
+in-Settings action. The fix captures the outgoing scroll position and whether the view is
+unchanged before the swap, and restores it after — a same-view re-render stays put; navigating
+to a different view resets to the top. The decision logic is extracted to a pure, unit-tested
+`nextScrollTop()` helper in `src/scroll.ts`.
+
+Also corrects a leftover copy in the env-mapping help panel: `use "Create project for …"` →
+`use "Create & map"` (matches the button label). No behaviour or markup change.
+
+No backend change. No new dependency. No DB schema change.
+
+### Compatibility and rollback
+
+Fully compatible with v0.3.1 (no DB migration, no IPC change). Rollback: reinstall the v0.3.1
+`.app` — no cleanup step. See [openspec/changes/task-031-settings-scroll-preservation/RELEASE.md](openspec/changes/task-031-settings-scroll-preservation/RELEASE.md)
+for the full rollback table and component compatibility matrix.
+
+### Tests
+
+**Frontend** (`npm run test:frontend`): **73 passed / 2 pre-existing failures (unrelated)**
+(new tests: `scroll.test.mjs` — 2/2 helper cases; `envMappingUi.test.mjs` +1 copy assertion;
+14/14 focused tests pass; the 2 failures are in `tests/pi-observe.security.test.mjs`,
+unrelated and present on `main` before any TASK-031 commit)
+
+### Manual smoke steps before shipping
+
+- M1 — In Settings, scroll down, press any re-rendering control: viewport should stay put.
+- M2 — Switch to another view (e.g. Today) and back to Settings: should open at top.
+- M3 — Open Settings → mapping panel: help text should read **"Create & map"**, not "Create project for…".
+
+(Human-only; outstanding UAT gate — see `qa.md`.)
+
+---
+
 ## v0.3.1 — Create Project button fix: in-app input for env create-and-map (TASK-030)
 
 **Branch:** `feat/task-030-create-project-button-fix`
