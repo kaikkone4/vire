@@ -3,42 +3,32 @@
 # Handoff — TASK-031 settings-scroll-preservation
 
 - **Change dir**: `openspec/changes/task-031-settings-scroll-preservation/`
-- **Branch / PR**: `feat/task-031-settings-scroll-preservation` — draft PR #26
+- **Branch / PR**: `feat/task-031-settings-scroll-preservation` — PR #26 (ready-for-review)
 - **Tier**: L1-equivalent (frontend-only; no backend/IPC/schema/egress/deps)
-- **Phase / gate**: SW-4 code review PASS + SW-5 security PASS (2026-06-20); ready for SW-6.
+- **Phase / gate**: SW-6 Release COMPLETE (2026-06-20)
 
 ## Gate results
 
-- SW-3 QA: PASS. Build clean; scoped tests 14/14. Manual macOS UAT remains human-only and is not an
-  SW-4/SW-5 blocker. See `qa.md`.
-- SW-4 Code Review: PASS. No craft, convention, complexity, dead-code, or architecture blockers. See
-  `review.md`.
-- SW-5 Security: PASS. semgrep 0, gitleaks (branch) clean, Trivy 0 HIGH/CRITICAL runtime. No XSS/secret/
-  IPC/capability/auth regression. See `sec.md`. Pre-existing dev-dep vite 8.2 CVE (GHSA-fx2h-pf6j-xcff,
-  lockfile untouched, dev-server-only, not shipped) escalated as a SEPARATE bump task — not blocking.
-
-## Checks carried forward
-
-- `git diff --check main...HEAD`: PASS
-- `npm run build`: PASS
-- Scoped frontend tests: PASS (14/14)
-- Full frontend suite in SW-4 sandbox: 71/75; four unrelated `pi-observe.security` tests hit local-listen
-  `EPERM`. SW-3 recorded 73/75 with two pre-existing Langfuse-dependent failures.
+- SW-3 QA: PASS. Build clean; 14/14 focused tests. See `qa.md`.
+- SW-4 Code Review: PASS. No blockers. See `review.md`.
+- SW-5 Security: PASS. semgrep 0, gitleaks clean, Trivy 0 HIGH/CRITICAL. See `sec.md`.
+- SW-6 Release: COMPLETE. RELEASE.md written; gate artifacts committed (76c1ad4); PR promoted.
 
 ## Active blockers
 
 - None for pipeline gates.
-- Human macOS UAT (`tasks.md` §4) remains unverified.
-- Out-of-scope follow-up (do NOT fold into this PR): bump vite ≥6.4.3 + esbuild ≥0.28.1 (pre-existing
-  dev-dep CVEs). Open as its own task.
+- Tag `task-031/v0.3.2` pending SSH private key (`~/.ssh/id_ed25519` absent in this env).
+  Dry-run record + manual command in `RELEASE.md` §Tag signing.
+- Human macOS UAT M1–M3 remains unverified (DOM/webview-bound, human-only).
+- Out-of-scope follow-up (do NOT fold into this PR): bump vite ≥6.4.3 + esbuild ≥0.28.1.
 
 ## Exact next action
 
-Route to SW-6 Release Manager (SW-4 + SW-5 both PASS). Confirm draft PR #26 body before marking ready.
+Janne merges PR #26. After merge: apply SSH signing key and run the `git tag` command from
+`RELEASE.md` §Tag signing. Then open a separate dep-bump task for vite/esbuild CVEs.
 
 ## Notes
 
-- Scroll capture/restore is correctly centralized in `src/main.ts:43`; decision helper is
-  `src/scroll.ts:9-11`.
-- GitHub PR body was not inspectable in SW-4 because `api.github.com` was unreachable. Local commit
-  subject/body are complete; confirm draft PR description before marking ready.
+- RELEASE.md at `openspec/changes/task-031-settings-scroll-preservation/RELEASE.md`.
+- Root `RELEASE.md` updated with v0.3.2 section at top.
+- Deployment size: **patch**. Rollback: **partial-automated** (no migration; reinstall .app).
