@@ -8,19 +8,17 @@
 - **Tier**: L2 (new capability; additive schema; backend + frontend; no egress)
 
 ## Last gate result
-SW-1 PASS. SW-2 A complete + SW-3 QA PASS on A (all 2026-06-20). **SW-2 B complete (2026-06-20)**:
-accept/dismiss IPC + `time_entries.origin` + DEC-003 reporting separation + 4 unit tests. `cargo test`
-158 pass / 0 fail (+4 vs A, 0 regressions), `fmt --check` clean, `clippy` no new findings.
-B-checkpoint evidence: `sw2-b-notes.md`.
+SW-1 PASS. SW-2 A+B complete. **SW-3 QA PASS on B (2026-06-20)**: all B1–B5 verified; 4 B tests
+correct + passing; 158/0 cargo test; guarantees held (DEC-003/004/006, SEC-012, DEC-001/017).
+QA evidence: `qa.md` (B section). B-impl evidence: `sw2-b-notes.md`.
 
 ## Active blockers
 - none.
 
 ## Exact next action
-**SW-3 QA on the Workstream B slice** (sw-qa-engineer) — verify B1–B5 vs design §3/§7-B + §5 guarantees
-(accept = only writer of `ai_suggested`; no auto-post; absence≠zero; DEC-003 separation; secret-free;
-local-only). Then SW-2 Workstream **C** (frontend, tasks.md C1–C5 / design §4). SW-4/SW-5 on A may run
-in parallel.
+**SW-4 (Code Reviewer) + SW-5 (Security Agent) in parallel** on the full branch (A+B commits).
+Then **SW-2 Workstream C** (frontend, tasks.md C1–C5 / design §4) — Review/Accept UI, secret-free
+render, absence/empty states.
 
 ## Required files (read these, not the whole tree)
 - sw2-b-notes.md — B-checkpoint evidence + interpretation decisions + what's NOT in B-scope
