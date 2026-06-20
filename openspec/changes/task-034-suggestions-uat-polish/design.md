@@ -3,37 +3,56 @@
 Technical design SW-2 implements from. Scope and architecture-fit are in `arch-review.md`. Do the
 minimum — no refactors, no capture, no importer changes. All edits are additive and backward-compatible.
 
-## 1. Workstream A — accept never stores zero (DEC-034)
+## 1. Workstream A — accept never stores zero (DEC-034; day-end boundary DEC-035)
+
+> **DEC-035 (SW-4 escalation resolution, `arch-review.md`):** the original forward-bump-with-clamp design
+> below broke at exactly `start == 23:59` — clamping a midnight cross back to `23:59` reproduces
+> `start == end`, which `parse_duration` rejects, so accept hard-errors. The data model stays same-day
+> (`date + HH:MM`, **no** next-day expansion); at the day's last minute the span **anchors on its end**.
 
 ### 1.1 Backend (authoritative) — `accept_suggestion_repo` (`src-tauri/src/lib.rs:485`)
 
 After deriving `start_time`/`end_time` (the existing `edits … or hhmm_from_block_ts(…)` block,
-`lib.rs:513-529`), before `parse_duration`:
+`lib.rs:573-589`), before `parse_duration`, normalize a same-minute span and rebind **both** ends:
 
 ```rust
-// DEC-034: a timed suggestion whose start and end fall in the same clock minute must still be
-// acceptable. Round end up to start + the engine's already-valid duration (>= 1 min) so we never
-// store a zero/negative span. Only applies when end is NOT after start; an explicit user edit that
-// supplies a valid span is left untouched.
-let end_time = bump_end_if_not_after(&date, &start_time, &end_time, suggestion.duration_minutes)?;
+// DEC-034/035: a timed suggestion whose start and end fall in the same clock minute must still be
+// acceptable, with a positive same-day span. Anchor on the start (end = start + duration) everywhere
+// except the day's final minute, where no later same-day end exists — there anchor on the end
+// (start = 23:59 - duration). Only fires when end is NOT after start; an explicit user edit that
+// supplies a valid span is returned untouched.
+let (start_time, end_time) =
+    normalize_same_minute_span(&date, &start_time, &end_time, suggestion.duration_minutes)?;
 ```
 
-`bump_end_if_not_after`: if `parse_duration(date, start, end)` would yield `<= 0`, compute
-`end = start + minutes`, where `minutes = suggestion.duration_minutes.filter(|m| *m > 0).unwrap_or(1)`,
-format back to `%H:%M`, and return it; otherwise return `end` unchanged. Implement with the existing
-`chrono` `NaiveDateTime` + `Duration::minutes`. Guard the same-day assumption already baked into
-`parse_duration` (start/end share `date`); a bump that would cross midnight is clamped to `23:59` (a
-1-minute bump from 23:59 is the only realistic case and is acceptable for UAT polish — note it in code).
+`normalize_same_minute_span(date, start, end, duration_minutes) -> Result<(String, String), String>`
+(replaces the pair-less `bump_end_if_not_after`):
 
+- if `parse_duration(date, start, end)` would yield `> 0` → return `(start, end)` unchanged;
+- else `minutes = duration_minutes.filter(|m| *m > 0).unwrap_or(1)` and `bumped = start + minutes`:
+  - `bumped` same day → `(start, bumped)` (forward bump, as before);
+  - `bumped` crosses midnight → anchor on the end: `end = 23:59`, `start = 23:59 - minutes`
+    (floor the derived start at `00:00`). For the only realistic case (same-minute block ⇒
+    `duration = max(1, round(<60s)) = 1`) this is `23:58 → 23:59`.
+
+Implement with the existing `chrono` `NaiveDateTime` + `Duration::minutes`. Format both back to `%H:%M`.
 Leave `parse_duration` itself unchanged (manual entry keeps rejecting `start == end` — that path is a
 human typo, not an engine artifact). The fix is local to the accept path.
 
-### 1.2 Frontend echo — `suggestionRow` (`src/suggestions-ui.ts:105`)
+### 1.2 Frontend echo — `suggestionRow` (`src/suggestions-ui.ts:97`)
 
-When `timeOfDay(block_start_ts) === timeOfDay(block_end_ts)` and `duration_minutes != null`, set the
-End input's default `value` to `start + duration_minutes` (pure helper, e.g. `addMinutesHHMM(start, n)`)
-so the visible editable span equals what accept will store. Keep `timeOfDay` for all other cases.
-Tests: `tests/suggestionsUi.test.mjs` — same-minute block renders an End default strictly after Start.
+When `timeOfDay(block_start_ts) === timeOfDay(block_end_ts)` and `duration_minutes != null`, default the
+edit inputs to the span accept will store. Compute `forward = addMinutesHHMM(start, n)`:
+
+- `forward !== start` (normal) → set the **End** default to `forward`, keep Start;
+- `forward === start` (clamped — start is the day's last minute) → set the **End** default to `start` and
+  the **Start** default to `subMinutesHHMM(start, n)` (new helper, floor `00:00`), mirroring the backend
+  anchor so the visible span is `23:58 → 23:59`.
+
+Keep `addMinutesHHMM` as-is (still clamps forward); add `subMinutesHHMM`. Keep `timeOfDay` for all other
+cases. Tests: `tests/suggestionsUi.test.mjs` — a normal same-minute block renders an End default strictly
+after Start; a `23:59` same-minute block renders Start `23:58` / End `23:59` (do not assert a `23:59/23:59`
+row).
 
 ## 2. Workstream B — AI cost reaches Reports and CSV (DEC-003 completion)
 
@@ -112,7 +131,8 @@ here.
 
 ## 5. Guarantees checklist (must all hold)
 
-- **never zero duration** — accept stores a span ≥ 1 minute; manual path unchanged. (DEC-034.)
+- **never zero duration** — accept stores a positive same-day span ≥ 1 minute (anchored on the end at the
+  day's last minute, `23:59`); manual path unchanged. (DEC-034/035.)
 - **absence ≠ zero** — NULL cost/tokens render "—", manual entries keep NULL cost. (DEC-004.)
 - **AI ≠ human** — AI cost summed separately (`ai_cost_total`), never folded into human totals. (DEC-003.)
 - **no auto-posting** — accept remains the sole writer of an `ai_suggested` entry. (DEC-006.)
@@ -125,8 +145,10 @@ A and C are independent; B shares `lib.rs`/`suggestions-ui.ts` with A. Recommend
 each its own commit within the one change. Per workstream:
 
 - **A:** Rust unit test — accept of a same-minute block stores duration ≥ 1 (no edits needed) and
-  `end > start`; accept of a normal block unchanged; manual `create_time_entry` still rejects
-  `start==end`. Frontend test — same-minute edit End default > Start.
+  `end > start`; accept of a `23:59` same-minute block stores `23:58 → 23:59` (DEC-035 day-end anchor),
+  not a zero span or error; accept of a normal block unchanged; manual `create_time_entry` still rejects
+  `start==end`. Frontend test — normal same-minute edit End default > Start; `23:59` same-minute renders
+  Start `23:58` / End `23:59`.
 - **B:** Rust — accept copies cost onto the entry; `summary_repo` returns `ai_cost_total` separate from
   human; manual entry yields NULL AI cost; CSV has the cost columns. Frontend — Reports card shows AI
   cost and "—" when null.

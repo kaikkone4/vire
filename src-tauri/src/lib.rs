@@ -187,37 +187,52 @@ fn parse_duration(date: &str, start: &str, end: &str) -> Result<i64, String> {
     }
     Ok(mins)
 }
-/// DEC-034: keep an accepted suggestion from ever storing a zero/negative span. The engine records
-/// block bounds at second precision and a `max(1, round)` duration, but accept re-derives start/end at
-/// `HH:MM` (`hhmm_from_block_ts`); a block contained in a single clock minute therefore collapses to
-/// `start == end` and `parse_duration` would reject it. When (and only when) the derived `end` is not
-/// strictly after `start`, bump `end` to `start + minutes`, where `minutes` is the engine's already
-/// valid `duration_minutes` (≥ 1) or 1 when absent — so the visible span is never zero. A positive span
-/// (including an explicit user edit) is returned untouched, and a malformed `end` still surfaces its
-/// validation error rather than being silently rewritten. A bump crossing midnight is clamped to the
-/// same day's `23:59` (the only realistic case is a 1-minute bump from `23:59`); the manual-entry path
-/// is unaffected and still rejects `start == end` as a human typo.
-fn bump_end_if_not_after(
+/// DEC-034/035: keep an accepted suggestion from ever storing a zero/negative span, staying inside the
+/// same-day `date + HH:MM` model. The engine records block bounds at second precision and a
+/// `max(1, round)` duration, but accept re-derives start/end at `HH:MM` (`hhmm_from_block_ts`); a block
+/// contained in a single clock minute therefore collapses to `start == end`, which `parse_duration`
+/// would reject. When (and only when) the derived `end` is not strictly after `start`, normalize the
+/// span to `minutes` (the engine's already-valid `duration_minutes` ≥ 1, or 1 when absent):
+/// - **non-boundary** → anchor on the start: `(start, start + minutes)` (forward bump);
+/// - **day's last minute** (`start + minutes` would cross midnight, i.e. `start == 23:59`) → anchor on
+///   the end instead, where no later same-day end exists: `(23:59 - minutes, 23:59)`, flooring the
+///   derived start at `00:00`. The only realistic case is a 1-minute span from `23:59` → `23:58 → 23:59`.
+///
+/// A positive span (including an explicit user edit) is returned untouched, and a malformed `start`/`end`
+/// still surfaces its validation error rather than being silently rewritten. The manual-entry path is
+/// unaffected and still rejects `start == end` as a human typo.
+fn normalize_same_minute_span(
     date: &str,
     start: &str,
     end: &str,
     duration_minutes: Option<i64>,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let s = NaiveDateTime::parse_from_str(&format!("{} {}", date, start), "%Y-%m-%d %H:%M")
         .map_err(|_| "Start date/time must be valid".to_string())?;
     let e = NaiveDateTime::parse_from_str(&format!("{} {}", date, end), "%Y-%m-%d %H:%M")
         .map_err(|_| "End date/time must be valid".to_string())?;
     if (e - s).num_minutes() > 0 {
-        return Ok(end.to_string());
+        return Ok((start.to_string(), end.to_string()));
     }
     let minutes = duration_minutes.filter(|m| *m > 0).unwrap_or(1);
     let bumped = s + chrono::Duration::minutes(minutes);
-    let end_dt = if bumped.date() != s.date() {
-        s.date().and_hms_opt(23, 59, 0).unwrap()
+    if bumped.date() == s.date() {
+        // Non-boundary: anchor on the start, end = start + minutes (same day).
+        return Ok((start.to_string(), bumped.format("%H:%M").to_string()));
+    }
+    // Day's last minute: no later same-day end exists, so anchor on the end at 23:59 and derive the
+    // start backward (floor at 00:00 for the unrealistic case of minutes spanning the whole day).
+    let end_dt = s.date().and_hms_opt(23, 59, 0).unwrap();
+    let start_dt = end_dt - chrono::Duration::minutes(minutes);
+    let start_dt = if start_dt.date() == s.date() {
+        start_dt
     } else {
-        bumped
+        s.date().and_hms_opt(0, 0, 0).unwrap()
     };
-    Ok(end_dt.format("%H:%M").to_string())
+    Ok((
+        start_dt.format("%H:%M").to_string(),
+        end_dt.format("%H:%M").to_string(),
+    ))
 }
 fn parse_date(date: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| "Date must use YYYY-MM-DD".into())
@@ -589,11 +604,13 @@ pub fn accept_suggestion_repo(
     };
 
     validate_date(&date)?;
-    // DEC-034: a timed suggestion whose start and end fall in the same clock minute must still be
-    // acceptable — round the end up to start + the engine's valid duration so we never store a zero
-    // span. The manual `create_time_entry`/`update` path keeps rejecting `start == end` (a human typo).
-    let end_time =
-        bump_end_if_not_after(&date, &start_time, &end_time, suggestion.duration_minutes)?;
+    // DEC-034/035: a timed suggestion whose start and end fall in the same clock minute must still be
+    // acceptable with a positive same-day span. Normalize to the engine's valid duration — anchored on
+    // the start (end = start + minutes) everywhere except the day's last minute, where it anchors on the
+    // end (start = 23:59 - minutes). Rebind both ends. The manual `create_time_entry`/`update` path keeps
+    // rejecting `start == end` (a human typo).
+    let (start_time, end_time) =
+        normalize_same_minute_span(&date, &start_time, &end_time, suggestion.duration_minutes)?;
     let duration = parse_duration(&date, &start_time, &end_time)?;
     if !project_exists_active(&tx, &project_id)? {
         return Err("Accepted suggestions must reference an active project".into());
@@ -1918,7 +1935,7 @@ mod tests {
         assert!(csv.contains(",ai_suggested,"), "ai row labeled");
     }
 
-    // ----- TASK-034 A: accept never stores a zero/negative span (DEC-034) ----------------------------
+    // ----- TASK-034 A: accept never stores a zero/negative span (DEC-034 / day-end DEC-035) ----------
 
     #[test]
     fn accept_of_same_minute_block_bumps_end_and_never_stores_zero() {
@@ -1968,6 +1985,39 @@ mod tests {
         assert_eq!(entry.start_time, "14:30");
         assert_eq!(entry.end_time, "14:31");
         assert_eq!(entry.duration_minutes, 1, "minimum one minute");
+    }
+
+    #[test]
+    fn accept_of_day_end_same_minute_block_anchors_on_end_at_2359() {
+        // DEC-035: at the day's last minute a forward bump would cross midnight and (under the old
+        // clamp) collapse back to `start == end`, hard-erroring. Anchor on the end instead: keep
+        // `23:59` and derive the start backward, so the span stays positive and same-day (`23:58 → 23:59`).
+        let mut c = conn();
+        let pid = seeded_project(&c);
+        seed_suggestion(
+            &c,
+            "z3",
+            &pid,
+            "2026-06-12",
+            Some("2026-06-12 23:59:10"),
+            Some("2026-06-12 23:59:50"),
+            Some(1),
+        );
+        let entry = accept_suggestion_repo(&mut c, "z3".into(), None).unwrap();
+        assert_eq!(
+            entry.start_time, "23:58",
+            "start derived backward from 23:59"
+        );
+        assert_eq!(
+            entry.end_time, "23:59",
+            "end anchored at the day's last minute"
+        );
+        assert!(
+            entry.end_time > entry.start_time,
+            "span is strictly positive"
+        );
+        assert_eq!(entry.duration_minutes, 1, "never zero, no midnight cross");
+        assert_eq!(entry.origin, "ai_suggested");
     }
 
     #[test]

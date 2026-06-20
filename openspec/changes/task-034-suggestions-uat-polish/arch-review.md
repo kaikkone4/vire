@@ -132,3 +132,85 @@ sequence TASK-034 ahead of the TASK-032 merge.
   item and is self-contained in `accept_suggestion_repo` + the edit-panel default.
 - Then B (cost plumbing) then C (trackability copy). Gates: `cargo test`/`fmt`/`clippy`,
   `npm run test:frontend`/`build`.
+
+---
+
+## SW-4 escalation resolution (2026-06-20) — DEC-035 end-of-day boundary
+
+**Verdict:** ESCALATE resolved → **proceed to SW-2 (Workstream A only re-do)**. No split, no next-day
+data-model change, no BA round-trip blocking implementation.
+
+### What SW-4 found (correct)
+
+The SW-1 design (Item 1 above, DEC-034) chose a **forward** bump: `end = start + duration`, clamping a
+midnight cross back to `23:59`. That clamp is the defect. At exactly `start == 23:59` (the last
+representable minute of a same-day `date + HH:MM` entry), a +1-minute bump lands on the next day, so
+`bump_end_if_not_after` clamps it to `23:59` — i.e. **back to `start`**. `parse_duration` then rejects the
+zero span (`lib.rs:185-188`), and accept **hard-errors**; the frontend `addMinutesHHMM('23:59',1)` mirrors
+the clamp and echoes `23:59`/`23:59`. This violates the spec's strictly-positive-span and
+"always-acceptable, no manual edit" guarantee at the boundary. It is **latent, not theoretical**: imported
+evidence already exists at this minute (`langfuse/tests.rs:1078-1079`, a trace at `2026-06-12 23:59:59`),
+and no current test exercises the `23:59` accept path — the suite is green only because nothing hits it.
+
+### Decision — DEC-035: anchor the span on its END at the day boundary (keep same-day model)
+
+For every minute except the day's last, the rule is unchanged: `end = start + duration` (DEC-034). **At
+`start == 23:59`**, where no later same-day end exists, **anchor `end` at `23:59` and derive the start
+backward**: `start = 23:59 − duration` (duration ≥ 1; floor at `00:00`). For the only realistic case
+(a same-minute block ⇒ engine duration `= max(1, round(<60s)) = 1`) this is `23:58 → 23:59`. This keeps the
+invariant `end − start = duration`, a positive same-day span, end strictly after start, and **no manual
+edit required** — it only changes *which endpoint moves* at the boundary. The same-minute block's exact
+wall-clock start is already an `HH:MM`-truncation artifact (the engine clustered a sub-minute span), so
+nudging it back by the (1-minute) duration to stay inside the local day is a bounded, documented
+normalization — not a data loss.
+
+**Why not the alternatives:**
+
+- **Next-day end (data-model expansion)** — representing `23:59 → 00:00` needs an end-date column or
+  signed/overnight spans threaded through `parse_duration`, `validate_date_range`, `summary_repo` duration
+  math, CSV, and the manual form. Net-new model surface for a one-minute boundary; contradicts "additive
+  UAT polish, no next-day expansion unless truly required." **Rejected.** (If real overnight time entries
+  are ever wanted, that is a new BA decision + its own task — F6 below, not this change.)
+- **Mark a `23:59` same-minute block manual-only / untimed** — route it to the manual path (which already
+  demands explicit start/end and rejects `start==end`). Same-day-safe and conservative, but it **violates
+  the spec's "no manual time edit is required to accept it"** for a block that *does* carry a timestamp.
+  Strictly worse UX than the backward anchor. **Rejected.**
+- **Keep clamp-to-`23:59`** — this *is* the bug (zero span, hard error). **Rejected.**
+
+### Architecture fit / invariants (all preserved)
+
+Same-day `date + HH:MM` model unchanged; no schema, IPC, or component-boundary change (engine and Review
+UI untouched). DEC-006 (accept sole writer), DEC-004 (absence ≠ zero), SEC-012, DEC-001/017 all hold.
+DEC-035 is a refinement of DEC-034's policy, not a new component.
+
+### Exact next action for SW-2 (re-do Workstream A; B, C, D already pass per `review.md`)
+
+1. **Backend** — change the same-minute helper to return the **`(start, end)` pair** (suggest renaming
+   `bump_end_if_not_after` → `normalize_same_minute_span(date, start, end, duration_minutes)`):
+   - positive span (incl. explicit user edits) → return `(start, end)` untouched;
+   - non-boundary same-minute → `(start, start + minutes)` as today;
+   - `start + minutes` crosses midnight → **`(23:59 − minutes, 23:59)`** (floor start at `00:00`).
+   At the call site (`lib.rs:595-597`) rebind **both** `start_time` and `end_time` from the helper before
+   `parse_duration`. Leave `parse_duration` and the manual `create_time_entry`/`update` path unchanged.
+2. **Frontend** — in `suggestionRow` (`src/suggestions-ui.ts`), mirror the anchor: when
+   `addMinutesHHMM(start, mins)` clamps (returns `=== start`), set `endVal = start` and
+   `startVal = subMinutesHHMM(start, mins)`. Add `subMinutesHHMM` (floor `00:00`); `addMinutesHHMM` stays
+   as-is for the normal case.
+3. **Tests** — Rust: add an accept test for a `23:59:xx` same-minute block storing `23:58 → 23:59`,
+   duration 1, `end > start`; keep the `09:00 → 09:01` case; keep "manual `start==end` still rejected".
+   Frontend: add a `23:59:xx` same-minute fixture asserting the row's Start input renders `23:58` and End
+   `23:59` (`end > start`). The existing `addMinutesHHMM('23:59',1) === '23:59'` unit test stays valid (the
+   helper is unchanged) — it just no longer drives the rendered End at the boundary; do not assert a
+   `23:59/23:59` *row*.
+4. Re-run SW-3 (QA) then SW-4 (review) on the amended Workstream A. B/C/D outputs are unaffected.
+
+### Added feedback_to_ba
+
+- **F5 — DEC-035 (propose & log).** "At the local day's final minute, an accepted same-minute suggestion
+  anchors its end at `23:59` and derives the start backward (`23:59 − duration`), so the span stays
+  positive and same-day without a next-day model." Refines DEC-034; needs a canonical `DEC-###` in the BA
+  decision log.
+- **F6 — No overnight/next-day time entries (boundary scope).** Vire's entry model is single-day
+  `date + HH:MM`; DEC-035 deliberately stays inside it. If real spanning-midnight entries are ever
+  required (manual or AI), that is a new BA decision + task (end-date or overnight-span model across
+  `parse_duration`/validation/summary/CSV/manual form), **not** a polish amendment.

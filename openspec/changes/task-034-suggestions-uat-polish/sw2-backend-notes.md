@@ -6,18 +6,26 @@ contract requires were made on the frontend. Workstream D was **verify-only** (n
 
 ## What changed
 
-### Workstream A — accept never stores a zero/negative span (DEC-034)
+### Workstream A — accept never stores a zero/negative span (DEC-034; day-end boundary DEC-035)
+> **SW-4 escalation re-do (2026-06-21, DEC-035):** the original forward-bump-with-clamp design hard-
+> errored at exactly `start == 23:59` (clamp → `start == end` → `parse_duration` rejects). Re-done to
+> anchor the span on its **end** at the day's last minute, keeping the same-day `date + HH:MM` model.
 - `src-tauri/src/lib.rs`
-  - **A1** new `bump_end_if_not_after(date, start, end, duration_minutes)` helper (placed next to
-    `parse_duration`). When the derived `end` is **not strictly after** `start`, it rounds `end` up to
-    `start + minutes`, where `minutes = duration_minutes.filter(|m| *m > 0).unwrap_or(1)` (source
-    duration, minimum 1). A positive span (incl. an explicit user edit) is returned untouched; a
-    malformed `end` still surfaces its validation error (not silently rewritten); a midnight-crossing
-    bump is clamped to the same day's `23:59`. Uses the existing `chrono::NaiveDateTime` +
-    `chrono::Duration::minutes`.
-  - **A2** `accept_suggestion_repo` calls the helper after `validate_date`, before `parse_duration`.
-    `parse_duration` and the manual `create_entry_repo`/`update_entry_repo` paths are **unchanged** —
-    manual entry still rejects `start == end` (human typo).
+  - **A1** `bump_end_if_not_after` **replaced** by `normalize_same_minute_span(date, start, end,
+    duration_minutes) -> Result<(String, String), String>` (placed next to `parse_duration`). Returns the
+    `(start, end)` pair. When the derived `end` is **not strictly after** `start`, normalize to
+    `minutes = duration_minutes.filter(|m| *m > 0).unwrap_or(1)`:
+    - positive span (incl. an explicit user edit) → `(start, end)` untouched;
+    - `start + minutes` same day → `(start, start + minutes)` (forward bump, as before);
+    - `start + minutes` crosses midnight (i.e. `start == 23:59`) → anchor on the end:
+      `(23:59 - minutes, 23:59)`, flooring the derived start at `00:00`. Realistic case `23:58 → 23:59`.
+    A malformed `start`/`end` still surfaces its validation error (not silently rewritten). Uses the
+    existing `chrono::NaiveDateTime` + `chrono::Duration::minutes`.
+  - **A2** `accept_suggestion_repo` calls the helper after `validate_date`, before `parse_duration`, and
+    **rebinds both** `start_time` and `end_time` from its result. `parse_duration` and the manual
+    `create_entry_repo`/`update_entry_repo` paths are **unchanged** — manual entry still rejects
+    `start == end` (human typo). Frontend echo (A3) is **not touched** in this re-do per the SW-2 scope
+    (backend Workstream A only).
 
 ### Workstream B — AI cost reaches Reports and CSV (DEC-003 completion)
 - `src-tauri/src/lib.rs`
@@ -49,6 +57,9 @@ contract requires were made on the frontend. Workstream D was **verify-only** (n
   dur 1) accepts with end `09:01`, duration ≥ 1, `end > start`.
 - `accept_of_same_minute_block_without_engine_duration_bumps_by_minimum_one` — same-minute, no engine
   duration → bumps by minimum 1.
+- **`accept_of_day_end_same_minute_block_anchors_on_end_at_2359`** (DEC-035 re-do) — same-minute block at
+  `2026-06-12 23:59:10→23:59:50`, dur 1 → stores `23:58 → 23:59`, duration 1, `end > start`; no zero span,
+  no error, no midnight cross.
 - `manual_entry_with_equal_start_and_end_is_still_rejected` — manual `start == end` still errors.
 - `accept_copies_suggestion_cost_provenance_onto_the_entry` — accept copies `1.5/USD` onto the entry.
 - `summary_and_csv_carry_ai_cost_separately_and_manual_cost_is_null` — summary `ai_cost_total` separate
@@ -58,9 +69,10 @@ contract requires were made on the frontend. Workstream D was **verify-only** (n
   `accept_creates_exactly_one_ai_entry_marks_accepted_and_is_decided_once` (09:00→10:00, 60 min).
 
 ## Gate results (run on `feat/task-034-suggestions-uat-polish`, base = merged TASK-032 + TASK-033)
-- **G1** `cargo test` → **164 passed, 0 failed**. `cargo fmt --check` clean. `cargo clippy` → only
-  pre-existing warnings in untouched files (`langfuse/importer.rs`, `lib.rs:1128` app-data-dir,
-  `langfuse/tests.rs`, `lib.rs:1686` AUTO_IMPORT test); **no new warnings** from this change.
+- **G1** `cargo test --lib` → **165 passed, 0 failed** (DEC-035 re-do adds the `23:59` day-end test).
+  `cargo fmt --check` clean. `cargo clippy --lib --all-targets` → only pre-existing warnings at
+  `lib.rs:1145` (app-data-dir `io_other_error`) and `lib.rs:1703` (AUTO_IMPORT `assertions_on_constants`
+  test); **no new warnings** from this change (neither line is in the touched helper/call-site/test).
 - **G2** `npm run build` (tsc + vite) → green. `npm run test:frontend` → **88 pass / 2 fail**. The 2
   failures are in `tests/pi-observe.security.test.mjs` (remote-Langfuse-host / dotenv-allowlist) and are
   **pre-existing & environmental** (Langfuse env contamination, same class flagged in the TASK-003 QA

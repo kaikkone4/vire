@@ -59,13 +59,25 @@ function timeOfDay(ts: string | null): string {
   return m ? m[1] : '';
 }
 
-// Add `mins` to an "HH:MM" wall-clock string. Mirrors the backend `bump_end_if_not_after`
-// (lib.rs) so the visible End default equals what accept will store: a same-day bump that would
-// cross midnight is clamped to 23:59. Used only to pre-fill the edit panel; it does not change the
-// displayed block span.
+// Add `mins` to an "HH:MM" wall-clock string, clamping a midnight cross to 23:59. Used only to pre-fill
+// a same-minute block's edit End default; it does not change the displayed block span. The clamp doubles
+// as the day's-last-minute detector: when the bump equals the start (i.e. start == 23:59), suggestionRow
+// anchors on the end instead (Start = start - mins), mirroring the backend `normalize_same_minute_span`
+// (lib.rs) which at the day's final minute returns `(23:59 - duration, 23:59)`.
 export function addMinutesHHMM(hhmm: string, mins: number): string {
   const [h, m] = hhmm.split(':').map(Number);
   const total = Math.min(h * 60 + m + mins, 23 * 60 + 59);
+  const hh = String(Math.floor(total / 60)).padStart(2, '0');
+  const mm = String(total % 60).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+// Subtract `mins` from an "HH:MM" wall-clock string, flooring at 00:00. Used to derive the Start default
+// at the day's final minute, where accept anchors the same-minute span on its end (23:59) and works the
+// start backward — mirroring `normalize_same_minute_span` (lib.rs). Pre-fill only; never invents a span.
+export function subMinutesHHMM(hhmm: string, mins: number): string {
+  const [h, m] = hhmm.split(':').map(Number);
+  const total = Math.max(h * 60 + m - mins, 0);
   const hh = String(Math.floor(total / 60)).padStart(2, '0');
   const mm = String(total % 60).padStart(2, '0');
   return `${hh}:${mm}`;
@@ -120,15 +132,24 @@ export function suggestionRow(s: Suggestion): string {
     `<td>${esc(s.reason)}</td>` +
     `<td>${actions}</td>` +
     `</tr>`;
-  const startVal = timeOfDay(s.block_start_ts);
-  // DEC-034 echo: when a timed block's start and end fall in the same clock minute, accept rounds the
-  // end up to start + the engine duration (>= 1 min). Pre-fill the End input with the same value so the
-  // editable span the user sees matches what accept will store. Untimed blocks (empty start) are left
-  // blank — the backend never invents a duration.
+  let startVal = timeOfDay(s.block_start_ts);
+  // DEC-034/035 echo: when a timed block's start and end fall in the same clock minute, accept stores a
+  // positive same-day span anchored on the start (End = start + the engine duration, >= 1 min) — except
+  // at the day's final minute, where no later same-day end exists, so accept anchors on the end instead
+  // (End = 23:59, Start = 23:59 - duration). Pre-fill the edit inputs with that same span so what the
+  // user sees matches what accept will store. Untimed blocks (empty start) stay blank — the backend
+  // never invents a duration.
   let endVal = timeOfDay(s.block_end_ts);
   if (startVal && startVal === endVal && s.duration_minutes != null) {
     const mins = s.duration_minutes > 0 ? s.duration_minutes : 1;
-    endVal = addMinutesHHMM(startVal, mins);
+    const forward = addMinutesHHMM(startVal, mins);
+    if (forward !== startVal) {
+      endVal = forward; // non-boundary: forward bump (End = start + duration)
+    } else {
+      // start is the day's last minute (the bump clamped to 23:59) — anchor on the end.
+      endVal = startVal;
+      startVal = subMinutesHHMM(startVal, mins);
+    }
   }
   const hint = untimed
     ? `<p class="hint">This block has no usable timestamps. Set a start and end time to accept it — Vire never invents a duration.</p>`
@@ -191,6 +212,21 @@ export function unmappedNotice(unmapped: UnmappedEnv[]): string {
   );
 }
 
+// Always-visible notice for a disabled AI evidence source, rendered above a non-empty pending list.
+// main.ts's shared sourceBanner() intentionally skips the disabled state (it is a deliberate user choice,
+// not a fault) and emptyState only names it when the list is empty — so without this the source status
+// would silently disappear the moment any previously-imported pending suggestion is shown. The rows below
+// come from evidence imported earlier; nothing new imports while the source is disabled (DEC-004: a
+// disabled source is unknown, never zero). Settings is where the integration is re-enabled.
+export function sourceDisabledNotice(): string {
+  return (
+    `<section class="banner"><b>AI evidence source: disabled</b><p>The Langfuse integration is turned off, ` +
+    `so Vire is not importing new AI evidence. The suggestions below come from evidence imported earlier. ` +
+    `A disabled source is unknown, never zero usage or cost. Enable the integration in Settings to import ` +
+    `the latest evidence.</p><div class="row"><button data-goto-view="Settings">Open Settings</button></div></section>`
+  );
+}
+
 // Empty/absence state — never a bare empty table (design §4). The pending list alone cannot distinguish
 // "no evidence" from "all decided" from "source down", so every candidate cause is named explicitly,
 // each with its action. `sourceDegraded` is true when the AI evidence source is disabled, down, or
@@ -220,17 +256,22 @@ function emptyState(hasUnmapped: boolean, sourceDegraded: boolean): string {
   );
 }
 
-// The full Suggestions view body (header + refresh control + unmapped notice + grouped list or empty
-// state). main.ts wraps this with the error/source banners and the shell chrome and binds the actions.
-// `opts.sourceDegraded` lets the empty state name a disabled/down source as a candidate cause.
+// The full Suggestions view body (header + refresh control + disabled-source notice + unmapped notice +
+// grouped list or empty state). main.ts wraps this with the error/source banners and the shell chrome and
+// binds the actions. `opts.sourceDegraded` lets the empty state name a disabled/down source as a candidate
+// cause; `opts.sourceDisabled` surfaces a disabled source alongside a non-empty list, where the shared
+// sourceBanner() does not render and the empty state never runs (the down/stale states are already shown
+// by sourceBanner() above the body, so only the disabled gap needs covering here).
 export function suggestionsBody(
   list: SuggestionList,
-  opts: { sourceDegraded?: boolean } = {},
+  opts: { sourceDegraded?: boolean; sourceDisabled?: boolean } = {},
 ): string {
   const header = `<header><h1>Suggestions</h1><p>AI-evidence time blocks awaiting your review. Nothing is posted until you accept.</p></header>`;
   const controls = `<div class="filters"><button id="refreshSuggestions">Refresh suggestions</button></div>`;
-  const body = list.suggestions.length
+  const hasSuggestions = list.suggestions.length > 0;
+  const disabledNotice = opts.sourceDisabled && hasSuggestions ? sourceDisabledNotice() : '';
+  const body = hasSuggestions
     ? suggestionGroups(list.suggestions)
     : emptyState(list.unmapped.length > 0, opts.sourceDegraded ?? false);
-  return `${header}${controls}${unmappedNotice(list.unmapped)}${body}`;
+  return `${header}${controls}${disabledNotice}${unmappedNotice(list.unmapped)}${body}`;
 }

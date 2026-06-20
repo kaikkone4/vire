@@ -19,7 +19,7 @@ type Project={id:string;name:string;notes?:string|null;archived:boolean};
 type Entry={id:string;project_id:string;project_name:string;date:string;start_time:string;end_time:string;duration_minutes:number;note?:string|null;origin?:string;cost_total?:number|null;cost_currency?:string|null};
 // duration_minutes is human/manual time only; ai_minutes is accepted AI-suggested time kept distinct so
 // AI time is never folded into the billable human total (DEC-003 / TASK-032 B4). ai_cost_* mirror the
-// backend SummaryRow cost fields (TASK-034 B); null → "—" (absence ≠ zero). Card rendering is deferred.
+// backend SummaryRow cost fields (TASK-034 B); null → "—". Cards render this on the AI-suggested sub-line (summary-cards.ts, B5).
 type Summary={project_id:string;project_name:string;duration_minutes:number;ai_minutes:number;ai_cost_total?:number|null;ai_cost_currency?:string|null};
 type SourceHealth={base_url:string;source:string;environments:string[];last_import_at:string|null;latest_trace_ts:string|null;health:string;message:string};
 type ImportOutcome={snapshot:SourceHealth;report:ImportReport|null};
@@ -64,7 +64,7 @@ async function renderReports(){const start=document.querySelector<HTMLInputEleme
 // AI time-suggestion review (TASK-032 C). Loads the stored pending set (regenerate=false); the Refresh
 // button recomputes from the latest evidence (regenerate=true) before re-rendering. Render is secret-free
 // (suggestions-ui.ts); accept is the only path that posts a time entry (DEC-006).
-async function renderSuggestions(){const list=await call<SuggestionList>('list_time_entry_suggestions',{regenerate:false}); const sourceDegraded=!!sourceHealth&&(degradedHealth.includes(sourceHealth.health)||sourceHealth.health==='disabled'); shell(`${errorBanner()}${sourceBanner()}${suggestionsBody(list,{sourceDegraded})}`); bindSuggestions();}
+async function renderSuggestions(){const list=await call<SuggestionList>('list_time_entry_suggestions',{regenerate:false}); const sourceDisabled=sourceHealth?.health==='disabled'; const sourceDegraded=!!sourceHealth&&(degradedHealth.includes(sourceHealth.health)||sourceDisabled); shell(`${errorBanner()}${sourceBanner()}${suggestionsBody(list,{sourceDegraded,sourceDisabled})}`); bindSuggestions();}
 // Collect the inline edit-panel fields for a suggestion. Empty fields become null (no override). For an
 // untimed block the backend requires start/end and returns a clear, secret-free error if absent — that
 // error surfaces via run()/alertError rather than being re-validated here.

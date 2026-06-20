@@ -60,10 +60,14 @@ date, start, end, note) supplied at accept time, and mark the suggestion accepte
 to dismiss a suggestion, which records the decision and creates no time entry.
 
 A timed suggestion SHALL always be acceptable without manual time editing: when its start and end resolve
-to the same clock minute, accepting it SHALL store an end equal to the start plus the suggestion's
-computed duration (at least one minute). The app SHALL NEVER store a zero- or negative-duration time
-entry from an accept, including via direct command invocation. An accepted suggestion's AI cost figure
-(amount and currency when known) SHALL be carried onto the created AI-origin entry.
+to the same clock minute, accepting it SHALL store a positive span equal to the suggestion's computed
+duration (at least one minute) within the same local day. The app SHALL anchor that span on its start
+(end = start + duration) except when the start resolves to the final minute of the local day, in which
+case it SHALL instead anchor on the end (end = the final minute, start = that minute minus the computed
+duration), so the stored span never crosses into the next day. The app SHALL NEVER store a zero- or
+negative-duration time entry from an accept, including via direct command invocation. An accepted
+suggestion's AI cost figure (amount and currency when known) SHALL be carried onto the created AI-origin
+entry.
 
 #### Scenario: Accepting a same-minute suggestion stores a non-zero span
 
@@ -71,6 +75,16 @@ entry from an accept, including via direct command invocation. An accepted sugge
 - **THEN** the app creates one AI-origin time entry whose end is after its start by at least one minute
 - **AND** no manual time edit is required to accept it
 - **AND** no zero- or negative-duration entry is ever stored.
+
+#### Scenario: A same-minute suggestion at the end of the day stays within the day
+
+- **WHEN** the user accepts a timed suggestion whose start and end both resolve to the final minute of the
+  local day
+- **THEN** the app creates one AI-origin time entry whose span is the computed duration, ending at the
+  day's final minute and starting earlier the same day
+- **AND** no manual time edit is required to accept it
+- **AND** the entry does not cross into the next day and is never stored as a zero- or negative-duration
+  span.
 
 #### Scenario: Accepting a suggestion creates one AI-origin entry carrying cost
 

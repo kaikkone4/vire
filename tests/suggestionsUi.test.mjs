@@ -6,6 +6,7 @@ import {
   tokensLabel,
   costLabel,
   addMinutesHHMM,
+  subMinutesHHMM,
   suggestionRow,
   suggestionGroups,
   unmappedNotice,
@@ -70,6 +71,13 @@ test('addMinutesHHMM mirrors the backend bump: adds minutes, clamps a midnight c
   assert.equal(addMinutesHHMM('23:59', 1), '23:59');
 });
 
+test('subMinutesHHMM mirrors the day-end back-anchor: subtracts minutes, floors at 00:00', () => {
+  assert.equal(subMinutesHHMM('23:59', 1), '23:58');
+  assert.equal(subMinutesHHMM('10:48', 96), '09:12');
+  // A subtraction that would cross before midnight floors at 00:00 (matches normalize_same_minute_span).
+  assert.equal(subMinutesHHMM('00:00', 5), '00:00');
+});
+
 test('A3: same-minute block pre-fills the edit End default to start + duration (never == start)', () => {
   const html = suggestionRow(sameMinute());
   // Start renders the block minute; End is bumped to start + duration (>= 1) so the editable span the
@@ -77,6 +85,18 @@ test('A3: same-minute block pre-fills the edit End default to start + duration (
   assert.match(html, /data-edit-field="start_time" type="time" value="09:00"/);
   assert.match(html, /data-edit-field="end_time" type="time" value="09:01"/);
   assert.doesNotMatch(html, /data-edit-field="end_time" type="time" value="09:00"/);
+});
+
+test('A3 (DEC-035): a 23:59 same-minute block anchors on the end — Start 23:58 / End 23:59', () => {
+  const html = suggestionRow(
+    sameMinute({ block_start_ts: '2026-06-20 23:59:10', block_end_ts: '2026-06-20 23:59:50' }),
+  );
+  // At the day's last minute no later same-day end exists, so accept anchors on the end: Start is worked
+  // backward (23:59 - duration) and End is the block's 23:59 — mirroring normalize_same_minute_span. The
+  // visible edit span equals what accept stores, never a zero 23:59/23:59 row.
+  assert.match(html, /data-edit-field="start_time" type="time" value="23:58"/);
+  assert.match(html, /data-edit-field="end_time" type="time" value="23:59"/);
+  assert.doesNotMatch(html, /data-edit-field="start_time" type="time" value="23:59"/);
 });
 
 test('A3: a normal multi-minute block keeps its real End — no bump applied', () => {
@@ -190,6 +210,27 @@ test('C3/C4: empty state names every candidate cause with an action — never a 
   const sourceDown = suggestionsBody({ suggestions: [], unmapped: [] }, { sourceDegraded: true });
   assert.match(sourceDown, /unavailable or disabled/);
   assert.match(sourceDown, /never zero/);
+});
+
+test('C3: a disabled source is surfaced alongside a non-empty pending list, not only in the empty state', () => {
+  // SW-4 blocker: with pending suggestions present the groups render and the empty state never runs, so a
+  // disabled source — which main.ts's shared sourceBanner() also skips — would vanish. The body must carry
+  // an always-visible disabled notice with a Settings action on top of the rendered groups.
+  const html = suggestionsBody(
+    { suggestions: [timed()], unmapped: [] },
+    { sourceDegraded: true, sourceDisabled: true },
+  );
+  assert.match(html, /data-sug-row="s-1"/); // the pending list still renders
+  assert.match(html, /AI evidence source: disabled/);
+  assert.match(html, /never zero/);
+  assert.match(html, /data-goto-view="Settings"/);
+  // The notice sits above the rendered groups.
+  assert.ok(html.indexOf('AI evidence source: disabled') < html.indexOf('data-sug-row="s-1"'));
+});
+
+test('C3: a healthy source adds no disabled notice to a non-empty pending list', () => {
+  const html = suggestionsBody({ suggestions: [timed()], unmapped: [] });
+  assert.doesNotMatch(html, /AI evidence source: disabled/);
 });
 
 test('project names and reasons are escaped (no raw HTML injection)', () => {
