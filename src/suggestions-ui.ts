@@ -59,6 +59,18 @@ function timeOfDay(ts: string | null): string {
   return m ? m[1] : '';
 }
 
+// Add `mins` to an "HH:MM" wall-clock string. Mirrors the backend `bump_end_if_not_after`
+// (lib.rs) so the visible End default equals what accept will store: a same-day bump that would
+// cross midnight is clamped to 23:59. Used only to pre-fill the edit panel; it does not change the
+// displayed block span.
+export function addMinutesHHMM(hhmm: string, mins: number): string {
+  const [h, m] = hhmm.split(':').map(Number);
+  const total = Math.min(h * 60 + m + mins, 23 * 60 + 59);
+  const hh = String(Math.floor(total / 60)).padStart(2, '0');
+  const mm = String(total % 60).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
 // The block's local span "HH:MM–HH:MM"; "—" when the block carries no usable timestamps.
 export function spanLabel(start: string | null, end: string | null): string {
   const s = timeOfDay(start);
@@ -88,6 +100,12 @@ export function suggestionRow(s: Suggestion): string {
   const evidence = `${s.trace_count} trace${plural(s.trace_count)} · ${s.session_count} session${plural(s.session_count)}`;
   const usage = `${tokensLabel(s.total_tokens)} tok · ${costLabel(s.cost_total, s.cost_currency)}`;
   const quality = `${esc(s.health)} · ${esc(s.confidence)}`;
+  // Untimed evidence is not auto-trackable — surface that on the row itself, not only inside the edit
+  // panel (DEC-004 trackability). The badge restates the duration cell's "needs manual time" as an
+  // explicit, named cause + action.
+  const trackBadge = untimed
+    ? ` <span class="hint" title="No usable timestamps — add a start and end to log it">not auto-trackable — add time manually</span>`
+    : '';
   const actions = untimed
     ? `<button class="danger" data-dismiss="${id}">Dismiss</button>`
     : `<button data-accept="${id}">Accept</button> <button data-edit="${id}">Edit</button> <button class="danger" data-dismiss="${id}">Dismiss</button>`;
@@ -95,7 +113,7 @@ export function suggestionRow(s: Suggestion): string {
     `<tr data-sug-row="${id}">` +
     `<td>${esc(s.date)}</td>` +
     `<td>${esc(spanLabel(s.block_start_ts, s.block_end_ts))}</td>` +
-    `<td>${esc(durationLabel(s.duration_minutes))}</td>` +
+    `<td>${esc(durationLabel(s.duration_minutes))}${trackBadge}</td>` +
     `<td>${esc(evidence)}</td>` +
     `<td>${esc(usage)}</td>` +
     `<td>${quality}</td>` +
@@ -103,7 +121,15 @@ export function suggestionRow(s: Suggestion): string {
     `<td>${actions}</td>` +
     `</tr>`;
   const startVal = timeOfDay(s.block_start_ts);
-  const endVal = timeOfDay(s.block_end_ts);
+  // DEC-034 echo: when a timed block's start and end fall in the same clock minute, accept rounds the
+  // end up to start + the engine duration (>= 1 min). Pre-fill the End input with the same value so the
+  // editable span the user sees matches what accept will store. Untimed blocks (empty start) are left
+  // blank — the backend never invents a duration.
+  let endVal = timeOfDay(s.block_end_ts);
+  if (startVal && startVal === endVal && s.duration_minutes != null) {
+    const mins = s.duration_minutes > 0 ? s.duration_minutes : 1;
+    endVal = addMinutesHHMM(startVal, mins);
+  }
   const hint = untimed
     ? `<p class="hint">This block has no usable timestamps. Set a start and end time to accept it — Vire never invents a duration.</p>`
     : '';
@@ -159,27 +185,52 @@ export function unmappedNotice(unmapped: UnmappedEnv[]): string {
     .join('');
   return (
     `<section class="banner"><b>Unmapped AI evidence</b><p>These Langfuse environments have imported evidence ` +
-    `but no Vire project, so they produce no suggestions. Map them in Settings to get suggestions.</p>` +
-    `<ul>${items}</ul><div class="row"><button data-goto-view="Settings">Open Settings to map</button></div></section>`
+    `but no Vire project — this evidence is not trackable until mapped, so it produces no suggestions. ` +
+    `Map it in Settings to get suggestions.</p>` +
+    `<ul>${items}</ul><div class="row"><button data-goto-view="Settings">Map in Settings</button></div></section>`
   );
 }
 
 // Empty/absence state — never a bare empty table (design §4). The pending list alone cannot distinguish
-// "no evidence" from "all decided", so the candidate causes are named explicitly.
-function emptyState(hasUnmapped: boolean): string {
-  const causes = hasUnmapped
-    ? 'Evidence exists but its environments are not mapped to a project yet — map them above to get suggestions.'
-    : 'No pending suggestions. Either no AI evidence has been imported yet, or every suggestion has already been accepted or dismissed.';
-  return `<div class="empty">${causes} Use <b>Refresh suggestions</b> to recompute from the latest imported evidence, or import from Langfuse in Settings.</div>`;
+// "no evidence" from "all decided" from "source down", so every candidate cause is named explicitly,
+// each with its action. `sourceDegraded` is true when the AI evidence source is disabled, down, or
+// stale (the source banner above the body carries the detail; here we name it as a cause).
+function emptyState(hasUnmapped: boolean, sourceDegraded: boolean): string {
+  const causes: string[] = [];
+  causes.push(
+    `<li><b>Nothing imported yet, or all decided</b> — import AI evidence from Langfuse, or you have already accepted or dismissed every suggestion. <button data-goto-view="Settings">Open Settings to import</button></li>`,
+  );
+  if (hasUnmapped) {
+    causes.push(
+      `<li><b>Evidence isn't mapped to a project</b> — not trackable until mapped; map its environments (see the notice above) to get suggestions. <button data-goto-view="Settings">Map in Settings</button></li>`,
+    );
+  }
+  causes.push(
+    `<li><b>Evidence has no usable time</b> — blocks with no timestamps are not auto-trackable; open such a block and add a start and end to log it manually.</li>`,
+  );
+  if (sourceDegraded) {
+    causes.push(
+      `<li><b>The AI evidence source is unavailable or disabled</b> — see the status above; enable or fix the Langfuse connection in Settings. A down source is unknown, never zero. <button data-goto-view="Settings">Open Settings</button></li>`,
+    );
+  }
+  return (
+    `<div class="empty">No suggestions to review right now. This can happen for a few reasons:` +
+    `<ul>${causes.join('')}</ul>` +
+    `Use <b>Refresh suggestions</b> to recompute from the latest imported evidence.</div>`
+  );
 }
 
 // The full Suggestions view body (header + refresh control + unmapped notice + grouped list or empty
 // state). main.ts wraps this with the error/source banners and the shell chrome and binds the actions.
-export function suggestionsBody(list: SuggestionList): string {
+// `opts.sourceDegraded` lets the empty state name a disabled/down source as a candidate cause.
+export function suggestionsBody(
+  list: SuggestionList,
+  opts: { sourceDegraded?: boolean } = {},
+): string {
   const header = `<header><h1>Suggestions</h1><p>AI-evidence time blocks awaiting your review. Nothing is posted until you accept.</p></header>`;
   const controls = `<div class="filters"><button id="refreshSuggestions">Refresh suggestions</button></div>`;
   const body = list.suggestions.length
     ? suggestionGroups(list.suggestions)
-    : emptyState(list.unmapped.length > 0);
+    : emptyState(list.unmapped.length > 0, opts.sourceDegraded ?? false);
   return `${header}${controls}${unmappedNotice(list.unmapped)}${body}`;
 }
