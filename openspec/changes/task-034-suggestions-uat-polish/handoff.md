@@ -4,50 +4,53 @@
 
 - **Change / branch / PR**: `task-034-suggestions-uat-polish` /
   `feat/task-034-suggestions-uat-polish` / #29
-- **Phase / gate**: SW-3 **PASS** (2026-06-21) → route to SW-4 ∥ SW-5
+- **Phase / gate**: SW-4 **PASS** + SW-5 **PASS** (2026-06-21); route to SW-6
+- **Reviewed implementation through**: fix-loop commit `51d52fb`
 - **Tier**: L1
 
-## Gate result
+## SW-4 result
 
-Full SW-3 recheck after consolidated fix-loop commit 51d52fb. All 30 spec scenarios
-have observable test coverage. All gates green. No blockers.
+Prior blocker resolved: disabled Langfuse status is visible and actionable even when pending
+suggestions exist. Full implementation passes craft/conventions/complexity/dead-code/transaction review.
+No blocking issues or architect escalation.
 
-## What was verified
+Verified:
 
-- **A1/A2/A3 (DEC-034/035):** `normalize_same_minute_span` in lib.rs handles positive span
-  (unchanged), forward bump (`start → start+n`), and 23:59 day-end anchor (`23:58 → 23:59`).
-  `accept_suggestion_repo` calls it after derive. Frontend `suggestionRow` mirrors both branches
-  via `subMinutesHHMM`; DEC-035 23:59 pre-fill test passes.
-- **B1–B6 (AI cost):** `add_column_if_absent` for cost columns; accept INSERT carries cost;
-  `SUM(CASE WHEN origin='ai_suggested')` returns NULL (not 0) when no AI cost; CSV header +
-  rows carry cost columns; `summaryCards` shows "—" for absent cost, no AI sub-line for
-  manual-only projects, mixed-currency → "—".
-- **C1–C4 (source/trackability):** `unmappedNotice` copy and Settings link; `.hint` badge for
-  untimed rows; `emptyState` names every cause; `sourceDisabledNotice()` surfaces above a
-  non-empty pending list when `sourceDisabled=true` (gap not covered by `sourceBanner`).
-- **D1–D2 (fixed 30-min gap):** `GAP_MINUTES = 30` in engine.rs — no settings, no IPC, no UI;
-  clustering boundary test still passes.
-- **SEC:** No auto-post (accept is sole writer); absence ≠ zero (NULL cost renders "—");
-  SEC-012 render test passes (no sk-, Bearer, Authorization, payload, prompt in HTML).
+- same-minute normalization and frontend defaults, including `23:59 → 23:58-23:59`;
+- AI cost persistence, separate summary/card reporting, and structured CSV columns;
+- unmapped/untimed/empty/disabled-source trackability explanations;
+- fixed 30-minute clustering contract;
+- accept is one SQLite transaction through guarded status update and commit.
+
+Non-blocking notes are in `review.md`: helper naming/test clarity for non-positive spans, and a future
+backend mixed-currency guard if source currency support expands.
 
 ## Checks
 
-- Rust (`src-tauri/`): `cargo test --lib` → **165/0**; `cargo fmt --check` → clean;
-  `cargo clippy --lib --all-targets` → 3 pre-existing warnings only.
-- Frontend (`LANGFUSE_*` unset): `npm run test:frontend` → **105/0**; `npm run build` → green.
-- OpenSpec: `openspec validate task-034-suggestions-uat-polish` → valid.
-- `git diff --check HEAD` → clean.
+- Rust: `cargo test --lib` **165/165**; fmt clean; Clippy only pre-existing warnings.
+- Frontend: build green; all TASK-034 tests pass. Full suite **101/105** here because four unrelated
+  loopback server tests fail to bind `127.0.0.1` (`EPERM` sandbox restriction).
+- OpenSpec strict validation and `git diff --check origin/main..HEAD`: pass.
+- PR metadata fetch unavailable: sandbox could not reach `api.github.com`.
 
-## LANGFUSE_* note
+## SW-5 result (security gate)
 
-`tests/pi-observe.security.test.mjs` lines 50 and 82 fail when `LANGFUSE_*` env vars are set
-(pre-existing, unrelated to TASK-034). With vars unset: 105/0.
+PASS — no auto-fail. gitleaks clean; semgrep 0; Trivy 0 HIGH/CRITICAL; OSV only pre-existing dev/Linux
+advisories (zero lockfile delta, owned by TASK-043). Manual: DOM escaped, SQL parameterized, CSV
+formula-neutralized, accept single-tx, cost numeric+currency only, zero new egress/deps. See `sec.md`.
 
-## Exact next action
+## SW-6 result (release gate)
 
-Route to **SW-4 (Code Reviewer)** ∥ **SW-5 (Security Agent)** in parallel.
+PASS — 2026-06-21. `RELEASE.md` written with all three required declarations (deployment size:
+minor, rollback: partial-automated, compatibility matrix). Root `RELEASE.md` updated with v0.6.0
+entry. Tag `task-034/v0.6.0` dry-run recorded (SSH key absent — manual step for Janne). PR #29
+promoted draft → ready-for-review.
 
-## Artifacts
+## Artifacts / next action
 
-- `openspec/changes/task-034-suggestions-uat-polish/qa.md` — scenario coverage matrix
-- `openspec/changes/task-034-suggestions-uat-polish/review.md` — SW-4 review artifact
+- `RELEASE.md` — SW-6 release doc (all three declarations).
+- `sec.md` — SW-5 PASS details.
+- `review.md` — SW-4 PASS details.
+- `qa.md` — SW-3 coverage matrix.
+- **Pending (manual):** `git tag -s task-034/v0.6.0 … 28f4e00` + `git push origin task-034/v0.6.0`
+- **Pending (human):** macOS UAT on packaged `.app`
