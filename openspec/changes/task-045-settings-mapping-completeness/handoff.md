@@ -3,7 +3,7 @@
 # Handoff — TASK-045 settings-mapping-completeness
 
 - **Branch / PR**: `feat/task-045-settings-mapping-completeness` / #33
-- **Phase**: SW-3 QA **PASS**; SW-4 Code Review **PASS**; SW-5 Security **PASS**; SW-6 Release **PASS** → **DONE**
+- **Phase**: SW-3 QA **PASS**; SW-4 Code Review **PASS**; SW-5 Security **PASS**; SW-6 Release **PASS**; SW-6 Docs **PASS** → **DONE**
 - **Scope**: backend-only; no schema, IPC/TS, renderer, dependency, or egress change
 
 ## Implementation
