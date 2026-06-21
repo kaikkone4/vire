@@ -2,7 +2,7 @@
 
 Vire is a local-only macOS desktop app for project time tracking, AI usage evidence, and billing review. It imports AI traces (pi, Claude Code) from a **local Docker self-hosted Langfuse stack** as the primary AI time/usage/cost evidence source and requires human approval before any billable or profitability total is computed.
 
-Current version: v0.6.2. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
+Current version: v0.6.3. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
 
 ## Run locally
 
@@ -88,8 +88,9 @@ npm run tauri:build
    picker seeded from the environments discovered during import; `vire` is the default. An *Advanced*
    field still accepts a comma-separated list for environments discovery has not yet surfaced. Saving
    stores the union of the ticked boxes and any advanced entries.
-6. **Each environment maps to a Vire project** (TASK-027 D4): the *Environment → project mapping*
-   panel shows every discovered environment as mapped or unmapped. An unmapped environment can be
+6. **Each environment maps to a Vire project** (TASK-027 D4, TASK-045): the *Environment → project mapping*
+   panel shows every discovered, evidence-backed, or already-mapped environment. Environments with
+   existing AI evidence rows appear immediately on Settings open without a re-import. An unmapped environment can be
    mapped to an existing project, or you can type a project name in the inline input and click
    **Create & map** to create a project and map it in one explicit action. Vire never auto-creates a
    project or auto-maps an environment — every
