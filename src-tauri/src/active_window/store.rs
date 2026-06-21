@@ -152,8 +152,11 @@ pub fn insert_raw_observation(
     check_vocab(&obs.title_state, TITLE_STATE_VOCAB, "title_state")?;
     check_vocab(&obs.idle_state, IDLE_STATE_VOCAB, "idle_state")?;
     check_vocab(&obs.source, SOURCE_VOCAB, "source")?;
+    if let Some(h) = obs.capture_health.as_deref() {
+        check_vocab(h, HEALTH_STATE_VOCAB, "capture_health")?;
+    }
     let (persisted_title, effective_state) =
-        apply_title_gate(obs.window_title.as_deref(), &obs.title_state, mode);
+        apply_title_gate(obs.window_title.as_deref(), &obs.title_state, mode)?;
     conn.execute(
         "INSERT INTO active_window_raw_evidence
             (sample_ts, day, app_name, app_bundle_id, window_title, title_state,
@@ -189,11 +192,15 @@ pub fn upsert_evidence_block(
     check_vocab(&block.title_state, TITLE_STATE_VOCAB, "title_state")?;
     check_vocab(&block.idle_state, IDLE_STATE_VOCAB, "idle_state")?;
     check_vocab(&block.source, SOURCE_VOCAB, "source")?;
+    if let Some(h) = block.capture_health.as_deref() {
+        check_vocab(h, HEALTH_STATE_VOCAB, "capture_health")?;
+    }
     let (persisted_title, effective_state) =
-        apply_title_gate(block.window_title.as_deref(), &block.title_state, mode);
+        apply_title_gate(block.window_title.as_deref(), &block.title_state, mode)?;
     let bundle_key = block
         .app_bundle_id
         .as_deref()
+        .filter(|s| !s.is_empty())
         .unwrap_or(BUNDLE_NULL_SENTINEL);
     conn.execute(
         "INSERT INTO active_window_evidence
@@ -376,28 +383,64 @@ pub fn prune_expired(
 
 /// Apply the title redaction gate. Returns `(persisted_title, effective_title_state)`.
 ///
-/// `Stored` mode: if a title is present, it is persisted and the state is forced to `'captured'`
-/// (prevents an inconsistent row where a title is stored with an absence state). If no title,
-/// the caller-supplied absence state passes through unchanged.
+/// Classifies the observed title into three cases — `Present` = `Some(non-empty)`, `Empty` =
+/// `Some("")`, `Absent` = `None` — then applies the §8.2 total truth table (arch-review).
+/// Returns `Err(InvalidParameterName)` for any contradictory (caller-state, title) pair,
+/// surfacing a capture-side bug fail-closed. Both callers propagate with `?`.
 ///
-/// `Redacted` mode: if the caller observed a title (`title_state='captured'`), the value is
-/// discarded and the state becomes `'redacted'`. All non-`captured` states pass through
-/// unchanged (absence states, empty) because there is no title to discard.
-fn apply_title_gate(title: Option<&str>, state: &str, mode: TitleMode) -> (Option<String>, String) {
-    match mode {
-        TitleMode::Stored => {
-            if title.is_some() {
-                (title.map(str::to_owned), title_state::CAPTURED.to_owned())
-            } else {
-                (None, state.to_owned())
-            }
+/// Invariant: a stored `window_title IS NOT NULL` ⟺ `title_state='captured'` under Stored mode;
+/// every other state stores `window_title = NULL`.
+fn apply_title_gate(
+    title: Option<&str>,
+    state: &str,
+    mode: TitleMode,
+) -> rusqlite::Result<(Option<String>, String)> {
+    let reject = |msg: &str| Err(rusqlite::Error::InvalidParameterName(msg.to_owned()));
+
+    let is_present = matches!(title, Some(t) if !t.is_empty());
+    let is_empty_str = matches!(title, Some(t) if t.is_empty());
+
+    if state == title_state::CAPTURED {
+        if is_present {
+            return match mode {
+                TitleMode::Stored => {
+                    Ok((title.map(str::to_owned), title_state::CAPTURED.to_owned()))
+                }
+                TitleMode::Redacted => Ok((None, title_state::REDACTED.to_owned())),
+            };
         }
-        TitleMode::Redacted => {
-            if state == title_state::CAPTURED {
-                (None, title_state::REDACTED.to_owned())
-            } else {
-                (None, state.to_owned())
-            }
+        if is_empty_str {
+            // Some("") reclassified as Empty — not a stored title.
+            return Ok((None, title_state::EMPTY.to_owned()));
         }
+        return reject(
+            "title_state='captured' requires a non-empty title (capture-side invariant violated)",
+        );
     }
+    if state == title_state::EMPTY {
+        return if is_empty_str {
+            Ok((None, title_state::EMPTY.to_owned()))
+        } else {
+            reject("title_state='empty' requires Some(\"\") as the title value")
+        };
+    }
+    if state == title_state::ABSENT_NO_PERMISSION
+        || state == title_state::ABSENT_NO_WINDOW
+        || state == title_state::ABSENT_UNSUPPORTED
+    {
+        return if title.is_none() {
+            Ok((None, state.to_owned()))
+        } else {
+            reject("absence title_state requires title=None")
+        };
+    }
+    if state == title_state::REDACTED {
+        return if title.is_none() {
+            Ok((None, title_state::REDACTED.to_owned()))
+        } else {
+            reject("title_state='redacted' requires title=None (idempotent re-upsert only)")
+        };
+    }
+    // Unreachable when check_vocab ran first; fail-closed for defensive depth.
+    reject(&format!("unhandled title_state: {state:?}"))
 }

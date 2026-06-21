@@ -1,6 +1,8 @@
 //! Tests for the active-window evidence store (TASK-046). Structural, adversarial, and lifecycle.
 //! Mirrors the posture of `runtime_observer::tests` — no network, no process scanning.
 
+use std::sync::Mutex;
+
 use rusqlite::Connection;
 use serde_json::json;
 
@@ -10,6 +12,37 @@ use super::model::{
     RawObservation, RawObservationIn, TitleMode,
 };
 use super::store;
+
+// Serializes all tests that read or write process environment variables so that concurrent
+// test threads cannot observe each other's env mutations (env is process-global state).
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, val: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, val);
+        Self { key, prev }
+    }
+    fn remove(key: &'static str) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
 
 fn conn() -> Connection {
     let c = Connection::open_in_memory().unwrap();
@@ -284,12 +317,13 @@ fn stored_mode_evidence_block_round_trips_title() {
 
 #[test]
 fn absent_title_states_pass_through_gate_unchanged() {
+    // The three absence states (no title available) must pass through unchanged with title=None.
+    // title_state='empty' is excluded here: it requires Some("") not None — see matrix test.
     let c = conn();
     for (ts_val, label) in [
         (title_state::ABSENT_NO_PERMISSION, "absent_no_permission"),
         (title_state::ABSENT_NO_WINDOW, "absent_no_window"),
         (title_state::ABSENT_UNSUPPORTED, "absent_unsupported"),
-        (title_state::EMPTY, "empty"),
     ] {
         let obs = RawObservation {
             sample_ts: format!("2026-06-21T10:00:{label}Z").replace('_', "0"),
@@ -318,12 +352,12 @@ fn absent_title_states_pass_through_gate_unchanged() {
     }
 }
 
-// ----- title/state consistency (Fix 3b) -------------------------------------------------------
+// ----- title/state consistency (Fix §8.2) -----------------------------------------------------
 
 #[test]
-fn stored_mode_forces_captured_state_when_title_is_present() {
-    // Guard: caller supplies title=Some but state="absent_no_window" — the gate must force
-    // title_state to "captured" so the stored row is never inconsistent.
+fn stored_mode_rejects_absence_state_with_present_title() {
+    // Contradictory input (presence state + non-empty title) must be rejected, not silently fixed.
+    // The §8.2 truth table is fail-closed: the store cannot safely infer an absence reason.
     let c = conn();
     let obs = RawObservation {
         sample_ts: "2026-06-21T10:00:00Z".into(),
@@ -331,29 +365,197 @@ fn stored_mode_forces_captured_state_when_title_is_present() {
         app_name: Some("TestApp".into()),
         app_bundle_id: Some("com.example.consistency".into()),
         window_title: Some("Actual Title".into()),
-        title_state: title_state::ABSENT_NO_WINDOW.into(), // inconsistent — gate must fix this
+        title_state: title_state::ABSENT_NO_WINDOW.into(), // contradictory — must be rejected
         idle_state: idle_state::ACTIVE.into(),
         source: source::NSWORKSPACE.into(),
         capture_health: None,
     };
-    store::insert_raw_observation(&c, &obs, TitleMode::Stored, "2026-06-21T10:00:00Z").unwrap();
-    let (title, ts): (Option<String>, String) = c
+    let result = store::insert_raw_observation(&c, &obs, TitleMode::Stored, "2026-06-21T10:00:00Z");
+    assert!(
+        result.is_err(),
+        "absence_state + non-empty title must be rejected (capture-side invariant violated)"
+    );
+}
+
+// ----- title gate matrix: §8.2 truth table (both modes, both write paths) ---------------------
+
+#[test]
+fn title_gate_matrix_no_title_with_captured_state_rejected() {
+    // captured + None (Absent) → reject in both modes for both paths.
+    let c = conn();
+    for mode in [TitleMode::Stored, TitleMode::Redacted] {
+        let mut obs = raw_obs("2026-06-21T10:00:00Z", "2026-06-21", None);
+        obs.title_state = title_state::CAPTURED.into(); // absent title, but captured state
+        let result = store::insert_raw_observation(&c, &obs, mode, "2026-06-21T10:00:00Z");
+        assert!(
+            result.is_err(),
+            "raw: captured+absent must be rejected in {mode:?} mode"
+        );
+
+        let mut block = evidence_block("m-no-title-captured", "2026-06-21", None);
+        block.title_state = title_state::CAPTURED.into();
+        let result = store::upsert_evidence_block(&c, &block, mode, "2026-06-21T09:30:00Z");
+        assert!(
+            result.is_err(),
+            "evidence: captured+absent must be rejected in {mode:?} mode"
+        );
+    }
+}
+
+#[test]
+fn title_gate_matrix_empty_string_title_with_empty_state() {
+    // empty state + Some("") → (NULL, "empty") in both modes, both paths.
+    // Verifies the invariant: window_title IS NULL ⟺ title_state ≠ 'captured'.
+    let c = conn();
+
+    // Raw — Stored mode
+    store::insert_raw_observation(
+        &c,
+        &RawObservation {
+            sample_ts: "2026-06-21T10:00:01Z".into(),
+            day: "2026-06-21".into(),
+            app_name: Some("TestApp".into()),
+            app_bundle_id: Some("com.test.empty.stored".into()),
+            window_title: Some("".into()), // Some("") → Empty class
+            title_state: title_state::EMPTY.into(),
+            idle_state: idle_state::ACTIVE.into(),
+            source: source::NSWORKSPACE.into(),
+            capture_health: None,
+        },
+        TitleMode::Stored,
+        "2026-06-21T10:00:01Z",
+    )
+    .expect("raw stored: empty+empty must succeed");
+    let (t, ts): (Option<String>, String) = c
         .query_row(
-            "SELECT window_title, title_state FROM active_window_raw_evidence",
+            "SELECT window_title, title_state FROM active_window_raw_evidence
+              WHERE app_bundle_id='com.test.empty.stored'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(
-        title.as_deref(),
-        Some("Actual Title"),
-        "title must be stored in Stored mode"
+    assert!(
+        t.is_none(),
+        "raw stored: empty state must store NULL title (invariant)"
     );
-    assert_eq!(
-        ts,
-        title_state::CAPTURED,
-        "gate must force title_state='captured' when title is present"
+    assert_eq!(ts, title_state::EMPTY);
+
+    // Raw — Redacted mode
+    store::insert_raw_observation(
+        &c,
+        &RawObservation {
+            sample_ts: "2026-06-21T10:00:02Z".into(),
+            day: "2026-06-21".into(),
+            app_name: Some("TestApp".into()),
+            app_bundle_id: Some("com.test.empty.redacted".into()),
+            window_title: Some("".into()),
+            title_state: title_state::EMPTY.into(),
+            idle_state: idle_state::ACTIVE.into(),
+            source: source::NSWORKSPACE.into(),
+            capture_health: None,
+        },
+        TitleMode::Redacted,
+        "2026-06-21T10:00:02Z",
+    )
+    .expect("raw redacted: empty+empty must succeed");
+    let (t, ts): (Option<String>, String) = c
+        .query_row(
+            "SELECT window_title, title_state FROM active_window_raw_evidence
+              WHERE app_bundle_id='com.test.empty.redacted'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        t.is_none(),
+        "raw redacted: empty state must store NULL title"
     );
+    assert_eq!(ts, title_state::EMPTY);
+
+    // Evidence block — Stored mode
+    let mut block_stored = evidence_block("m-empty-stored", "2026-06-21", None);
+    block_stored.window_title = Some("".into());
+    block_stored.title_state = title_state::EMPTY.into();
+    block_stored.app_bundle_id = Some("com.test.empty.block.stored".into());
+    store::upsert_evidence_block(&c, &block_stored, TitleMode::Stored, "2026-06-21T09:30:00Z")
+        .expect("evidence stored: empty+empty must succeed");
+    let (t, ts): (Option<String>, String) = c
+        .query_row(
+            "SELECT window_title, title_state FROM active_window_evidence WHERE id='m-empty-stored'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        t.is_none(),
+        "evidence stored: empty state must store NULL title (invariant)"
+    );
+    assert_eq!(ts, title_state::EMPTY);
+
+    // Evidence block — Redacted mode
+    let mut block_redacted = evidence_block("m-empty-redacted", "2026-06-21", None);
+    block_redacted.window_title = Some("".into());
+    block_redacted.title_state = title_state::EMPTY.into();
+    block_redacted.app_bundle_id = Some("com.test.empty.block.redacted".into());
+    store::upsert_evidence_block(
+        &c,
+        &block_redacted,
+        TitleMode::Redacted,
+        "2026-06-21T09:30:00Z",
+    )
+    .expect("evidence redacted: empty+empty must succeed");
+    let (t, ts): (Option<String>, String) = c
+        .query_row(
+            "SELECT window_title, title_state FROM active_window_evidence
+              WHERE id='m-empty-redacted'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        t.is_none(),
+        "evidence redacted: empty state must store NULL title"
+    );
+    assert_eq!(ts, title_state::EMPTY);
+}
+
+#[test]
+fn title_gate_matrix_title_with_absence_state_rejected() {
+    // Absence states + non-empty title (Present) → reject in both modes, both paths.
+    let c = conn();
+    for absence_state in [
+        title_state::ABSENT_NO_PERMISSION,
+        title_state::ABSENT_NO_WINDOW,
+        title_state::ABSENT_UNSUPPORTED,
+    ] {
+        for mode in [TitleMode::Stored, TitleMode::Redacted] {
+            let obs = RawObservation {
+                sample_ts: "2026-06-21T10:00:00Z".into(),
+                day: "2026-06-21".into(),
+                app_name: None,
+                app_bundle_id: None,
+                window_title: Some("Contradictory Title".into()),
+                title_state: absence_state.into(),
+                idle_state: idle_state::ACTIVE.into(),
+                source: source::NSWORKSPACE.into(),
+                capture_health: None,
+            };
+            let result = store::insert_raw_observation(&c, &obs, mode, "2026-06-21T10:00:00Z");
+            assert!(
+                result.is_err(),
+                "raw: {absence_state}+present must be rejected in {mode:?} mode"
+            );
+
+            let mut block = evidence_block("m-abs-title", "2026-06-21", None);
+            block.window_title = Some("Contradictory Title".into());
+            block.title_state = absence_state.into();
+            let result = store::upsert_evidence_block(&c, &block, mode, "2026-06-21T09:30:00Z");
+            assert!(
+                result.is_err(),
+                "evidence: {absence_state}+present must be rejected in {mode:?} mode"
+            );
+        }
+    }
 }
 
 // ----- controlled vocabulary enforcement (Fix 3) -----------------------------------------------
@@ -450,6 +652,52 @@ fn record_capture_health_rejects_oversized_detail() {
         result.is_err(),
         "detail exceeding MAX_DETAIL_BYTES must be rejected"
     );
+}
+
+// ----- capture_health vocab enforcement on raw/evidence write paths (Fix §8.1) ----------------
+
+#[test]
+fn insert_raw_observation_rejects_invalid_capture_health() {
+    let c = conn();
+    let mut obs = raw_obs("2026-06-21T10:00:00Z", "2026-06-21", None);
+    obs.capture_health = Some("bad_health_state".into());
+    let result =
+        store::insert_raw_observation(&c, &obs, TitleMode::Redacted, "2026-06-21T10:00:00Z");
+    assert!(
+        result.is_err(),
+        "invalid capture_health must be rejected at the raw write boundary"
+    );
+}
+
+#[test]
+fn insert_raw_observation_accepts_none_capture_health() {
+    let c = conn();
+    let mut obs = raw_obs("2026-06-21T10:00:00Z", "2026-06-21", None);
+    obs.capture_health = None;
+    store::insert_raw_observation(&c, &obs, TitleMode::Redacted, "2026-06-21T10:00:00Z")
+        .expect("None capture_health must be accepted (nullable per schema)");
+}
+
+#[test]
+fn upsert_evidence_block_rejects_invalid_capture_health() {
+    let c = conn();
+    let mut block = evidence_block("b-health-invalid", "2026-06-21", None);
+    block.capture_health = Some("bad_health_state".into());
+    let result =
+        store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z");
+    assert!(
+        result.is_err(),
+        "invalid capture_health must be rejected at the evidence write boundary"
+    );
+}
+
+#[test]
+fn upsert_evidence_block_accepts_none_capture_health() {
+    let c = conn();
+    let mut block = evidence_block("b-health-none", "2026-06-21", None);
+    block.capture_health = None;
+    store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z")
+        .expect("None capture_health must be accepted (nullable per schema)");
 }
 
 // ----- capture health first-class --------------------------------------------------------------
@@ -791,7 +1039,9 @@ fn prune_keeps_row_at_exact_cutoff_deletes_one_second_before() {
 
 #[test]
 fn config_default_when_no_settings_no_env() {
-    // Assumes VIRE_ACTIVE_WINDOW_* env vars are absent in the test environment.
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _r1 = EnvGuard::remove("VIRE_ACTIVE_WINDOW_RETENTION_DAYS");
+    let _r2 = EnvGuard::remove("VIRE_ACTIVE_WINDOW_TITLE_MODE");
     let c = conn();
     let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
     assert_eq!(
@@ -839,6 +1089,8 @@ fn config_stored_title_mode_stored_overrides_default() {
 
 #[test]
 fn config_invalid_stored_retention_falls_back_to_default() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _r1 = EnvGuard::remove("VIRE_ACTIVE_WINDOW_RETENTION_DAYS");
     let c = conn();
     c.execute(
         "INSERT OR REPLACE INTO settings(key, value) VALUES ('active_window_retention_days', 'not_a_number')",
@@ -849,7 +1101,76 @@ fn config_invalid_stored_retention_falls_back_to_default() {
     assert_eq!(
         cfg.retention_days,
         config::DEFAULT_RETENTION_DAYS,
-        "non-numeric stored retention must fall back to default"
+        "non-numeric stored retention must fall back to default (env cleared)"
+    );
+}
+
+// ----- config env-only and DB-over-env precedence tests (Fix §8.3) ----------------------------
+//
+// All tests acquire ENV_LOCK and use EnvGuard for save/restore so CI ambient env cannot flip
+// results and concurrent test threads cannot observe each other's env mutations.
+
+#[test]
+fn config_env_only_retention_wins_over_default() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _r1 = EnvGuard::set("VIRE_ACTIVE_WINDOW_RETENTION_DAYS", "60");
+    let _r2 = EnvGuard::remove("VIRE_ACTIVE_WINDOW_TITLE_MODE");
+    let c = conn(); // no stored setting
+    let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
+    assert_eq!(
+        cfg.retention_days, 60,
+        "env-only retention must win over the compile-time default"
+    );
+}
+
+#[test]
+fn config_env_only_title_mode_wins_over_default() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _r1 = EnvGuard::remove("VIRE_ACTIVE_WINDOW_RETENTION_DAYS");
+    let _r2 = EnvGuard::set("VIRE_ACTIVE_WINDOW_TITLE_MODE", "stored");
+    let c = conn(); // no stored setting
+    let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
+    assert_eq!(
+        cfg.title_mode,
+        TitleMode::Stored,
+        "env-only title_mode must win over the compile-time default"
+    );
+}
+
+#[test]
+fn config_stored_retention_overrides_conflicting_env() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _r1 = EnvGuard::set("VIRE_ACTIVE_WINDOW_RETENTION_DAYS", "60");
+    let _r2 = EnvGuard::remove("VIRE_ACTIVE_WINDOW_TITLE_MODE");
+    let c = conn();
+    c.execute(
+        "INSERT OR REPLACE INTO settings(key, value) VALUES ('active_window_retention_days', '90')",
+        [],
+    )
+    .unwrap();
+    let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
+    assert_eq!(
+        cfg.retention_days, 90,
+        "stored DB retention must take precedence over a conflicting env var (DB > env > default)"
+    );
+}
+
+#[test]
+fn config_stored_title_mode_overrides_conflicting_env() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _r1 = EnvGuard::remove("VIRE_ACTIVE_WINDOW_RETENTION_DAYS");
+    let _r2 = EnvGuard::set("VIRE_ACTIVE_WINDOW_TITLE_MODE", "stored");
+    let c = conn();
+    c.execute(
+        "INSERT OR REPLACE INTO settings(key, value) VALUES ('active_window_title_mode', 'redacted')",
+        [],
+    )
+    .unwrap();
+    let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
+    assert_eq!(
+        cfg.title_mode,
+        TitleMode::Redacted,
+        "stored DB title_mode must take precedence over a conflicting env var"
     );
 }
 
