@@ -1,5 +1,63 @@
 # Vire — Release Notes
 
+## v0.6.2 — Langfuse public key relocated from Keychain to SQLite settings (TASK-044)
+
+**Branch:** `feat/task-044-keychain-public-key-to-settings`
+**PR:** #32
+
+### What changed
+
+The Langfuse Basic-Auth username (public key) is moved from the macOS Keychain into the existing
+plaintext `settings` SQLite table. The secret key remains Keychain-only. This eliminates an
+unnecessary Keychain access prompt for a non-secret value and makes credential state inspectable
+without Keychain access.
+
+**Pair-level env fallback:** `VIRE_LANGFUSE_PUBLIC_KEY` + `VIRE_LANGFUSE_SECRET_KEY` (or
+`LANGFUSE_*` aliases) are now a whole-pair dev override — both must be set together. A single
+env key alongside a stored key resolves to no credentials; per-field env merging is no longer
+supported.
+
+**Two-store consistency:** set/clear operations are ordered to keep the half-store window inert:
+set writes SQLite first and compensates on Keychain failure; clear removes SQLite first and
+aborts before touching Keychain on SQLite failure.
+
+### Upgrade notes
+
+**Existing installs — one-time credential re-save required.** The public key is not
+auto-migrated from Keychain to SQLite. On first launch after upgrade the app shows "no
+credentials." Open Settings → Langfuse and re-enter both keys once.
+
+**Env-var users:** both keys must be set together. See
+[openspec/changes/task-044-keychain-public-key-to-settings/RELEASE.md](openspec/changes/task-044-keychain-public-key-to-settings/RELEASE.md)
+for the full env-pair behavior and rollback table.
+
+### Compatibility and rollback
+
+No schema change (the `settings` table pre-existed). No IPC change. Rolling back to v0.6.1
+requires a credential re-save (code reverts automatically; the key location reverts with the
+code). Deployment size: **patch**. Rollback: **partial-automated** (code automated; one
+credential re-entry required).
+
+### Tests
+
+**Rust** (`cargo test settings::tests`): **33 passed / 0 failed** (pair-level resolver, set
+compensation ×2, clear compensation, half-state inertness).
+
+---
+
+## v0.6.1 — npm dev-dep advisory bump: vite 6.4.3 + esbuild 0.28.1 (TASK-043)
+
+**Branch:** `chore/task-043-vite-esbuild-advisory-bump`
+**PR:** #30
+
+### What changed
+
+Dev-dependency advisory patch clearing 3 npm advisories (GHSA-fx2h HIGH, GHSA-v6wh-96g9 MED,
+GHSA-g7r4 LOW) in `vite` and `esbuild`. No source, runtime, or shipped-binary change. See
+[openspec/changes/task-043-dependency-advisory-bump/RELEASE.md](openspec/changes/task-043-dependency-advisory-bump/RELEASE.md).
+
+---
+
 ## v0.6.0 — Suggestions UAT polish: cost, normalization, trackability (TASK-034)
 
 **Branch:** `feat/task-034-suggestions-uat-polish`

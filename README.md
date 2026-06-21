@@ -2,7 +2,7 @@
 
 Vire is a local-only macOS desktop app for project time tracking, AI usage evidence, and billing review. It imports AI traces (pi, Claude Code) from a **local Docker self-hosted Langfuse stack** as the primary AI time/usage/cost evidence source and requires human approval before any billable or profitability total is computed.
 
-Current version: v0.6.0. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
+Current version: v0.6.2. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
 
 ## Run locally
 
@@ -159,8 +159,16 @@ This build is forward/backward compatible with prior Vire builds on the same Mac
   'manual'`); existing rows are backfilled to `'manual'` — no destructive migration, no existing data
   altered. TASK-034 adds two additive nullable columns (`cost_total REAL`, `cost_currency TEXT`) on
   `time_entries` via `add_column_if_absent` — older builds ignore them silently; no data loss.
-- **Secrets:** the Langfuse secret/public key live in app-scoped macOS Keychain entries (service
-  `dev.vire.app`). They persist across reinstall and are **not** bundled in the artifact.
+  TASK-044 adds a `langfuse_public_key` row to the `settings` table (no DDL change; the table
+  pre-existed); a pre-v0.6.2 rollback ignores the row silently — no data loss.
+- **Secrets (TASK-044):** the Langfuse **secret** key lives in an app-scoped macOS Keychain entry
+  (service `dev.vire.app`, account `langfuse_secret_key`). The **public** key is stored in the
+  local SQLite `settings` table alongside other non-secret configuration (base URL, environments)
+  since v0.6.2 — it is not a secret and no longer requires a Keychain entry. Both persist across
+  reinstall and are **not** bundled in the artifact. **Existing-install note:** after upgrading
+  from a pre-v0.6.2 build the app shows "no credentials" on first launch — the public key is not
+  auto-migrated from the legacy Keychain item. Open Settings → Langfuse and re-enter both keys
+  once to restore the integration.
 - **Rollback:** reverting to any prior build opens the same `vire.sqlite` and ignores unknown additive
   `settings` rows, the new `langfuse_backfill_progress` and `time_entry_suggestions` tables, the
   `time_entries.origin` column, and the `cost_total`/`cost_currency` columns → **no data loss, no
@@ -207,7 +215,7 @@ These steps require a macOS build; Keychain-backed paths cannot be verified in C
 4. **Settings → Langfuse integration panel:** confirm the panel is visible with base URL, source, environments, and the enable toggle.
 5. **Save non-secret settings:** change the base URL / environments and click Save. Quit and relaunch — confirm the values persisted (SQLite round-trip).
 6. **Credentials (no read-back):** enter a public key and secret key, click Save credentials. Confirm the form shows `set` flags — it must never display the stored values back.
-7. **Keychain verify:** open macOS **Keychain Access.app** and confirm two entries exist under service `dev.vire.app` (accounts `langfuse_public_key`, `langfuse_secret_key`).
+7. **Keychain verify (TASK-044):** open macOS **Keychain Access.app** and confirm **one** entry exists under service `dev.vire.app` (account `langfuse_secret_key`). The public key is now stored in SQLite — no `langfuse_public_key` entry should appear in Keychain. A second Keychain dialog for the public key on fresh launch is a regression.
 8. **Test connection:** with integration enabled and credentials set, click **Test connection**. Confirm a coarse verdict appears (`reachable` / `auth_or_network_error`) — no secret value or raw error body in the result. If the local Langfuse stack is not running, expect `auth_or_network_error` or `unavailable` — never an empty/frozen UI.
 9. **Test connection disabled guard:** turn the integration toggle off and save. Confirm the Test connection button is disabled (with tooltip). Confirm "Import from Langfuse now" is also disabled.
 10. **Clear credentials:** click Clear credentials → confirm both keys show `not set`. A subsequent import attempt reports `auth_or_network_error`, never zero AI usage or cost.

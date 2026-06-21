@@ -844,8 +844,17 @@ fn set_langfuse_import_range(state: State<AppState>, range: String) -> CmdResult
 }
 
 #[tauri::command]
-fn set_langfuse_secret(public_key: String, secret_key: String) -> CmdResult<()> {
+fn set_langfuse_secret(
+    state: State<AppState>,
+    public_key: String,
+    secret_key: String,
+) -> CmdResult<()> {
+    // The public key now persists in the SQLite `settings` table (TASK-044), so this command needs
+    // the DB handle. The JS argument shape (`{publicKey, secretKey}`) is unchanged — `state` is
+    // injected by Tauri, not passed by the renderer.
+    let db = db_conn(&state)?;
     settings::set_langfuse_secret_repo(
+        &db,
         &settings::secret_store::KeyringSecretStore::new(),
         public_key,
         secret_key,
@@ -853,8 +862,9 @@ fn set_langfuse_secret(public_key: String, secret_key: String) -> CmdResult<()> 
 }
 
 #[tauri::command]
-fn clear_langfuse_secret() -> CmdResult<()> {
-    settings::clear_langfuse_secret_repo(&settings::secret_store::KeyringSecretStore::new())
+fn clear_langfuse_secret(state: State<AppState>) -> CmdResult<()> {
+    let db = db_conn(&state)?;
+    settings::clear_langfuse_secret_repo(&db, &settings::secret_store::KeyringSecretStore::new())
 }
 
 #[tauri::command]
