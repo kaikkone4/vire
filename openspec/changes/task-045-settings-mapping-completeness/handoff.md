@@ -1,34 +1,35 @@
-<!-- handoff.md — compact per-task state. KEEP <= 2 KB. Reference files; never paste. -->
+<!-- Compact task state; keep <= 2 KB. -->
 
 # Handoff — TASK-045 settings-mapping-completeness
 
-- **Change dir**: `openspec/changes/task-045-settings-mapping-completeness/`
-- **Branch / PR**: `feat/task-045-settings-mapping-completeness` → draft PR (link in SW-2 report)
-- **Phase / gate**: SW-2 Implementation **DONE** → next **SW-3 QA**
-- **Tier**: L1-equivalent — no schema migration, no IPC contract change, no new egress/deps
+- **Branch / PR**: `feat/task-045-settings-mapping-completeness` / #33
+- **Phase**: SW-3 QA **PASS**; SW-4 Code Review **PASS**; SW-5 Security **PASS**; SW-6 Release **PASS** → **DONE**
+- **Scope**: backend-only; no schema, IPC/TS, renderer, dependency, or egress change
 
-## What changed (A+B + tests, backend-only)
+## Implementation
 
-- **A** `env_mapping/mod.rs::list_discovered_environments_repo` — universe is the **union** of
-  discovered ∪ distinct `langfuse_ai_evidence.environment` ∪ distinct
-  `langfuse_env_project_map.environment` (BTreeMap → sorted, de-duped). `last_seen` precedence
-  discovered → evidence(`MAX(ai_end_ts)`→`MAX(ai_start_ts)`) → empty; never drops a row. Shape
-  `Vec<DiscoveredEnvState>` unchanged. Fixes Janne's DB with **no re-import**.
-- **B** `langfuse/mod.rs::run_blocking` — discovery look-back uses `discovery_window(range_floor, now)`
-  not `recent_window(7)`. Removed unused `recent_window`/`DISCOVERY_WINDOW_DAYS`; `discovery::MAX_PAGES`
-  made `pub` (visibility only) for the bound test.
-- **Tests**: `env_mapping/tests.rs` C1–C4; `langfuse/tests.rs` C5 (window floor == range floor; `all`
-  bounded by `MAX_PAGES`). Hardened the SEC-010 test vs a UUID/`579` false positive.
+- `env_mapping/mod.rs`: Settings mapping universe is discovered ∪ evidence ∪ mapped, using a
+  `BTreeMap` for exact de-duplication and lexical order.
+- `last_seen`: discovered → `MAX(ai_end_ts)` → `MAX(ai_start_ts)` → empty; rows are retained.
+- Existing map → project join and `DiscoveredEnvState` shape are unchanged.
+- `langfuse/mod.rs`: discovery scans resolved import-range floor → now.
+- `langfuse/discovery.rs`: scan remains `MAX_PAGES`-bounded.
+- Tests cover evidence-only, mapped-only, all-source de-dup/join, fallback/sort/latest timestamp,
+  range-floor construction, and the page bound.
 
 ## Gates
 
-- `cargo test --lib` 182 ✓ · `fmt --check` ✓ · clippy **no new findings** ✓ · `cargo check` ✓
-- `npm run build` ✓ · `openspec validate --strict` ✓ · `git diff --check` ✓
-- `test:frontend`: 2 **pre-existing network failures** in `tests/pi-observe.security.test.mjs`
-  (reproduced on clean `main` — NOT this change).
+- SW-3: `qa.md` — PASS, all 12 scenarios covered.
+- SW-4: `review.md` — PASS, no blockers or architecture escalation.
+- SW-4 checks: Rust lib tests 182/182; focused tests; fmt; clippy with no new TASK-045 warnings.
+- SW-5: `sec.md` — PASS (L2). gitleaks 0 (191 commits); semgrep 0 ERROR; OSV no CVE ≥ 7.0
+  (only pre-existing Tauri/GTK unmaintained advisories, no lockfile change); Trivy 0 HIGH/CRIT;
+  SEC-010 secret-free verified by review + test. No design escalation.
+- Existing frontend network-test failures are documented in `qa.md` and reproduced on `main`.
 
-## Next / notes
+## Non-blocking notes
 
-- **SW-3 QA**: re-run D1–D4; focus C1–C5. Renderer/IPC untouched.
-- **DEC-038** BA-owned (surface = discovered ∪ has-evidence ∪ mapped) → `07_decision_log.md`;
-  SW can't write BA artifacts. Non-blocking. See `design.md` §7.
+- Prefer `pub(super)`/`pub(crate)` for `discovery::MAX_PAGES`.
+- The mapping project lookup is N+1 but acceptable for the expected small environment set.
+- PR metadata fetch was unavailable during SW-4; commit `bd90b770` message is complete.
+- DEC-038 remains BA-owned and non-blocking; see `design.md` §7.

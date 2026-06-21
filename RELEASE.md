@@ -1,5 +1,43 @@
 # Vire — Release Notes
 
+## v0.6.3 — Settings mapping list widened to discovered ∪ evidence ∪ mapped envs (TASK-045)
+
+**Branch:** `feat/task-045-settings-mapping-completeness`
+**PR:** #33
+
+### What changed
+
+Fixed the **Settings → Environment Mapping panel silently omitting environments** that were
+present only in older evidence rows (outside the active discovery window). The mapping universe
+is now the union of all discovered environments, all environments with evidence rows, and all
+already-mapped environments.
+
+**Discovery window** now follows the user-configured import-range floor instead of a fixed
+7-day window, so environments from longer ranges appear in both the mapping list and future
+discovery passes.
+
+No UI, IPC, schema, or dependency change.
+
+### Upgrade notes
+
+**No re-import required.** Evidence-backed environments appear immediately from existing DB rows
+on next Settings open. If you have unmapped environments that were not visible before, they are
+now listed — map them in Settings.
+
+### Compatibility and rollback
+
+No schema change, no IPC change, no data migration, no new dependency. Rolling back to v0.6.2
+requires only a code revert and rebuild — no user action. Deployment size: **patch**. Rollback:
+**automated**.
+
+### Tests
+
+**Rust** (`cargo test --lib`): **182 passed / 0 failed**
+(new tests: evidence-only, mapped-only, all-source de-dup/join, fallback/sort/latest timestamp,
+range-floor construction, page-bound)
+
+---
+
 ## v0.6.2 — Langfuse public key relocated from Keychain to SQLite settings (TASK-044)
 
 **Branch:** `feat/task-044-keychain-public-key-to-settings`
