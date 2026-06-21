@@ -14,8 +14,10 @@ use super::model::{ApiError, ImportWindow, Trace};
 
 /// Page size for the discovery scan (mirrors the importer's trace page size).
 pub const DISCOVERY_PAGE_LIMIT: u32 = 50;
-/// Hard pagination backstop so a wrong `totalPages` can never spin the scan forever.
-const MAX_PAGES: u32 = 1000;
+/// Hard pagination backstop so a wrong `totalPages` can never spin the scan forever. `pub` so the
+/// look-back-window tests can assert an `all`-range discovery degrades to "as many pages as the
+/// backstop allowed" rather than spinning (TASK-045 B2/C5).
+pub const MAX_PAGES: u32 = 1000;
 
 /// Discover the distinct environments present in the source over `window`. Paginates
 /// `GET /api/public/traces` without the environment filter and returns the sorted set of

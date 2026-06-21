@@ -88,8 +88,9 @@ npm run tauri:build
    picker seeded from the environments discovered during import; `vire` is the default. An *Advanced*
    field still accepts a comma-separated list for environments discovery has not yet surfaced. Saving
    stores the union of the ticked boxes and any advanced entries.
-6. **Each environment maps to a Vire project** (TASK-027 D4): the *Environment → project mapping*
-   panel shows every discovered environment as mapped or unmapped. An unmapped environment can be
+6. **Each environment maps to a Vire project** (TASK-027 D4, TASK-045): the *Environment → project mapping*
+   panel shows every discovered, evidence-backed, or already-mapped environment. Environments with
+   existing AI evidence rows appear immediately on Settings open without a re-import. An unmapped environment can be
    mapped to an existing project, or you can type a project name in the inline input and click
    **Create & map** to create a project and map it in one explicit action. Vire never auto-creates a
    project or auto-maps an environment — every

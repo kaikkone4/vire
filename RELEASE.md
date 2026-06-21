@@ -60,6 +60,130 @@ See [openspec/changes/task-047-tauri-gtk-rustsec-cleanup/RELEASE.md](openspec/ch
 
 ---
 
+## v0.7.0 — Active-window evidence storage foundation (TASK-046)
+
+**Branch:** `feat/task-046-active-window-evidence-storage`
+**PR:** #34
+
+### What changed
+
+Added the **local SQLite storage foundation for human active-window evidence** — three tables,
+a typed write/read/prune API, and a configurable retention lifecycle. **No capture runs yet:**
+the macOS capture sidecar, Accessibility/TCC permissions, and any user-facing UI are deferred
+to the next task. `capture_status` stays `manual_mode_deferred`.
+
+**Schema (additive, idempotent):**
+
+- `active_window_raw_evidence` — per-sample observations (high-frequency, append-only, integer PK).
+- `active_window_evidence` — coalesced reviewable blocks (the durable evidence unit, UUID PK,
+  unique on `(day, start_ts, app_bundle_id)` for idempotent upsert).
+- `active_window_capture_health` — first-class degraded-state rows so every capture gap is
+  explained, never silent.
+
+No column exists — in any of the three tables — for screenshots, keystrokes, full URLs or paths,
+command bodies, prompt/response text, clipboard contents, or secrets. The schema is the allowlist.
+
+**Default `window_title` redaction (privacy invariant):**
+
+`title_mode = redacted` (the default): a raw window title is **never written to disk**. When a
+title is observed the row records `window_title = NULL` and `title_state = 'redacted'` — presence
+is known, the value is discarded at the write boundary. A `stored` opt-in is defined for the
+future privacy-settings UI; nothing in this release enables it.
+
+**Retention lifecycle:**
+
+`prune_expired` deletes only rows older than the configured retention window (default 30 days)
+from the three `active_window_*` tables and never touches `time_entries` or any other table.
+Called once at startup (`init_db`) as housekeeping.
+
+**Configuration:**
+
+| Settings key | Env-var fallback | Default |
+|---|---|---|
+| `active_window_retention_days` | `VIRE_ACTIVE_WINDOW_RETENTION_DAYS` | `30` |
+| `active_window_title_mode` | `VIRE_ACTIVE_WINDOW_TITLE_MODE` | `redacted` |
+
+Settings table takes precedence over env vars. Env vars are a power-use and test fallback.
+
+### Upgrade notes
+
+No user action required. Three empty tables are created on first launch after upgrade. No capture
+process runs, no permission is requested, no UI changes, no IPC surface is added.
+
+### Compatibility and rollback
+
+**Schema (additive):** `CREATE TABLE IF NOT EXISTS` for all three tables; `INSERT OR IGNORE`
+for the two `settings` rows. No existing table, column, or row is altered.
+
+**Rollback:** revert to v0.6.3 — the three tables and settings rows are inert to older builds
+(unknown tables never read, unknown settings keys silently ignored). No data loss, no destructive
+migration. Deployment size: **minor** (internal — no UI/IPC/user-visible change).
+Rollback: **automated**.
+
+**Component compatibility matrix:**
+
+| Component | Min | Max | Notes |
+|---|---|---|---|
+| rusqlite (bundled SQLite) | 0.32 | no known max | bundled SQLite 3.47.2; new tables use standard SQL, no SQLite-version-specific features |
+| tauri | 2.2 | no known max | startup `init_db` hook at `lib.rs:149`; no new capability or IPC command |
+| chrono | 0.4 | no known max | UTC timestamp arithmetic for retention prune boundary |
+| serde / serde_json | 1 | no known max | JSON config deserialization; no new surface |
+| keyring | 3 | no known max | not touched by this task; listed for completeness |
+| @tauri-apps/api | 2.2.0 | no known max | no new IPC commands; renderer unchanged |
+| macOS | 14.0 | no known max | Tauri 2 minimum; no new entitlement or permission requested |
+| SQLite DB (`vire.sqlite`) | v0.6.3+ schema | forward-compatible | three new tables are inert to older builds; older builds write to same DB safely |
+
+Zero new Rust crates or npm packages added (Cargo.lock and package-lock.json byte-identical to v0.6.3).
+
+### Tests
+
+**Rust** (`cargo test --lib`): **220 lib + 5 adversarial = 225 passed / 0 failed**
+
+New tests: `migrate` idempotent + additive; no-prohibited-column `PRAGMA table_info` assertion;
+allowlist-drop adversarial (injected prompt/command/secret/url/clipboard keys dropped); title
+redaction round-trip × 2 modes (`redacted`/`stored`); capture-health first-class vocabulary
+round-trip; retention safety + sentinel `time_entries` row survival; no-raw-title-in-logs.
+
+---
+
+## v0.6.3 — Settings mapping list widened to discovered ∪ evidence ∪ mapped envs (TASK-045)
+
+**Branch:** `feat/task-045-settings-mapping-completeness`
+**PR:** #33
+
+### What changed
+
+Fixed the **Settings → Environment Mapping panel silently omitting environments** that were
+present only in older evidence rows (outside the active discovery window). The mapping universe
+is now the union of all discovered environments, all environments with evidence rows, and all
+already-mapped environments.
+
+**Discovery window** now follows the user-configured import-range floor instead of a fixed
+7-day window, so environments from longer ranges appear in both the mapping list and future
+discovery passes.
+
+No UI, IPC, schema, or dependency change.
+
+### Upgrade notes
+
+**No re-import required.** Evidence-backed environments appear immediately from existing DB rows
+on next Settings open. If you have unmapped environments that were not visible before, they are
+now listed — map them in Settings.
+
+### Compatibility and rollback
+
+No schema change, no IPC change, no data migration, no new dependency. Rolling back to v0.6.2
+requires only a code revert and rebuild — no user action. Deployment size: **patch**. Rollback:
+**automated**.
+
+### Tests
+
+**Rust** (`cargo test --lib`): **182 passed / 0 failed**
+(new tests: evidence-only, mapped-only, all-source de-dup/join, fallback/sort/latest timestamp,
+range-floor construction, page-bound)
+
+---
+
 ## v0.6.2 — Langfuse public key relocated from Keychain to SQLite settings (TASK-044)
 
 **Branch:** `feat/task-044-keychain-public-key-to-settings`

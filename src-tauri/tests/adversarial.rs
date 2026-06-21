@@ -5,6 +5,65 @@ use vire_lib::{
     list_entries_repo, summary_repo, update_entry_repo, ProjectInput, TimeEntryInput,
 };
 
+// ----- active-window structural (TASK-046) -----------------------------------------------------
+
+const AW_PROHIBITED_COLS: &[&str] = &[
+    "screenshot",
+    "pixels",
+    "keystroke",
+    "key",
+    "mouse",
+    "url",
+    "path",
+    "command",
+    "prompt",
+    "response",
+    "clipboard",
+    "secret",
+    "password",
+    "token",
+    "env",
+];
+
+#[test]
+fn active_window_tables_have_no_prohibited_column() {
+    let c = Connection::open_in_memory().unwrap();
+    init_db(&c).unwrap();
+    for table in &[
+        "active_window_raw_evidence",
+        "active_window_evidence",
+        "active_window_capture_health",
+    ] {
+        let mut stmt = c.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            !cols.is_empty(),
+            "table {table} must exist and have columns after init_db"
+        );
+        for col in &cols {
+            let lc = col.to_ascii_lowercase();
+            for banned in AW_PROHIBITED_COLS {
+                assert!(
+                    !lc.contains(banned),
+                    "table `{table}` must not have a `{banned}`-bearing column; found `{col}`"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn active_window_migration_is_additive_via_init_db() {
+    // Running init_db twice on the same connection must not error (idempotent migration).
+    let c = Connection::open_in_memory().unwrap();
+    init_db(&c).expect("first init_db");
+    init_db(&c).expect("second init_db must be idempotent including active_window tables");
+}
+
 fn conn() -> Connection {
     let c = Connection::open_in_memory().unwrap();
     init_db(&c).unwrap();
