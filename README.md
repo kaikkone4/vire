@@ -2,7 +2,7 @@
 
 Vire is a local-only macOS desktop app for project time tracking, AI usage evidence, and billing review. It imports AI traces (pi, Claude Code) from a **local Docker self-hosted Langfuse stack** as the primary AI time/usage/cost evidence source and requires human approval before any billable or profitability total is computed.
 
-Current version: v0.6.2. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
+Current version: v0.7.1. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
 
 ## Run locally
 
@@ -177,6 +177,35 @@ This build is forward/backward compatible with prior Vire builds on the same Mac
   (`VIRE_LANGFUSE_*`) for Langfuse config, which remain a marked dev fallback. The default import window
   changes from 7 days to 30 days (TASK-029); re-importing a trace already stored is a durable-dedupe
   no-op.
+
+## Dependency advisory gate
+
+`src-tauri/deny.toml` defines a **target-scoped** Rust dependency advisory check run by
+`.github/workflows/dependency-advisories.yml` on every PR, push to `main`, and
+`workflow_dispatch`. Pinned scanner: **cargo-deny 0.19.9**. The check evaluates only the shipped
+Apple targets (`aarch64-apple-darwin`, `x86_64-apple-darwin`); the runner is ubuntu-latest purely
+for speed — the gate's correctness comes from `[graph].targets`, not the runner platform.
+
+Run locally with the same pinned version CI uses:
+
+```sh
+cargo install cargo-deny --version 0.19.9 --locked
+cd src-tauri && cargo deny check advisories
+```
+
+**Advisory posture — 17 RustSec advisories in `Cargo.lock` (as of v0.7.1):**
+
+| Group | Count | Crates | Handling |
+|---|---|---|---|
+| Linux-only (deferred) | 12 | GTK3/glib/proc-macro-error — `cfg`-gated to Linux; absent from macOS graph | Target-scoped out via `[graph].targets`; **not** in `ignore` |
+| Apple-present (accepted) | 5 | `unic-*` unmaintained (RUSTSEC-2025-0075/0080/0081/0098/0100) via `urlpattern → tauri-utils` | In `[advisories].ignore` with per-ID rationale |
+
+**Tripwire:** adding a Linux build triple to `[graph].targets` re-surfaces the 12 Linux-only
+advisories and fails the gate — by design. Evaluate and accept or fix each advisory before adding
+a Linux target; do not add the gtk3-rs/glib IDs to `ignore`.
+
+Full advisory inventory, reachability proof, and risk-acceptance rationale:
+`src-tauri/deny.toml` (DEFERRED/ACCEPTED comment blocks) and [RELEASE.md](RELEASE.md) v0.7.1.
 
 ## Tests
 

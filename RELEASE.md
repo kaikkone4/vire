@@ -1,6 +1,6 @@
 # Vire — Release Notes
 
-## v0.6.3 — Target-scoped Rust dependency advisory gate (TASK-047, TASK-043 Stream B)
+## v0.7.1 — Target-scoped Rust dependency advisory gate (TASK-047, TASK-043 Stream B)
 
 **Branch:** `feat/task-047-tauri-gtk-rustsec-cleanup`
 
@@ -45,6 +45,18 @@ dependency-graph delta** (`git diff main -- src-tauri/Cargo.toml src-tauri/Cargo
 `src-tauri/src/**`, `src/**`, `tauri.conf.json`, or capability files touched), so the built macOS `.app`
 carries no dependency or source change from this task. Deployment size: **patch**. Rollback: delete
 `src-tauri/deny.toml` + `.github/workflows/dependency-advisories.yml` (fully automated, no data impact).
+
+**Component compatibility matrix:**
+
+| Dependency / component | Min version | Pinned / locked | Notes |
+|---|---|---|---|
+| `cargo-deny` (CI gate) | 0.18.0 | **0.19.9** | `unmaintained = "all"` requires ≥ 0.18; pinned in workflow |
+| Rust toolchain | stable | stable (cargo 1.95.0 tested) | No constraint change |
+| Tauri runtime | 2.11.2 | 2.11.2 | Zero `Cargo.lock` delta — all crate versions unchanged from v0.7.0 |
+| npm / frontend deps | unchanged | unchanged | No `package.json` / `package-lock.json` delta |
+| macOS target | Ventura 13+ | — | Same as v0.7.0 |
+
+See [openspec/changes/task-047-tauri-gtk-rustsec-cleanup/RELEASE.md](openspec/changes/task-047-tauri-gtk-rustsec-cleanup/RELEASE.md) for the full gate artifact.
 
 ---
 
