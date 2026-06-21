@@ -151,7 +151,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     active_window::store::migrate(conn)?;
     // Startup housekeeping: prune expired active-window rows once per launch (C6 — touches only
     // active_window_* tables, never time_entries or any approved summary).
-    let aw_cfg = active_window::config::ActiveWindowConfig::from_env();
+    let aw_cfg = active_window::config::ActiveWindowConfig::from_settings(conn)?;
     active_window::store::prune_expired(conn, &now(), aw_cfg.retention_days)?;
     Ok(())
 }

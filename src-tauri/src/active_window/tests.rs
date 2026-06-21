@@ -4,6 +4,7 @@
 use rusqlite::Connection;
 use serde_json::json;
 
+use super::config;
 use super::model::{
     health_state, idle_state, source, title_state, CaptureHealthEvent, EvidenceBlock,
     RawObservation, RawObservationIn, TitleMode,
@@ -141,8 +142,8 @@ fn raw_observation_in_drops_prohibited_keys_before_anything_is_persisted() {
         "url": "https://secret.example.com/token?key=value",
         "clipboard": "CLIPBOARD_SECRET_VALUE",
         "secret": "MY_API_KEY_sk-ant-SECRET",
-        "password": "hunter2_PROHIBITED",
-        "token": "ghp_SECRETTOKEN",
+        "password": "PROHIBITED_SYNTHETIC_PW",  // gitleaks:allow
+        "token": "SYNTHETIC_TOKEN_FIXTURE",      // gitleaks:allow
         "env": {"AWS_SECRET_ACCESS_KEY": "AKIASECRETKEY000"},
         "keystroke": "ctrl+c",
         "screenshot": "base64encodedPNG",
@@ -178,7 +179,7 @@ fn raw_observation_in_drops_prohibited_keys_before_anything_is_persisted() {
         )
         .unwrap();
     for prohibited in [
-        "SECRET", "PROHIBITED", "rm -rf", "AKIASECRET", "ghp_", "hunter2", "CLIPBOARD",
+        "SECRET", "PROHIBITED", "rm -rf", "AKIASECRET", "SYNTHETIC_TOKEN", "CLIPBOARD",
         "ctrl+c", "base64", "id_rsa",
     ] {
         assert!(
@@ -290,6 +291,116 @@ fn absent_title_states_pass_through_gate_unchanged() {
     }
 }
 
+// ----- title/state consistency (Fix 3b) -------------------------------------------------------
+
+#[test]
+fn stored_mode_forces_captured_state_when_title_is_present() {
+    // Guard: caller supplies title=Some but state="absent_no_window" — the gate must force
+    // title_state to "captured" so the stored row is never inconsistent.
+    let c = conn();
+    let obs = RawObservation {
+        sample_ts: "2026-06-21T10:00:00Z".into(),
+        day: "2026-06-21".into(),
+        app_name: Some("TestApp".into()),
+        app_bundle_id: Some("com.example.consistency".into()),
+        window_title: Some("Actual Title".into()),
+        title_state: title_state::ABSENT_NO_WINDOW.into(), // inconsistent — gate must fix this
+        idle_state: idle_state::ACTIVE.into(),
+        source: source::NSWORKSPACE.into(),
+        capture_health: None,
+    };
+    store::insert_raw_observation(&c, &obs, TitleMode::Stored, "2026-06-21T10:00:00Z").unwrap();
+    let (title, ts): (Option<String>, String) = c
+        .query_row(
+            "SELECT window_title, title_state FROM active_window_raw_evidence",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(title.as_deref(), Some("Actual Title"), "title must be stored in Stored mode");
+    assert_eq!(ts, title_state::CAPTURED, "gate must force title_state='captured' when title is present");
+}
+
+// ----- controlled vocabulary enforcement (Fix 3) -----------------------------------------------
+
+#[test]
+fn insert_raw_observation_rejects_invalid_title_state() {
+    let c = conn();
+    let obs = RawObservation {
+        sample_ts: "2026-06-21T10:00:00Z".into(),
+        day: "2026-06-21".into(),
+        app_name: None,
+        app_bundle_id: None,
+        window_title: None,
+        title_state: "invalid_state".into(),
+        idle_state: idle_state::ACTIVE.into(),
+        source: source::NSWORKSPACE.into(),
+        capture_health: None,
+    };
+    let result =
+        store::insert_raw_observation(&c, &obs, TitleMode::Redacted, "2026-06-21T10:00:00Z");
+    assert!(result.is_err(), "invalid title_state must be rejected at the write boundary");
+}
+
+#[test]
+fn insert_raw_observation_rejects_invalid_idle_state() {
+    let c = conn();
+    let obs = RawObservation {
+        sample_ts: "2026-06-21T10:00:00Z".into(),
+        day: "2026-06-21".into(),
+        app_name: None,
+        app_bundle_id: None,
+        window_title: None,
+        title_state: title_state::ABSENT_NO_WINDOW.into(),
+        idle_state: "unknown_idle".into(),
+        source: source::NSWORKSPACE.into(),
+        capture_health: None,
+    };
+    let result =
+        store::insert_raw_observation(&c, &obs, TitleMode::Redacted, "2026-06-21T10:00:00Z");
+    assert!(result.is_err(), "invalid idle_state must be rejected at the write boundary");
+}
+
+#[test]
+fn upsert_evidence_block_rejects_invalid_source() {
+    let c = conn();
+    let mut block = evidence_block("b1", "2026-06-21", None);
+    block.source = "invalid_source".into();
+    let result = store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z");
+    assert!(result.is_err(), "invalid source must be rejected at the write boundary");
+}
+
+#[test]
+fn record_capture_health_rejects_invalid_state() {
+    let c = conn();
+    let ev = CaptureHealthEvent {
+        day: "2026-06-21".into(),
+        start_ts: "2026-06-21T10:00:00Z".into(),
+        end_ts: None,
+        state: "not_a_real_state".into(),
+        detail: None,
+        source: source::NSWORKSPACE.into(),
+    };
+    let result = store::record_capture_health(&c, &ev, "2026-06-21T10:00:00Z");
+    assert!(result.is_err(), "invalid health state must be rejected at the write boundary");
+}
+
+#[test]
+fn record_capture_health_rejects_oversized_detail() {
+    let c = conn();
+    let oversized_detail = "x".repeat(store::MAX_DETAIL_BYTES + 1);
+    let ev = CaptureHealthEvent {
+        day: "2026-06-21".into(),
+        start_ts: "2026-06-21T10:00:00Z".into(),
+        end_ts: None,
+        state: health_state::SAMPLING_GAP.into(),
+        detail: Some(oversized_detail),
+        source: source::NSWORKSPACE.into(),
+    };
+    let result = store::record_capture_health(&c, &ev, "2026-06-21T10:00:00Z");
+    assert!(result.is_err(), "detail exceeding MAX_DETAIL_BYTES must be rejected");
+}
+
 // ----- capture health first-class --------------------------------------------------------------
 
 #[test]
@@ -347,6 +458,60 @@ fn capture_health_vocabulary_round_trips() {
         events.len(),
         states.len(),
         "all health states must be stored as first-class rows"
+    );
+}
+
+// ----- upsert idempotency ----------------------------------------------------------------------
+
+#[test]
+fn upsert_evidence_block_is_idempotent() {
+    let c = conn();
+    let block = evidence_block("b1", "2026-06-21", None);
+    store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z").unwrap();
+    store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:01Z").unwrap();
+    let count: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM active_window_evidence",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "re-upserting the same block must not create duplicate rows");
+}
+
+#[test]
+fn upsert_evidence_block_is_idempotent_when_bundle_id_is_none() {
+    // Regression: SQLite treats NULL as distinct in UNIQUE constraints; repeated upserts of a
+    // no-bundle block must not create duplicate rows.
+    let c = conn();
+    let mut block = evidence_block("no-bundle", "2026-06-21", None);
+    block.app_bundle_id = None;
+    store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z").unwrap();
+    store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:01Z").unwrap();
+    let count: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM active_window_evidence",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "re-upserting a no-bundle block must not create duplicate rows");
+}
+
+#[test]
+fn evidence_block_bundle_id_none_reads_back_as_none() {
+    // The empty-string sentinel stored for null bundle IDs must be transparent at the API level.
+    let c = conn();
+    let mut block = evidence_block("no-bundle", "2026-06-21", None);
+    block.app_bundle_id = None;
+    store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z").unwrap();
+    let views =
+        store::evidence_blocks_in_range(&c, "2026-06-21", "2026-06-21", TitleMode::Redacted)
+            .unwrap();
+    assert_eq!(views.len(), 1);
+    assert!(
+        views[0].app_bundle_id.is_none(),
+        "app_bundle_id=None must round-trip through the sentinel as None, not empty string"
     );
 }
 
@@ -415,7 +580,7 @@ fn prune_removes_only_expired_active_window_rows_and_leaves_time_entries_intact(
     )
     .unwrap();
 
-    // Prune with now=2026-06-21, retention=30 days → cutoff=2026-05-22.
+    // Prune with now=2026-06-21, retention=30 days → cutoff=2026-05-22T00:00:00.
     let stats = store::prune_expired(&c, "2026-06-21", 30).unwrap();
     assert_eq!(stats.raw_evidence_deleted, 1, "expired raw row must be deleted");
     assert_eq!(stats.evidence_deleted, 1, "expired evidence block must be deleted");
@@ -436,6 +601,181 @@ fn prune_removes_only_expired_active_window_rows_and_leaves_time_entries_intact(
         .query_row("SELECT COUNT(*) FROM time_entries", [], |r| r.get(0))
         .unwrap();
     assert_eq!(te_count, 1, "time_entries must be unaffected by prune (C6)");
+}
+
+// ----- prune exact timestamp cutoff (Fix 4) ---------------------------------------------------
+
+#[test]
+fn prune_uses_exact_per_table_timestamp_not_calendar_day() {
+    // Row whose sample_ts is before the cutoff time on the cutoff day must be deleted.
+    // Under the old day-based prune it would have been kept (day == cutoff_day is not < cutoff_day).
+    let c = conn();
+    let cutoff_day = "2026-05-22";
+    let before_cutoff = "2026-05-22T09:00:00Z"; // same cutoff day, before cutoff time
+    let after_cutoff = "2026-05-22T12:00:00Z";  // same cutoff day, after cutoff time (now=noon)
+    let now_ts = "2026-06-21T12:00:00Z"; // retention=30 → cutoff = 2026-05-22 12:00:00
+
+    // Raw: sample_ts before cutoff → must be deleted.
+    store::insert_raw_observation(
+        &c,
+        &RawObservation {
+            sample_ts: before_cutoff.into(),
+            day: cutoff_day.into(),
+            app_name: None,
+            app_bundle_id: Some("com.before".into()),
+            window_title: None,
+            title_state: title_state::ABSENT_NO_WINDOW.into(),
+            idle_state: idle_state::ACTIVE.into(),
+            source: source::NSWORKSPACE.into(),
+            capture_health: None,
+        },
+        TitleMode::Redacted,
+        before_cutoff,
+    )
+    .unwrap();
+    // Raw: sample_ts after cutoff → must survive.
+    store::insert_raw_observation(
+        &c,
+        &RawObservation {
+            sample_ts: after_cutoff.into(),
+            day: cutoff_day.into(),
+            app_name: None,
+            app_bundle_id: Some("com.after".into()),
+            window_title: None,
+            title_state: title_state::ABSENT_NO_WINDOW.into(),
+            idle_state: idle_state::ACTIVE.into(),
+            source: source::NSWORKSPACE.into(),
+            capture_health: None,
+        },
+        TitleMode::Redacted,
+        after_cutoff,
+    )
+    .unwrap();
+
+    let stats = store::prune_expired(&c, now_ts, 30).unwrap();
+    assert_eq!(
+        stats.raw_evidence_deleted, 1,
+        "row with sample_ts before exact cutoff must be deleted even when on the cutoff day"
+    );
+    let remaining: i64 = c
+        .query_row("SELECT COUNT(*) FROM active_window_raw_evidence", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(remaining, 1, "row with sample_ts after cutoff must survive");
+}
+
+#[test]
+fn prune_keeps_row_at_exact_cutoff_deletes_one_second_before() {
+    // Boundary: row exactly at the cutoff timestamp (not strictly less-than) must survive.
+    let c = conn();
+    let now_ts = "2026-06-21T00:00:00Z";
+    let cutoff = "2026-05-22T00:00:00Z"; // datetime(now, "-30 days")
+
+    // Row at exact cutoff → must survive (cutoff < cutoff is false).
+    store::insert_raw_observation(
+        &c,
+        &RawObservation {
+            sample_ts: cutoff.into(),
+            day: "2026-05-22".into(),
+            app_name: None,
+            app_bundle_id: Some("com.at-cutoff".into()),
+            window_title: None,
+            title_state: title_state::ABSENT_NO_WINDOW.into(),
+            idle_state: idle_state::ACTIVE.into(),
+            source: source::NSWORKSPACE.into(),
+            capture_health: None,
+        },
+        TitleMode::Redacted,
+        cutoff,
+    )
+    .unwrap();
+    // Row one second before cutoff → must be deleted.
+    store::insert_raw_observation(
+        &c,
+        &RawObservation {
+            sample_ts: "2026-05-21T23:59:59Z".into(),
+            day: "2026-05-21".into(),
+            app_name: None,
+            app_bundle_id: Some("com.just-before".into()),
+            window_title: None,
+            title_state: title_state::ABSENT_NO_WINDOW.into(),
+            idle_state: idle_state::ACTIVE.into(),
+            source: source::NSWORKSPACE.into(),
+            capture_health: None,
+        },
+        TitleMode::Redacted,
+        "2026-05-21T23:59:59Z",
+    )
+    .unwrap();
+
+    let stats = store::prune_expired(&c, now_ts, 30).unwrap();
+    assert_eq!(stats.raw_evidence_deleted, 1, "row one second before cutoff must be deleted");
+    let row_at_cutoff: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM active_window_raw_evidence WHERE app_bundle_id='com.at-cutoff'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(row_at_cutoff, 1, "row exactly at the cutoff timestamp must survive");
+}
+
+// ----- config: precedence (Fix 2) --------------------------------------------------------------
+
+#[test]
+fn config_default_when_no_settings_no_env() {
+    // Assumes VIRE_ACTIVE_WINDOW_* env vars are absent in the test environment.
+    let c = conn();
+    let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
+    assert_eq!(
+        cfg.retention_days,
+        config::DEFAULT_RETENTION_DAYS,
+        "retention must be the default when no settings row and no env var"
+    );
+    assert_eq!(
+        cfg.title_mode,
+        TitleMode::Redacted,
+        "title_mode must default to Redacted"
+    );
+}
+
+#[test]
+fn config_stored_retention_overrides_default() {
+    let c = conn();
+    c.execute(
+        "INSERT OR REPLACE INTO settings(key, value) VALUES ('active_window_retention_days', '90')",
+        [],
+    )
+    .unwrap();
+    let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
+    assert_eq!(cfg.retention_days, 90, "stored retention_days must take precedence");
+}
+
+#[test]
+fn config_stored_title_mode_stored_overrides_default() {
+    let c = conn();
+    c.execute(
+        "INSERT OR REPLACE INTO settings(key, value) VALUES ('active_window_title_mode', 'stored')",
+        [],
+    )
+    .unwrap();
+    let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
+    assert_eq!(cfg.title_mode, TitleMode::Stored, "stored title_mode must take precedence");
+}
+
+#[test]
+fn config_invalid_stored_retention_falls_back_to_default() {
+    let c = conn();
+    c.execute(
+        "INSERT OR REPLACE INTO settings(key, value) VALUES ('active_window_retention_days', 'not_a_number')",
+        [],
+    )
+    .unwrap();
+    let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
+    assert_eq!(
+        cfg.retention_days,
+        config::DEFAULT_RETENTION_DAYS,
+        "non-numeric stored retention must fall back to default"
+    );
 }
 
 // ----- no raw title in logs (structural) -------------------------------------------------------
@@ -460,22 +800,4 @@ fn write_path_does_not_persist_title_under_redacted_mode() {
         stored.is_none(),
         "title must not reach the store under redacted mode; also never reaches a log"
     );
-}
-
-// ----- upsert idempotency ----------------------------------------------------------------------
-
-#[test]
-fn upsert_evidence_block_is_idempotent() {
-    let c = conn();
-    let block = evidence_block("b1", "2026-06-21", None);
-    store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z").unwrap();
-    store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:01Z").unwrap();
-    let count: i64 = c
-        .query_row(
-            "SELECT COUNT(*) FROM active_window_evidence",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 1, "re-upserting the same block must not create duplicate rows");
 }
