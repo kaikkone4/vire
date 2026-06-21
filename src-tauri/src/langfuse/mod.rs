@@ -22,10 +22,6 @@ pub use importer::ImportReport;
 
 use crate::settings::secret_store::KeyringSecretStore;
 
-/// Bounded look-back window discovery uses regardless of the configured import range — discovery only
-/// enumerates environment names, so it never needs the full backfill span (TASK-029 C3).
-const DISCOVERY_WINDOW_DAYS: i64 = 7;
-
 /// How far back an import reaches (TASK-029 C / DEC-030). Resolved settings-first; the default is
 /// [`ImportRange::Last30d`]. Maps to a UTC RFC3339 **range floor** via [`ImportRange::floor`]. This is
 /// a non-secret value — it only ever names a fixed range keyword or a timestamp.
@@ -97,15 +93,16 @@ impl ImportRange {
     }
 }
 
-/// Default look-back window for a manual import (last `days` days, UTC, RFC3339). Retained for
-/// discovery's bounded recent scan; trace import now resolves a per-environment window from the
-/// configured [`ImportRange`] + cursor (TASK-029 C2).
-pub fn recent_window(days: i64) -> ImportWindow {
-    let to = Utc::now();
-    let from = to - ChronoDuration::days(days.max(1));
+/// The look-back window environment discovery scans: the **resolved import-range floor → now** — the
+/// same span the import just walked (TASK-045 B). Discovery enumerates only environment *names*, so a
+/// wide floor (up to `all`) carries no extra data risk: it stays read-only, inside the `/api/public/`
+/// allowlist + loopback gate, and bounded by the discovery `MAX_PAGES` backstop. Following the import
+/// range keeps `langfuse_discovered_environments` aligned with the history the user actually imports,
+/// instead of the old fixed 7-day subset that silently hid older environments from the mapping picker.
+fn discovery_window(range_floor: &str, now: &str) -> ImportWindow {
     ImportWindow {
-        from: from.to_rfc3339_opts(SecondsFormat::Secs, true),
-        to: to.to_rfc3339_opts(SecondsFormat::Secs, true),
+        from: range_floor.to_string(),
+        to: now.to_string(),
     }
 }
 
@@ -164,12 +161,14 @@ fn run_blocking(db_path: &Path, mode: ImportMode) -> Result<ImportReport, String
         ImportMode::Backfill => importer::run_backfill(&api, &conn, &config, &range_floor, &now),
     };
 
-    // TASK-027 C: discover the environments present in the source as part of the import (a read-only
-    // scan over the same allowlist). Best-effort and secret-free — a discovery failure must not fail
-    // an otherwise-successful import, and only environment names (not trace content) are persisted.
-    // Discovery stays on a bounded recent window (TASK-029 C3): it only enumerates env names, so it
-    // never needs the full backfill span.
-    discover_and_record(&api, &conn, &recent_window(DISCOVERY_WINDOW_DAYS));
+    // TASK-027 C + TASK-045 B: discover the environments present in the source as part of the import
+    // (a read-only, name-only scan over the same allowlist). Best-effort and secret-free — a discovery
+    // failure must not fail an otherwise-successful import, and only environment names (not trace
+    // content) are persisted. The look-back now follows the **resolved import-range floor** (the same
+    // floor the import just used), not a fixed 7-day window, so an environment backfilled from older
+    // history is enumerated and becomes mappable. Discovery stays bounded by its `MAX_PAGES` backstop,
+    // so even an `all` floor cannot spin.
+    discover_and_record(&api, &conn, &discovery_window(&range_floor, &now));
     // Build the secret-free diagnostics report from the counts the importer just computed, then
     // apply the TASK-021 in-band persist-failure check: a run that could not be persisted still
     // surfaces as `Err` (never a stale-healthy result), so the report is returned only for a run

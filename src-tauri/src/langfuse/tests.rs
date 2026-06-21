@@ -32,6 +32,10 @@ struct MockApi {
     any_env_pages: Vec<Vec<Value>>,
     /// Optional error for the discovery scan, to model a failed (best-effort) discovery.
     any_env_err: Option<ApiError>,
+    /// When set, every discovery (`get_traces_any_env`) page returns this single trace and reports an
+    /// effectively unbounded `total_pages`, so an `all`-range discovery runs until it hits the
+    /// discovery `MAX_PAGES` backstop — used to prove a wide floor cannot spin (TASK-045 C5).
+    any_env_infinite: Option<Value>,
     calls: RefCell<Vec<String>>,
     /// Records the `(environment, from, to)` window of every `get_traces` call, so a test can assert
     /// which window the importer resolved (incremental cursor / backfill chunk) — the mock otherwise
@@ -120,6 +124,17 @@ impl LangfuseApi for MockApi {
             .push(format!("get_traces_any_env:{page}"));
         if let Some(e) = &self.any_env_err {
             return Err(e.clone());
+        }
+        if let Some(trace) = &self.any_env_infinite {
+            return Ok(TracePage {
+                data: vec![trace.clone()],
+                meta: super::model::PageMeta {
+                    page,
+                    limit,
+                    total_items: 0,
+                    total_pages: u32::MAX,
+                },
+            });
         }
         let total_pages = self.any_env_pages.len() as u32;
         let data = self
@@ -1496,6 +1511,84 @@ fn discovery_url_keeps_the_allowlist_and_loopback_gate_without_an_env_param() {
             limit: 50,
         })
         .is_err());
+}
+
+// ----- TASK-045 B: discovery look-back follows the resolved import range --------------------
+
+#[test]
+fn discovery_window_floor_equals_the_resolved_import_range_floor() {
+    // The look-back window discovery scans is the resolved import-range floor → now — the SAME floor
+    // the import just used, for every range. The old fixed 7-day window is gone, so a backfilled
+    // environment older than 7 days is now enumerated.
+    let now_dt = chrono::Utc::now();
+    let now = now_dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    for range in [
+        ImportRange::Last7d,
+        ImportRange::Last30d,
+        ImportRange::Last90d,
+        ImportRange::All,
+        ImportRange::Since("2025-01-01T00:00:00Z".into()),
+    ] {
+        let floor = range.floor(now_dt);
+        let window = super::discovery_window(&floor, &now);
+        assert_eq!(
+            window.from, floor,
+            "discovery look-back floor must equal the resolved import-range floor"
+        );
+        assert_eq!(window.to, now, "discovery look-back ceiling is now");
+    }
+
+    // The fix is load-bearing only because these floors reach PAST the legacy fixed 7-day window: an
+    // environment last active 8–90 days ago was invisible before, and is enumerated now.
+    let legacy_7d =
+        (now_dt - chrono::Duration::days(7)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    assert!(
+        ImportRange::Last30d.floor(now_dt) < legacy_7d,
+        "the default 30-day range reaches older history than the legacy 7-day discovery window"
+    );
+    assert!(
+        ImportRange::All.floor(now_dt) < legacy_7d,
+        "the all range reaches all the way back, far past the legacy 7-day window"
+    );
+}
+
+#[test]
+fn discovery_is_bounded_by_max_pages_so_an_all_floor_cannot_spin() {
+    // An `all`-range floor over a source that always reports another page must NOT spin: the discovery
+    // MAX_PAGES backstop caps the scan. We model an effectively-infinite source and assert discovery
+    // returns after exactly MAX_PAGES page reads (degrading to "as many as the backstop allowed",
+    // never wrong data, never an infinite loop).
+    let api = MockApi {
+        any_env_infinite: Some(trace_with_generation(
+            "A",
+            "vire",
+            "2020-01-01T00:00:00Z",
+            1.0,
+            10,
+        )),
+        ..Default::default()
+    };
+    let all_floor = ImportRange::All.floor(chrono::Utc::now());
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let window = super::discovery_window(&all_floor, &now);
+
+    let envs = super::discovery::discover_environments(&api, &window).unwrap();
+    assert_eq!(
+        envs,
+        vec!["vire".to_string()],
+        "the one env is still collected"
+    );
+    let page_reads = api
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.starts_with("get_traces_any_env:"))
+        .count();
+    assert_eq!(
+        page_reads as u32,
+        super::discovery::MAX_PAGES,
+        "discovery stops at the MAX_PAGES backstop, so a wide floor cannot spin forever"
+    );
 }
 
 // ===== TASK-029 =============================================================================

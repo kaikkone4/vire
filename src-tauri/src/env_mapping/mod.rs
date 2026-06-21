@@ -11,6 +11,8 @@
 //! ever rewritten). Every surface this module produces carries only environment names, project
 //! references, and mapping state — no credential, raw payload, or trace content (SEC-010).
 
+use std::collections::BTreeMap;
+
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
@@ -172,20 +174,86 @@ pub fn clear_env_mapping_repo(conn: &Connection, environment: String) -> CmdResu
     Ok(())
 }
 
-/// List discovered environments with their mapping state (D2). An environment present in the
-/// discovered set but absent from the map comes back `mapped == false` — the suggest-create case.
-/// No project is created as a side effect of reading this list.
+/// List every environment that needs a project mapping, with its mapping state, for the Settings
+/// surface (TASK-045 A / DEC-038). The environment universe is the **union** of three additive,
+/// secret-free tables already in this DB:
+///
+/// - `langfuse_discovered_environments` — names the recent discovery scan enumerated (today's only
+///   source);
+/// - distinct `langfuse_ai_evidence.environment` — **the fix**: every environment that has imported
+///   evidence must be mappable, so a backfilled environment older than the discovery window surfaces
+///   with **no re-import**;
+/// - distinct `langfuse_env_project_map.environment` — an already-mapped environment stays visible
+///   (with its Clear action) even after its traces age out of the discovery scan.
+///
+/// `last_seen` is best-known display metadata: the discovered `last_seen` when present, else the most
+/// recent evidence timestamp (`MAX(ai_end_ts)`, else `MAX(ai_start_ts)`), else an empty string — a
+/// missing timestamp never drops a row. Output is de-duplicated by environment and ordered by
+/// environment (today's deterministic render order). The shape stays `Vec<DiscoveredEnvState>` — no
+/// IPC/TS contract change. An environment present but unmapped comes back `mapped == false` (the
+/// suggest-create case); no project is created as a side effect of reading this list (DEC-006).
 pub fn list_discovered_environments_repo(conn: &Connection) -> CmdResult<Vec<DiscoveredEnvState>> {
-    let discovered = list_discovered_environments(conn).map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(discovered.len());
-    for d in discovered {
+    // Build the environment → best-known `last_seen` universe from the three sources, applying the
+    // precedence discovered → evidence → empty. A `BTreeMap` keeps each environment once and yields
+    // them in sorted order — the same deterministic order as today's `ORDER BY environment`.
+    let mut last_seen_by_env: BTreeMap<String, String> = BTreeMap::new();
+
+    // Source 1 (highest precedence): the discovered names + their recorded `last_seen`, read through
+    // the canonical discovered-environments accessor.
+    for d in list_discovered_environments(conn).map_err(|e| e.to_string())? {
+        last_seen_by_env.insert(d.environment, d.last_seen);
+    }
+
+    // Source 2 — **the fix**: every environment that has imported AI evidence must be mappable, so a
+    // backfilled environment older than the discovery window surfaces with no re-import. `last_seen`
+    // derives from the evidence (`MAX(ai_end_ts)`, else `MAX(ai_start_ts)`); `or_insert` means a
+    // discovered `last_seen` already in the map wins.
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT environment, COALESCE(MAX(ai_end_ts), MAX(ai_start_ts), '')
+                   FROM langfuse_ai_evidence
+                  GROUP BY environment",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        for (environment, last_seen) in rows {
+            last_seen_by_env.entry(environment).or_insert(last_seen);
+        }
+    }
+
+    // Source 3: every already-mapped environment stays visible (with its Clear action) even after its
+    // traces age out of both the discovery scan and the evidence. No timestamp is available, so its
+    // `last_seen` is empty — display-only metadata that never blocks the row from rendering.
+    {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT environment FROM langfuse_env_project_map")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        for environment in rows {
+            last_seen_by_env.entry(environment).or_default();
+        }
+    }
+
+    let mut out = Vec::with_capacity(last_seen_by_env.len());
+    for (environment, last_seen) in last_seen_by_env {
+        // Same per-environment mapping join the current code does — `langfuse_env_project_map ⋈
+        // projects` — unchanged, so `mapped`/`project_id`/`project_name` carry the same meaning.
         let mapping: Option<(String, String)> = conn
             .query_row(
                 "SELECT m.project_id, p.name
                    FROM langfuse_env_project_map m
                    JOIN projects p ON p.id = m.project_id
                   WHERE m.environment = ?1",
-                params![d.environment],
+                params![environment],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
@@ -195,8 +263,8 @@ pub fn list_discovered_environments_repo(conn: &Connection) -> CmdResult<Vec<Dis
             None => (false, None, None),
         };
         out.push(DiscoveredEnvState {
-            environment: d.environment,
-            last_seen: d.last_seen,
+            environment,
+            last_seen,
             mapped,
             project_id,
             project_name,

@@ -235,20 +235,170 @@ fn mapping_surfaces_carry_no_secrets() {
     )
     .unwrap();
     upsert_discovered_environment(&c, "vire", "2026-06-05T00:00:00Z").unwrap();
-    set_env_mapping_repo(&c, "vire".into(), pid).unwrap();
+    set_env_mapping_repo(&c, "vire".into(), pid.clone()).unwrap();
 
-    // Serialize every renderer-facing surface this module produces and assert none leaks the session
-    // id, token, or cost value (only env names, project refs, and state may cross the boundary).
+    // Serialize every renderer-facing surface this module produces. The project_id is a legitimate,
+    // non-secret reference the surface is DESIGNED to carry — and it is a random `Uuid::new_v4()`
+    // whose hex can coincidentally contain a numeric needle (e.g. the `579` token total), which would
+    // be a false positive. Neutralize that legitimate reference first, then assert no session id,
+    // token, or cost *value* leaks (only env names, project refs, and state may cross the boundary).
     let surfaces = format!(
         "{}{}{}",
         serde_json::to_string(&list_evidence_projects_repo(&c).unwrap()).unwrap(),
         serde_json::to_string(&list_discovered_environments_repo(&c).unwrap()).unwrap(),
         serde_json::to_string(&list_env_mappings_repo(&c).unwrap()).unwrap(),
-    );
+    )
+    .replace(&pid, "<project-id>");
     for needle in ["session-", "Bearer", "leak", "sk-", "pk-", "9.99", "579"] {
         assert!(
             !surfaces.contains(needle),
             "mapping/discovery surface must be secret-free (SEC-010), found {needle}"
         );
     }
+}
+
+// ----- TASK-045 A: the mapping surface is the union of discovered ∪ evidence ∪ mapped ---------
+
+/// Insert an AI-evidence row for `env` with the given start/end timestamps (token/cost columns left
+/// absent — irrelevant to the union surface). Mirrors what a backfill writes.
+fn add_evidence(c: &Connection, env: &str, trace_id: &str, start: Option<&str>, end: Option<&str>) {
+    upsert_ai_evidence(
+        c,
+        &AiEvidence {
+            trace_id: trace_id.into(),
+            environment: env.into(),
+            session_id: None,
+            ai_start_ts: start.map(str::to_string),
+            ai_end_ts: end.map(str::to_string),
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            cost_total: None,
+            health: HealthState::Healthy,
+        },
+        "run-1",
+    )
+    .unwrap();
+}
+
+#[test]
+fn evidence_only_environment_appears_unmapped_without_rediscovery() {
+    let c = conn();
+    // An environment that exists ONLY as imported evidence — never discovered (older than the 7-day
+    // scan), never mapped. This is exactly Janne's "only 8 entries" case: the backfill wrote evidence,
+    // but the old read surfaced nothing for it.
+    add_evidence(
+        &c,
+        "legacy-prod",
+        "T1",
+        Some("2026-01-01T00:00:00Z"),
+        Some("2026-01-01T00:05:00Z"),
+    );
+
+    let states = list_discovered_environments_repo(&c).unwrap();
+    let env = states
+        .iter()
+        .find(|s| s.environment == "legacy-prod")
+        .expect("an evidence-only environment must surface in the mapping panel with NO re-import");
+    assert!(
+        !env.mapped,
+        "it has no mapping yet — the suggest-create case"
+    );
+    assert!(env.project_id.is_none());
+    assert_eq!(
+        env.last_seen, "2026-01-01T00:05:00Z",
+        "last_seen falls back to the evidence end timestamp"
+    );
+    // Reading the surface still creates nothing (DEC-006).
+    assert_eq!(project_count(&c), 0);
+}
+
+#[test]
+fn mapped_environment_stays_visible_after_aging_out_of_discovery() {
+    let c = conn();
+    let pid = make_project(&c, "Vire");
+    // Mapped, but present in NEITHER discovery nor evidence (its traces aged past the range floor and
+    // the discovery window). It must still appear — otherwise the user loses the Clear action.
+    set_env_mapping_repo(&c, "vire".into(), pid.clone()).unwrap();
+
+    let states = list_discovered_environments_repo(&c).unwrap();
+    let env = states.iter().find(|s| s.environment == "vire").expect(
+        "a mapped environment must remain visible even when absent from discovery + evidence",
+    );
+    assert!(env.mapped);
+    assert_eq!(env.project_id.as_deref(), Some(pid.as_str()));
+    assert_eq!(env.project_name.as_deref(), Some("Vire"));
+    assert_eq!(
+        env.last_seen, "",
+        "no discovered/evidence timestamp → empty last_seen, but the row is never dropped"
+    );
+}
+
+#[test]
+fn environment_in_all_three_sources_yields_exactly_one_row_with_correct_join() {
+    let c = conn();
+    let pid = make_project(&c, "Vire");
+    // Present in discovery, evidence, AND the mapping — the de-dup + join case.
+    upsert_discovered_environment(&c, "vire", "2026-06-05T00:00:00Z").unwrap();
+    add_evidence(&c, "vire", "T1", None, Some("2026-06-04T00:00:00Z"));
+    set_env_mapping_repo(&c, "vire".into(), pid.clone()).unwrap();
+
+    let states = list_discovered_environments_repo(&c).unwrap();
+    let matches: Vec<_> = states.iter().filter(|s| s.environment == "vire").collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "an environment present in all three sources de-duplicates to exactly one row"
+    );
+    let env = matches[0];
+    assert!(env.mapped, "the project join is preserved");
+    assert_eq!(env.project_id.as_deref(), Some(pid.as_str()));
+    assert_eq!(env.project_name.as_deref(), Some("Vire"));
+    assert_eq!(
+        env.last_seen, "2026-06-05T00:00:00Z",
+        "the discovered last_seen takes precedence over the evidence-derived timestamp"
+    );
+}
+
+#[test]
+fn last_seen_fallback_chain_is_sorted_and_drops_no_row() {
+    let c = conn();
+    let pid = make_project(&c, "Gamma");
+    // alpha-disc: discovered only → uses discovered last_seen.
+    upsert_discovered_environment(&c, "alpha-disc", "2026-06-05T00:00:00Z").unwrap();
+    // beta-evi: evidence only, ai_end_ts absent → falls through to MAX(ai_start_ts).
+    add_evidence(&c, "beta-evi", "T1", Some("2026-03-02T00:00:00Z"), None);
+    // gamma-map: mapped only, no discovery/evidence → empty last_seen, still rendered.
+    set_env_mapping_repo(&c, "gamma-map".into(), pid).unwrap();
+
+    let states = list_discovered_environments_repo(&c).unwrap();
+    let envs: Vec<&str> = states.iter().map(|s| s.environment.as_str()).collect();
+    assert_eq!(
+        envs,
+        vec!["alpha-disc", "beta-evi", "gamma-map"],
+        "all three rows present, de-duplicated, sorted by environment (deterministic order)"
+    );
+    let by = |name: &str| states.iter().find(|s| s.environment == name).unwrap();
+    assert_eq!(by("alpha-disc").last_seen, "2026-06-05T00:00:00Z");
+    assert_eq!(
+        by("beta-evi").last_seen,
+        "2026-03-02T00:00:00Z",
+        "ai_end_ts absent → last_seen falls back to ai_start_ts"
+    );
+    assert_eq!(by("gamma-map").last_seen, "");
+}
+
+#[test]
+fn most_recent_evidence_timestamp_wins_for_an_evidence_only_environment() {
+    let c = conn();
+    // Two evidence rows for one undiscovered env; last_seen must be the greatest end timestamp.
+    add_evidence(&c, "prod", "T1", None, Some("2026-02-01T00:00:00Z"));
+    add_evidence(&c, "prod", "T2", None, Some("2026-05-01T00:00:00Z"));
+
+    let states = list_discovered_environments_repo(&c).unwrap();
+    let env = states.iter().find(|s| s.environment == "prod").unwrap();
+    assert_eq!(
+        env.last_seen, "2026-05-01T00:00:00Z",
+        "an evidence-only env's last_seen is the most recent evidence timestamp"
+    );
 }
