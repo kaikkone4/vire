@@ -3,42 +3,53 @@
 # Handoff — TASK-046 active-window evidence storage
 
 - **Branch / PR**: `feat/task-046-active-window-evidence-storage` / #34
-- **Phase / gate**: SW-2 round-3 fix complete → route to SW-3 + SW-4 recheck
-- **Head commit**: `59747b4`
-- **QA**: SW-3 PASS at `6c1200d` (209+5); recheck needed at `59747b4`
+- **Head**: `19b95ff`; implementation fix: `59747b4`
+- **Phase**: SW-3 + SW-4 + SW-5 all PASS at `59747b4`; **SW-6 COMPLETE** (docs gate passed)
+- **Next**: release manager — branch ready to merge
 
-## SW-2 round-3 fixes applied (`59747b4`)
+## SW-5 verdict
 
-All three §8 arch-review blockers resolved — no design/spec change:
+PASS (`sec.md`). Tier-L2 scanners clean of auto-fail: semgrep 0 ERROR · gitleaks 1 triaged FP (ADV-1
+synthetic fixture) · OSV max CVSS 6.9 < 7.0 · Trivy 0 HIGH/CRITICAL. Zero deps added; lockfiles
+byte-identical. SEC-001 invariants enforced + test-covered. Prior **ADV-3** (`capture_health` vocab on
+raw/evidence) **closed** by §8.1; **ADV-2** (`detail` ≤200 B) stays closed. 1 advisory left: **ADV-1** —
+scope a `.gitleaks.toml` allowlist for the historical synthetic-fixture commit `3aa716e` (non-blocking).
+No design/code escalation.
 
-1. **§8.1 `capture_health` vocab** (`store.rs:155-157, 197-199`): `check_vocab` guard on
-   `Option<&str>` before SQL bind in both `insert_raw_observation` and `upsert_evidence_block`.
-   None accepted; Some(s) must be in `HEALTH_STATE_VOCAB`. 4 new tests (reject + None-ok for
-   each path).
+## SW-4 verdict
 
-2. **§8.2 `apply_title_gate` total truth table** (`store.rs:393-450`): rewrote to return
-   `Result`; classifies title into Present/Empty/Absent; rejects all contradictory
-   (state, title) pairs fail-closed (no silent normalization). `Some("")` now correctly
-   routes to Empty → `(None, "empty")`, closing the `Some("")+empty→captured` defect.
-   Both callers propagate with `?`. Updated 2 existing tests; 3 new matrix tests covering
-   no-title+captured, empty+empty, title+absence across both modes and both write paths.
-   Also applied nonblocking `Some("")` bundle normalization at `upsert_evidence_block`
-   call site (`store.rs:203`).
+PASS (`review.md`). No blockers/escalations. Confirmed: `capture_health` vocab on raw/evidence;
+fail-closed title gate (`Some("")`→`(NULL,"empty")`; non-null title iff stored+`captured`); serialized
+env-only + DB-over-env config tests; `Some("")` bundle→null sentinel; prior invariants intact;
+storage-only scope (no IPC/renderer/capture/network/dep/CSP). Non-blocking: add `Some("")` bundle
+regression; resolve 45 staged dead-code warns when seam is wired.
 
-3. **§8.3 config env precedence tests** (`tests.rs`): added `ENV_LOCK` (static `Mutex<()>`)
-   + `EnvGuard` (RAII save/restore). 4 new serialized tests: env-only retention, env-only
-   title_mode, DB-over-env retention, DB-over-env title_mode. Hardened 2 existing tests
-   (default + invalid-fallback) to lock + clear env instead of assuming ambient absence.
+## Checks (at `59747b4`)
 
-## Checks at `59747b4`
+- `cargo test` ✓ 220 lib + 5 adversarial · `clippy --lib` ✓ 48 warn (45 staged, 3 pre-existing)
+- `cargo fmt --check` ✓ · `openspec validate task-046 --strict` ✓
+- SW-5 Tier-1 scanners re-run ✓ (semgrep/gitleaks/OSV/Trivy — see `sec.md`)
 
-- `cargo test` ✓ 220 library + 5 adversarial (was 209+5)
-- `cargo clippy --lib` ✓ 48 warn (unchanged — 45 staged dead-code + 3 pre-existing)
-- `cargo fmt --check` ✓
-- Preserved: nullable-bundle sentinel, DB-first config, vocab/detail checks, exact-ts prune
+## SW-6 verdict
 
-## Required next action
+COMPLETE (release manager pass). All three L2 declarations present in `RELEASE.md`:
+1. **Deployment size**: minor
+2. **Rollback strategy**: automated
+3. **Component compatibility matrix**: added at `0de0e62` (rusqlite/tauri/chrono/serde/keyring/@tauri-apps/api/macOS/SQLite DB — min/max per dep)
 
-SW-3 recheck at `59747b4` → SW-4 recheck. No SW-5 re-review (allowlist/redaction/prune/deps
-unchanged per §8.4 scope guard). Files changed: `store.rs`, `tests.rs` (both under
-`src-tauri/src/active_window/`).
+PR #34 promoted from draft → **ready-for-review** (confirmed via `gh pr ready 34`).
+
+Signed tag `task-046/v0.7.0`: **blocked-non-critical** — SSH signing key
+`/Users/kaikkonen/.ssh/id_ed25519.pub` not found; no unsigned fallback per L2+ policy.
+
+Changed files (docs pass + release manager pass):
+- `README.md` — version v0.6.3→v0.7.0; env vars table; privacy section; release compat section.
+- `RELEASE.md` — v0.7.0 entry + component compatibility matrix.
+- `handoff.md` — this update.
+
+## Gate files
+
+- `review.md`: SW-4 PASS
+- `qa.md`: SW-3 PASS
+- `sec.md`: SW-5 result/current security state
+- `handoff.md`: SW-6 COMPLETE
