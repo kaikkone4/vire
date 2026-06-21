@@ -34,6 +34,17 @@
 - No code change; config/docs only. RELEASE.md + deny.toml content verified correct.
 - Changed paths: `README.md`.
 
+## SW-6 Release — PASS (2026-06-21)
+
+- Version corrected: v0.6.3 → **v0.7.1** (task-045 took v0.6.3; task-046 is v0.7.0).
+- Root `RELEASE.md`: heading updated + compatibility matrix added.
+- `README.md`: version bump to v0.7.1; advisory section references updated.
+- OpenSpec gate artifact: `openspec/changes/task-047-tauri-gtk-rustsec-cleanup/RELEASE.md` created.
+- All three required declarations present: deployment size **patch**, rollback **automated**, compatibility matrix.
+- Signed tag `task-047/v0.7.1`: **NON-CRITICAL BLOCKED** — SSH signing key `/Users/kaikkonen/.ssh/id_ed25519.pub` missing at runtime; role policy prohibits unsigned fallback.
+- PR #35 promoted to **ready-for-review**: https://github.com/kaikkone4/vire/pull/35
+- CI advisory gate: no `statusCheckRollup` yet (PR was draft; gate fires on PR push event).
+
 ## Route
 
-SW-4 + SW-5 + SW-6 DOCS PASS → **SW-6 Release Manager**; release once CI advisory gate is green.
+SW-6 PASS → **merge-ready**. Janne merges PR #35. Tag `task-047/v0.7.1` to be created after merge (requires SSH key at `~/.ssh/id_ed25519.pub`).
