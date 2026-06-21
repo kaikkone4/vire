@@ -162,8 +162,16 @@ For the runtime log source path, privacy boundary, configuration env vars, and f
 
 As of TASK-026 (DEC-026), the importer resolves its configuration **from the in-app Settings panel first**; process environment variables are retained only as a **clearly-marked developer fallback** for local dev / `.env`-sourced setups. The precedence order is:
 
-1. **In-app settings** (Settings → AI evidence import): base URL, source, environments, and `langfuse_enabled` are stored in the local SQLite `settings` table. The public key and secret key are stored in the **macOS Keychain** (service `dev.vire.app`) — never in SQLite, never in plaintext.
-2. **Process environment variables** (dev fallback — see table below): used only when the matching in-app setting is absent. Credentials from env are demoted to fallback; clear or replace them in-app once in-app settings are configured.
+1. **In-app settings** (Settings → AI evidence import): base URL, source, environments,
+  `langfuse_enabled`, and the **public key** are stored in the local SQLite `settings` table
+  (non-secret). The **secret key** is stored in the **macOS Keychain** (service `dev.vire.app`,
+  account `langfuse_secret_key`) — never in SQLite, never in plaintext. (Before v0.6.2 both keys
+  were in Keychain; TASK-044 moved the public key to SQLite.)
+2. **Process environment variables** (dev fallback — see table below): used only when **both** env
+  keys are absent from storage. Credentials from env are treated as a **whole-pair override** —
+  both `VIRE_LANGFUSE_PUBLIC_KEY` and `VIRE_LANGFUSE_SECRET_KEY` (or `LANGFUSE_*` aliases) must
+  be set; a single env key alongside a stored key resolves to no credentials (DEC-026 pair-level
+  rule). Clear or replace in-app once in-app settings are configured.
 3. **Code defaults**: loopback `http://127.0.0.1:3000`, `source=local`, `environments=vire`.
 
 The in-app Settings panel is the correct path for all normal usage. Env vars remain valid for local development workflows (e.g. `set -a; . ./.env; set +a` before `npm run tauri:dev`) but are not required once in-app settings are saved.
@@ -175,8 +183,8 @@ The in-app Settings panel is the correct path for all normal usage. Env vars rem
 | Base URL | `http://127.0.0.1:3000` | `VIRE_LANGFUSE_BASE_URL` | Local loopback; change only for an explicit Cloud override |
 | Source posture | `local` | `VIRE_LANGFUSE_SOURCE` | `local` (default) or `cloud` (explicit override — produces off-host egress) |
 | Allowed environments | `vire` | `VIRE_LANGFUSE_ENVIRONMENTS` | Comma-separated list; start with `vire`, add others as needed |
-| API public key | — | `VIRE_LANGFUSE_PUBLIC_KEY` (fallback: `LANGFUSE_PUBLIC_KEY`) | Never committed, logged, or exported; overridden by Keychain when set in-app |
-| API secret key | — | `VIRE_LANGFUSE_SECRET_KEY` (fallback: `LANGFUSE_SECRET_KEY`) | Never committed, logged, or exported; overridden by Keychain when set in-app |
+| API public key | — | `VIRE_LANGFUSE_PUBLIC_KEY` (fallback: `LANGFUSE_PUBLIC_KEY`) | Never committed, logged, or exported; overridden by SQLite in-app settings when set in-app. **Must be paired with secret key env var** — a lone public env var is ignored (pair-level override). |
+| API secret key | — | `VIRE_LANGFUSE_SECRET_KEY` (fallback: `LANGFUSE_SECRET_KEY`) | Never committed, logged, or exported; overridden by Keychain when set in-app. **Must be paired with public key env var** — a lone secret env var is ignored (pair-level override). |
 
 **Additional in-app settings (TASK-029):**
 

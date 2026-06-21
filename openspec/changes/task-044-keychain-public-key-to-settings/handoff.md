@@ -33,7 +33,11 @@ Add direct coverage for the `INCONSISTENT_CLEAR_ERR` restore-failure branch; see
 
 ## Next action
 
-SW-6 COMPLETE (2026-06-21). RELEASE.md v0.6.2 written at
-`openspec/changes/task-044-keychain-public-key-to-settings/RELEASE.md` and root `RELEASE.md`
-updated. PR #32 promoted to ready-for-review. Tag `task-044/v0.6.2` pending SSH key (dry-run
-record in RELEASE.md). Manual macOS Keychain dialog verification still pending (non-blocking).
+SW-6 DOCS COMPLETE (2026-06-21). Documentation Engineer gate PASS. Changes applied:
+- `README.md`: version bump v0.6.0→v0.6.2; Secrets bullet corrected (public key → SQLite,
+  secret → Keychain only); existing-install re-save note added; rollback Data bullet adds
+  TASK-044 row; packaged-app step 7 corrected to one Keychain entry.
+- `docs/langfuse-local-setup.md`: endpoint config §1 corrected (public key in SQLite, not
+  Keychain); env var table notes corrected for public key and pair-only requirement (DEC-026).
+PR #32 ready-for-review. Tag `task-044/v0.6.2` pending SSH key (dry-run in RELEASE.md).
+Manual macOS Keychain dialog verification still pending (non-blocking).
