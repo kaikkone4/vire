@@ -30,9 +30,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-deny
+        # Pin the scanner binary to an explicit version (not just the installer action) so the
+        # advisory schema/behavior is reproducible. Must match src-tauri/deny.toml header,
+        # tasks.md T2, and ops-review.md §2. unmaintained = "all" requires cargo-deny >= 0.18.
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.19.9
 
       - name: Run target-scoped advisory check
         working-directory: src-tauri

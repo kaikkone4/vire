@@ -11,12 +11,20 @@ src-tauri/Cargo.lock` is empty; no source, IPC, capability, schema, or `tauri.co
 
 Adds `src-tauri/deny.toml` (a `cargo-deny` config whose advisory graph is scoped via `[graph].targets`
 to the shipped Apple targets `aarch64`/`x86_64-apple-darwin`) plus a `dependency-advisories` GitHub
-Actions gate that runs `cargo deny check advisories`. The Tauri-v2 Linux GTK3 chain (`glib`, `gtk`,
-`gdk`, `atk`, `gtk3-macros`, …) is `cfg`-gated to Linux/BSD upstream and is **not** in the macOS
-dependency graph (proven by `cargo tree`), so its advisories do not fire on the shipped target. The 12
-deferred Linux-only advisory IDs are documented with per-ID rationale in `deny.toml` and the change's
-`ops-review.md` / `sec.md`. Adding a Linux triple to `[graph].targets` is the intended **tripwire** —
-it re-surfaces `glib` RUSTSEC-2024-0429 + the gtk3-rs unmaintained cluster rather than burying them.
+Actions gate that runs the pinned **cargo-deny 0.19.9** `cargo deny check advisories`. Against the
+shipped Apple graph the locked crates carry **17 RustSec advisories**, split two ways:
+
+- **12 Linux-only (deferred, target-scoped out):** the Tauri-v2 GTK3 chain (`glib`, `gtk`, `gdk`, `atk`,
+  `gtk3-macros`, `proc-macro-error`, …) is `cfg`-gated to Linux/BSD upstream and is **not** in the macOS
+  dependency graph (proven by `cargo tree`), so its advisories do not fire on the shipped target. These
+  IDs stay **out** of `ignore` — adding a Linux triple to `[graph].targets` is the intended **tripwire**
+  that re-surfaces the gtk3-rs unmaintained cluster (and, via `osv-scanner`, `glib` RUSTSEC-2024-0429).
+- **5 Apple-present (accepted via documented `ignore`):** unmaintained `unic-*` crates
+  (RUSTSEC-2025-0075/0080/0081/0098/0100) reach the shipped graph through `urlpattern → tauri-utils`;
+  they are unscored, have no upstream fix, and are explicitly accepted so the scoped gate exits 0.
+
+All 17 IDs are documented with per-ID rationale in `deny.toml` and the change's `ops-review.md` / `sec.md`,
+and the gate result is verified by a real `cargo deny check advisories` run.
 
 Corrects the TASK-043 brief: vire is **Tauri v2** (2.11.2), not v1; there are no `tauri-plugin-updater`
 Rust deps.
@@ -24,14 +32,18 @@ Rust deps.
 ### Run the gate locally
 
 ```sh
+cargo install cargo-deny --version 0.19.9 --locked
 cd src-tauri && cargo deny check advisories
 ```
 
-(Requires `cargo install cargo-deny`. CI installs it automatically.)
+(Pin the same version CI uses — `cargo-deny 0.19.9`; `unmaintained = "all"` requires cargo-deny ≥ 0.18.)
 
 ### Compatibility and rollback
 
-No runtime impact; the macOS `.app` is byte-identical. Deployment size: **patch**. Rollback: delete
+No runtime impact. The change is config/docs only — **no source, `Cargo.toml`, `Cargo.lock`, or shipped
+dependency-graph delta** (`git diff main -- src-tauri/Cargo.toml src-tauri/Cargo.lock` is empty; no
+`src-tauri/src/**`, `src/**`, `tauri.conf.json`, or capability files touched), so the built macOS `.app`
+carries no dependency or source change from this task. Deployment size: **patch**. Rollback: delete
 `src-tauri/deny.toml` + `.github/workflows/dependency-advisories.yml` (fully automated, no data impact).
 
 ---

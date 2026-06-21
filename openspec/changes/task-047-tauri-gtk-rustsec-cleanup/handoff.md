@@ -1,42 +1,34 @@
-<!-- handoff.md — compact per-task state. KEEP <= 2 KB. Reference files; never paste content. -->
+<!-- handoff.md — compact per-task state. KEEP <= 2 KB. -->
 
-# Handoff — TASK-047 Tauri/GTK RustSec cleanup (TASK-043 Stream B)
+# Handoff — TASK-047 Tauri/GTK RustSec cleanup
 
-- **Change**: `openspec/changes/task-047-tauri-gtk-rustsec-cleanup/`. Branch:
-  `feat/task-047-tauri-gtk-rustsec-cleanup`. Draft PR open (link in SW-2 report).
-- **Phase**: SW-1 arch (PASS) → **SW-2 DevOps COMPLETE**. Next: **SW-5 sec.md**, then SW-3 QA.
-- **Decision**: (c) deferred w/ risk acceptance via **target-scoped `cargo-deny`** gate. Zero
-  shipped-crate delta; no `Cargo.*`/source/capability/`tauri.conf.json` edit.
+- **Branch/PR**: `feat/task-047-tauri-gtk-rustsec-cleanup` / #35.
+- **Phase**: SW-1 PASS → SW-3 PASS(stale) → SW-4 FAIL + SW-5 FAIL → **SW-2 fix done** → re-review.
+- **Decision**: deferred risk acceptance via Apple-target-scoped `cargo-deny`; no code/Cargo/UI/IPC/
+  capability/config delta (`git diff main` empty).
 
-## SW-2 delivered
+## SW-2 fix (this pass) — all SW-4 + SW-5 blockers closed
 
-- `src-tauri/deny.toml` — `[graph].targets`=Apple only; `ignore=[]` (no blanket suppress);
-  `unmaintained="all"`; auditable 12-ID deferred block.
-- `.github/workflows/dependency-advisories.yml` — `cargo deny check advisories` (ubuntu, graph-only
-  scoped). Local: `cd src-tauri && cargo deny check advisories`.
-- `RELEASE.md` v0.6.3 (SW-6 finalizes version) · `ops-review.md` (full evidence + 12-ID table).
+- **Pinned `cargo-deny 0.19.9`** in workflow (`tool: cargo-deny@0.19.9`), `deny.toml`, `tasks.md` T2,
+  `ops-review.md` §2. (`unmaintained="all"` needs ≥ 0.18; 0.16.4 rejects it.)
+- **Real scans** (pinned binary, project-local temp install, not system):
+  - Scoped (Apple): `advisories ok`, **exit 0**. Pre-fix ignore=[] errored on exactly the 5 `unic-*`
+    → confirms SW-5 SEC-001.
+  - Full-target (Apple+Linux, ignore=[]): 16 unmaintained = 5 `unic-*` + 11 Linux (proc-macro-error
+    -0370 + gtk3-rs -0411–0420). `glib` -0429 unsound → not enforced by cargo-deny v2; via osv-scanner
+    (CVSS 6.9). Inventory total = **17** (osv-scanner cross-check).
+- **SEC-001 fixed**: 5 `unic-*` (RUSTSEC-2025-0075/0080/0081/0098/0100) → documented scoped
+  `[advisories].ignore` → gate exits 0. 12 gtk3-rs/glib/proc-macro-error kept OUT (tripwire intact).
+- **Wording**: "Apple clean / 12 total" → **17 = 12 Linux-only deferred + 5 Apple-present accepted** in
+  `deny.toml`, `ops-review.md` §4, `qa.md` (banner; verdict SUPERSEDED, SW-3 must re-issue). RELEASE
+  byte-identical → narrowed to no source/manifest/lock/dep-graph delta.
 
-## Gate results
+## Files changed
 
-- **V2** empty Cargo diff: PASS (0 bytes vs main). **V3** tripwire: PASS via `cargo tree` (Linux triple
-  resurfaces `glib`+cluster; macOS="nothing to print"). **V4**: N/A (no compiled change).
-- **V1** scoped check exits 0 + **V5** sec.md: deferred to CI / SW-5.
+`src-tauri/deny.toml`, `.github/workflows/dependency-advisories.yml`, `RELEASE.md`,
+`openspec/changes/task-047-…/{ops-review,tasks,qa,handoff}.md`. openspec validate --strict = PASS.
 
-## Tooling note
+## Route
 
-`cargo-deny`/`cargo-audit` NOT installed; policy=no install → real scan runs in CI. Deferred IDs
-extracted programmatically from RustSec advisory-db vs exact `Cargo.lock` versions (not hand-copied).
-
-## Deferred IDs — see `ops-review.md` §4 / `deny.toml`
-
-`glib` 0.18.5→RUSTSEC-2024-0429 (unsound, fix ≥0.20); `proc-macro-error` 1.0.4→-0370; gtk3-rs unmaint
-cluster -**0411–0420** (10 crates). NB design's "…0423" approximate; exact=…0420.
-
-## Next
-
-- SW-5: write `sec.md` from `ops-review.md` §4. SW-3: re-enter only per tripwire (Linux target / Tauri
-  off GTK3).
-
-## Refs
-
-`design.md` · `tasks.md` · `ops-review.md` · `specs/dependency-security/spec.md` · `src-tauri/deny.toml`.
+Re-review **SW-4 + SW-5** in parallel; then **SW-3** re-issues QA verdict. SW-6 blocked until the
+advisory gate is green in CI.

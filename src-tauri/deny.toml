@@ -1,20 +1,46 @@
 # src-tauri/deny.toml — Rust dependency advisory posture for vire.
 #
 # vire ships a macOS-only Tauri v2 app (tauri 2.11.2 / wry 0.55.1 / tao 0.35.3).
-# Enforcement here is TARGET-SCOPED, not an advisory-ID ignore list:
 #
-#   [graph].targets is restricted to the shipped Apple targets. The gtk3-rs / glib
-#   chain is a Linux/BSD-backend graph (cfg-gated inside muda/tao/wry upstream) and is
-#   NOT in the macOS dependency graph — proven by:
-#       cargo tree -i glib --target aarch64-apple-darwin   -> "nothing to print"
-#       cargo tree -i glib --target x86_64-unknown-linux-gnu -> glib <- atk <- gtk <- {muda,tao} <- tauri
-#   so those advisories do not fire here, and the gate reflects exactly what ships.
+# PINNED SCANNER: cargo-deny 0.19.9 (must match .github/workflows/dependency-advisories.yml,
+# tasks.md T2, ops-review.md §2). `unmaintained = "all"` below requires cargo-deny >= 0.18.
+# Run locally with the same pinned version:
+#     cargo install cargo-deny --version 0.19.9 --locked
+#     (cd src-tauri && cargo deny check advisories)
 #
-# THE TRIPWIRE: the day a Linux triple is added to [graph].targets (which any Linux
-# build requires), the deferred advisories below re-surface and MUST be re-evaluated
-# (real upstream fix or an explicit fresh acceptance). Do NOT add a blanket
-# [advisories].ignore for those IDs — that would bury the tripwire on a future Linux
-# build. See openspec/changes/task-047-tauri-gtk-rustsec-cleanup/{design.md,ops-review.md}.
+# Enforcement is TARGET-SCOPED via [graph].targets — NOT a blanket advisory-ID ignore list.
+# The full src-tauri/Cargo.lock carries 17 RustSec advisories. Against the Apple-scoped graph
+# they split into two groups (verified by a real `cargo deny check advisories` run, cargo-deny
+# 0.19.9, 2026-06-21, and by `cargo tree`):
+#
+#   (A) 12 LINUX-ONLY advisories — gtk3-rs / glib / proc-macro-error. These crates are the
+#       Linux/BSD webkit backend, cfg-gated inside muda/tao/wry upstream, and are ABSENT from
+#       the macOS graph:
+#           cargo tree -i glib --target aarch64-apple-darwin    -> "nothing to print"
+#           cargo tree -i glib --target x86_64-unknown-linux-gnu -> glib <- atk <- gtk <- {muda,tao} <- tauri
+#       They DO NOT fire on the Apple targets and are deliberately NOT in [advisories].ignore
+#       (target-scoped only — see THE TRIPWIRE). Enumerated in the "DEFERRED" block below.
+#       Enforcement note: of these 12, cargo-deny 0.19.9 raises the 11 *unmaintained* IDs
+#       (proc-macro-error + 10 gtk3-rs) as errors; glib RUSTSEC-2024-0429 is *unsound*-class,
+#       which cargo-deny's version-2 advisory check does not enforce as an error — it is tracked
+#       in the DEFERRED block and is independently surfaced by osv-scanner (CVSS 6.9, < 7.0 bar).
+#
+#   (B) 5 APPLE-PRESENT advisories — unic-* unmaintained (RUSTSEC-2025-0075/0080/0081/0098/0100).
+#       These ARE in the shipped Apple graph via
+#           unic-* -> unic-ucd-ident -> urlpattern -> tauri-utils -> {tauri-build (build-dep), tauri} -> vire
+#       (proven by `cargo tree --target aarch64-apple-darwin`; a real `cargo deny check advisories`
+#       with ignore=[] errors on exactly these 5). They are unmaintained-class, unscored (no CVE),
+#       with no safe upgrade, so they are ACCEPTED via the documented [advisories].ignore below —
+#       NOT via target scoping. This is what makes the scoped gate exit 0.
+#
+# THE TRIPWIRE: the day a Linux triple is added to [graph].targets (which any Linux build
+# requires), the group-(A) advisories re-surface in the evaluated graph and MUST be re-evaluated
+# (real upstream fix or an explicit fresh acceptance). cargo-deny errors on the 11 unmaintained
+# group-(A) IDs; glib's unsound RUSTSEC-2024-0429 is caught by osv-scanner (enforcement note
+# above). Do NOT add the gtk3-rs/glib IDs to [advisories].ignore — that
+# would bury the tripwire on a future Linux build. Only the group-(B) unic-* IDs, which are
+# genuinely present on the shipped Apple target, belong in ignore.
+# See openspec/changes/task-047-tauri-gtk-rustsec-cleanup/{design.md,ops-review.md,sec.md}.
 
 [graph]
 # Shipped Apple targets only. Adding a non-Apple triple is the intended tripwire.
@@ -25,27 +51,52 @@ targets = [
 
 [advisories]
 version = 2
-# Fail on yanked crates. In version-2 schema every advisory in the evaluated graph is
-# an error by default; the Apple-target graph is clean by construction, so no ignore
-# entries are needed (and none are permitted for the gtk3-rs cluster — see above).
+# Fail on yanked crates.
 yanked = "deny"
-# Unmaintained advisories are evaluated for the whole graph so the tripwire has teeth
-# when a Linux target is added.
+# Evaluate unmaintained advisories across the whole graph so the tripwire has teeth when a Linux
+# target is added. Requires cargo-deny >= 0.18 (the pinned 0.19.9 supports it).
 unmaintained = "all"
-ignore = []  # intentionally empty — Apple-target graph is clean by construction.
+# ACCEPTED Apple-present advisories — group (B) above. These unic-* crates ARE in the shipped
+# macOS graph (via urlpattern -> tauri-utils); each is unmaintained-only, unscored (no CVE), and
+# has no safe upgrade. Accepting them here is what makes `cargo deny check advisories` exit 0 on
+# the Apple targets. The gtk3-rs/glib group-(A) IDs are intentionally NOT listed here — they are
+# handled by [graph].targets scoping (the tripwire), not by ID suppression.
+ignore = [
+    "RUSTSEC-2025-0081",  # unic-char-property 0.9.0 — unmaintained (rust-unic EOL); urlpattern -> tauri-utils
+    "RUSTSEC-2025-0075",  # unic-char-range    0.9.0 — unmaintained (rust-unic EOL); urlpattern -> tauri-utils
+    "RUSTSEC-2025-0080",  # unic-common        0.9.0 — unmaintained (rust-unic EOL); urlpattern -> tauri-utils
+    "RUSTSEC-2025-0100",  # unic-ucd-ident     0.9.0 — unmaintained (rust-unic EOL); urlpattern -> tauri-utils
+    "RUSTSEC-2025-0098",  # unic-ucd-version   0.9.0 — unmaintained (rust-unic EOL); urlpattern -> tauri-utils
+]
 
 # ----------------------------------------------------------------------------------
-# DEFERRED ADVISORIES (Linux-only backend, NOT compiled into the shipped macOS .app)
+# ACCEPTED — APPLE-PRESENT advisories (group B; suppressed via [advisories].ignore above)
 # ----------------------------------------------------------------------------------
-# Generated by cross-referencing the locked crate versions in src-tauri/Cargo.lock
-# against the RustSec advisory database (github.com/rustsec/advisory-db). The
-# cargo-deny / cargo-audit binaries are not installed in the authoring environment
-# (missing-dependency policy: no install); the CI gate below runs the real
-# `cargo deny check advisories` where cargo-deny is installed.
+# Source: real `cargo deny check advisories` (cargo-deny 0.19.9) — with ignore=[] these 5 are the
+# ONLY advisories that error on the Apple-scoped graph; cross-checked against osv-scanner on
+# src-tauri/Cargo.lock. All 5 belong to the open-i18n/rust-unic project (RUSTSEC announcement
+# rustsec/advisory-db#2414), which is unmaintained with NO safe upgrade available.
 #
-# None of the crates below appear in the aarch64/x86_64-apple-darwin graph, so none
-# fire under the [graph].targets scoping above. They are listed for auditability and
-# to make the tripwire explicit.
+#   ID                  Crate (locked)            Class         Fix         Apple reachability
+#   ------------------  ------------------------  ------------  ----------  ---------------------------------
+#   RUSTSEC-2025-0081   unic-char-property 0.9.0  unmaintained  none        urlpattern -> tauri-utils -> tauri
+#   RUSTSEC-2025-0075   unic-char-range    0.9.0  unmaintained  none        urlpattern -> tauri-utils -> tauri
+#   RUSTSEC-2025-0080   unic-common        0.9.0  unmaintained  none        urlpattern -> tauri-utils -> tauri
+#   RUSTSEC-2025-0100   unic-ucd-ident     0.9.0  unmaintained  none        urlpattern -> tauri-utils -> tauri
+#   RUSTSEC-2025-0098   unic-ucd-version   0.9.0  unmaintained  none        urlpattern -> tauri-utils -> tauri
+#
+# Risk: low. Unmaintained-only (no CVE, unscored). `urlpattern` 0.3.0 is the single upstream
+# consumer (Tauri's `tauri-utils` URL-pattern parsing, also pulled as a build-dependency of
+# tauri-build). No first-party vire code calls unic-* directly. Review trigger: re-evaluate if a
+# `urlpattern`/`tauri-utils` release drops the rust-unic dependency or if any of these advisories
+# is upgraded to a scored CVE.
+
+# ----------------------------------------------------------------------------------
+# DEFERRED — LINUX-ONLY advisories (group A; NOT compiled into the shipped macOS .app)
+# ----------------------------------------------------------------------------------
+# These do NOT fire on the Apple-scoped graph (cargo tree proof above) and are NOT in
+# [advisories].ignore — target scoping alone keeps them out, so a future Linux triple re-surfaces
+# them (the tripwire). Listed here for auditability. Confirmed against osv-scanner on Cargo.lock.
 #
 #   ID                  Crate (locked ver)      Class          Upstream fix
 #   ------------------  ----------------------  -------------  -------------------------------
@@ -62,6 +113,11 @@ ignore = []  # intentionally empty — Apple-target graph is clean by constructi
 #   RUSTSEC-2024-0418   gdk-sys 0.18.2         unmaintained   none — gtk3-rs EOL (-> gtk4-rs)
 #   RUSTSEC-2024-0419   gtk3-macros 0.18.2     unmaintained   none — gtk3-rs EOL (-> gtk4-rs)
 #   RUSTSEC-2024-0420   gtk-sys 0.18.2         unmaintained   none — gtk3-rs EOL (-> gtk4-rs)
+#
+# Enforcement: a full Apple+Linux `cargo deny check advisories` (ignore=[], cargo-deny 0.19.9)
+# errors on 11 of these 12 — the unmaintained class (proc-macro-error + 10 gtk3-rs). glib
+# RUSTSEC-2024-0429 is *unsound*-class informational; cargo-deny's version-2 advisory check does
+# not raise it as an error, so it is tracked here and via osv-scanner rather than the gate.
 #
 # Review trigger: revisit this acceptance if (i) a Linux build target is added, or
 # (ii) Tauri's Linux backend migrates off GTK3 — at which point glib >= 0.20 becomes
