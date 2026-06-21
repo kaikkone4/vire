@@ -9,21 +9,21 @@
 - **Tier**: L1 (Stream A). Stream B (Tauri/GTK) = L2, separate task TASK-044, untouched.
 
 ## Last gate result
-DevOps Stream A PASS (2026-06-21). Scoped npm fix verified on a worktree off current `main`:
-vite 6.4.2→**6.4.3** (in-range, floor pinned ^6.4.3), tsx's esbuild 0.28.0→**0.28.1**.
-`npm audit` → **0 vulns** (was 1 HIGH vite + 1 LOW esbuild); `npm run build` OK; npm-only diff
-(no Cargo/tauri/capability/src). Full results: `ops-review.md`.
-(Prior: SW-1 SPLIT-REQUIRED, 2026-06-20.)
+**SW-3 QA PASS (2026-06-21).** Verified on worktree `chore/task-043-vite-esbuild-advisory-bump`.
+vite 6.4.2→**6.4.3** (in-range, floor `^6.4.3`), tsx esbuild 0.28.0→**0.28.1**.
+`npm audit` → **0 vulns**; `npm run build` OK; test 103/2 (2 pre-existing).
+QA fix committed: `953191c` — lockfile `name` restored to `"code"` (was `".wt-task043"` worktree artifact).
+Scope guard confirmed: diff vs origin/main = package.json + package-lock.json + openspec artifacts only.
+Full results: `qa.md`.
+(Prior: DevOps SW-2 PASS, 2026-06-21; SW-1 SPLIT-REQUIRED, 2026-06-20.)
 
 ## Active blockers
-- none for Stream A merge. CAVEAT: `npm run test:frontend` is 103/2 locally — the 2 failing
-  `pi-observe.security` Langfuse tests are **pre-existing & network/env-dependent** (identical on
-  pristine main; pass in network-capable CI). Not a regression; out of Stream A scope.
+- None. PR #30 is ready for SW-4 + SW-5.
 
 ## Exact next action
-Pi-Assistant: (1) route PR #30 to review (sw-qa SW-3 or merge) — re-run frontend tests in a
-network-capable CI to confirm 105/105; (2) **close dependabot PR #20** as superseded/out-of-scope
-(vite 8 major = separate SW-1 decision); (3) Stream B stays scheduled as TASK-044.
+Pi-Assistant: (1) route PR #30 to **SW-4 (Code Reviewer) + SW-5 (Security Agent) in parallel**;
+(2) **close dependabot PR #20** as superseded (vite 8 major, out-of-scope — see qa.md + ops-review.md);
+(3) Stream B remains TASK-044 (untouched).
 
 ## Required files (read these, not the whole tree)
 - `ops-review.md` — Stream A verification matrix, advisory table, why-not-PR#20 (PRIMARY)
