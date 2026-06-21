@@ -1,65 +1,57 @@
-# SW-4 Code Review — TASK-044
+# SW-4 Code Review — TASK-044 recheck
 
-**Verdict:** ESCALATE
+**Verdict:** PASS
 
-**Review boundary:** TASK-044 implementation commit `1160f04` (`src-tauri/src/settings/mod.rs`,
-`src-tauri/src/settings/tests.rs`, `src-tauri/src/lib.rs`) plus the branch/base scope note.
+**Review boundary:** Full TASK-044 implementation in commits `1160f04` + `db2eeef`, with focused
+recheck of the prior SW-4 escalation and the architect addendum.
 
 ## Blocking issues
 
-1. **The resolver still creates mixed stored/env credential pairs when exactly one stored field is
-   absent.** In `src-tauri/src/settings/mod.rs:274-294`, each field independently falls back to its
-   environment variable before the pair is assembled. Therefore:
-   - settings public present + Keychain secret absent + env secret present returns a mixed pair;
-   - settings public absent + Keychain secret present + env public present returns a mixed pair.
+None.
 
-   The second case is also the documented existing-install state until the user re-saves, so a stale
-   Keychain secret can be paired with an environment public key. This contradicts the requested
-   no-mixed-pair behavior and the T3 plan in `design.md`. The test at
-   `src-tauri/src/settings/tests.rs:607-672` verifies rollback restored a complete prior pair; it
-   never exercises either actual half-state, so the gap is currently untested.
+## Findings
 
-2. **The implementation does not uphold the stated atomic set/clear invariant across store
-   failures.**
-   - On set, rollback errors are discarded at `src-tauri/src/settings/mod.rs:397-404`. If restoring
-     or deleting the SQLite public row fails after the Keychain write fails, the function returns
-     the Keychain error while leaving a half-written pair.
-   - On clear, the Keychain secret is deleted before the SQLite row at
-     `src-tauri/src/settings/mod.rs:417-420`. If the SQLite delete fails, the secret is already gone
-     and there is no compensation path, leaving only the public row.
-
-   The tests cover Keychain failure before the SQLite clear
-   (`src-tauri/src/settings/tests.rs:727-741`) but not SQLite failure after Keychain mutation or
-   failed set compensation. The design explicitly treats SQLite failure as “effectively never”;
-   that assumption conflicts with the hard requirement that every set/clear result leave both
-   stores present or both absent. The failure contract or compensation design needs an architect
-   decision before implementation can pass.
+- Pair-level resolution is now structural at `src-tauri/src/settings/mod.rs:307-328`: stored
+  credentials are used only as a complete pair, env is consulted only when both stores are absent,
+  and either half-state resolves to `None`. Tests cover both half-state directions and the complete
+  env fallback at `src-tauri/src/settings/tests.rs:729-784`.
+- Set compensation no longer swallows SQLite rollback failures
+  (`src-tauri/src/settings/mod.rs:427-445`). Both restore and delete rollback failures return the
+  distinct, secret-free `INCONSISTENT_SET_ERR`, covered at
+  `src-tauri/src/settings/tests.rs:865-902`.
+- Clear is SQLite-first and aborts before Keychain mutation on SQLite failure
+  (`src-tauri/src/settings/mod.rs:463-470`). A Keychain delete failure restores the captured public
+  key (`src-tauri/src/settings/mod.rs:470-482`), with both paths covered at
+  `src-tauri/src/settings/tests.rs:904-973`.
+- Renderer IPC names and payloads remain unchanged. The added Tauri `State` argument is injected
+  server-side (`src-tauri/src/lib.rs:847-868`); `src/main.ts` is unchanged.
 
 ## Suggestions
 
-- Add direct half-state resolver tests for both directions, with both environment keys populated.
-- Add injectable/failing SQLite-operation coverage for set compensation and the second clear step.
+- Add a direct test for the `INCONSISTENT_CLEAR_ERR` branch at
+  `src-tauri/src/settings/mod.rs:475-482` by combining the delete-failing secret store with an
+  aborting restore trigger. This is non-blocking because the architect-required clear matrix covers
+  successful compensation and pre-Keychain SQLite failure, and the untested branch mirrors the
+  already-covered set compensation handling.
 
-## Escalation to SW Architect
+## Escalations to SW Architect
 
-Reconcile the hard cross-store atomicity/no-mixed-pair invariant with the chosen two-store design.
-Specify pair-level environment fallback semantics and an explicit outcome for SQLite failure after a
-Keychain mutation; the current “local SQLite effectively never fails” rationale is not a guarantee.
+None. The prior escalation is resolved by `arch-review.md` Decisions 1 and 2.
 
 ## Checks
 
-- `cargo test settings::tests` — PASS (27 tests).
+- `cargo test settings::tests` — PASS, 33 passed.
 - `cargo fmt --all -- --check` — PASS.
 - `npm run build` — PASS.
-- `git diff --check 1160f04^ 1160f04` — PASS.
-- `cargo clippy --tests -- -D warnings` — FAIL only on pre-existing untouched findings documented
-  in the handoff (`langfuse/importer.rs`, `langfuse/tests.rs`, `lib.rs`).
-- Commit message for `1160f04` is scoped and complete.
-- PR #32 metadata could not be fetched because `api.github.com` was unreachable; local branch scope
-  confirms TASK-044 is one implementation commit on top of the TASK-043 tip, so the large
-  `main...HEAD` diff is inherited base history rather than TASK-044 scope.
+- `git diff --check 1160f04^..db2eeef -- src-tauri/src/settings/mod.rs
+  src-tauri/src/settings/tests.rs src-tauri/src/lib.rs` — PASS.
+- `cargo clippy --lib --tests -- -D warnings` — touched code clean; command fails only on six
+  pre-existing findings in untouched `langfuse/importer.rs`, `langfuse/tests.rs`, and `lib.rs`.
+- Commit messages for `1160f04` and `db2eeef` are scoped and describe behavior, failure handling,
+  tests, and IPC compatibility.
+- PR #32 metadata could not be fetched because `api.github.com` was unreachable.
 
 ## Changed paths
 
-- Added `openspec/changes/task-044-keychain-public-key-to-settings/review.md`.
-- Updated `openspec/changes/task-044-keychain-public-key-to-settings/handoff.md`.
+- `openspec/changes/task-044-keychain-public-key-to-settings/review.md`
+- `openspec/changes/task-044-keychain-public-key-to-settings/handoff.md`

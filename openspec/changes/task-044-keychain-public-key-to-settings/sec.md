@@ -1,17 +1,17 @@
 # Security Review — TASK-044 keychain-public-key-to-settings (SW-5)
 
-**Date**: 2026-06-21
+**Date**: 2026-06-21 (recheck after Architect fix `db2eeef` + SW-3 QA PASS)
 **Branch / PR**: feat/task-044-keychain-public-key-to-settings · PR #32
-**Commit (task-044 scope)**: 1160f04
+**Commit (task-044 scope)**: `1160f04` (impl) → `db2eeef` (Architect-decided fix) → `f552b64` (QA)
 **Tier**: L2 (secrets + CVE≥7 + Trivy + semgrep ERROR)
-**Verdict**: **PASS (security gate)** — but release is gated on SW-4's open Architect
-escalation (DEC-026 credential-pair integrity); see §3.
+**Verdict**: **PASS (security gate) — release no longer blocked from the security side.**
 
 Relocates the non-secret Langfuse public key (HTTP Basic-Auth username) from the macOS
 Keychain into the plaintext SQLite `settings` table; the secret key stays Keychain-only.
-Backend-only (Rust), renderer IPC contract unchanged. Realizes F2a under the SW-5
-public-key non-secrecy sign-off already granted in `arch-review.md`, and conditions C1–C4
-from TASK-041 `sec.md`.
+This recheck re-reviews the **full** change after `db2eeef` applied the binding
+`arch-review.md` Addendum (Decision 1 pair-level env fallback; Decision 2 two-store
+consistency contract). It **supersedes** the prior sec.md verdict, which was PASS-but-gated
+on the open Architect escalation — that escalation is now **resolved** (see §3).
 
 ---
 
@@ -19,107 +19,91 @@ from TASK-041 `sec.md`.
 
 | Scanner | Scope | Auto-fail condition | Result |
 |---|---|---|---|
-| **semgrep** 1.166.0 | changed Rust files (`settings/mod.rs`, `settings/secret_store.rs`, `lib.rs`), `--config=auto --severity=ERROR` | any ERROR finding | **0 findings** ✅ |
-| **gitleaks** 8.30.1 | task-044 commit (`1160f04^..1160f04`) + changed source dir | any detected secret | **0 in commit/source** ✅ (3 FPs — see §1.1) |
-| **OSV-scanner** 2.3.8 | `src-tauri/Cargo.lock` (492 pkgs) + `package-lock.json` (106 pkgs) | CVE ≥ 7.0 CVSS | **no CVSS ≥ 7.0** ✅ (see §1.2) |
+| **semgrep** 1.166.0 | changed Rust files (`settings/mod.rs`, `settings/tests.rs`, `lib.rs`), `--config=auto --severity=ERROR` | any ERROR finding | **0 findings** ✅ |
+| **gitleaks** 8.30.1 | full task-044 source range `1160f04^..HEAD` (4 commits) + changed source dir | any detected secret | **0 in commits/source** ✅ (3 FPs — see §1.1) |
+| **OSV-scanner** 2.3.8 | `src-tauri/Cargo.lock` + `package-lock.json` | CVE ≥ 7.0 CVSS | **no CVSS ≥ 7.0** ✅ (see §1.2) |
 | **Trivy** 0.71.1 | fs vuln scan, `Cargo.lock` + `package-lock.json`, HIGH/CRITICAL | HIGH or CRITICAL | **0 HIGH/CRITICAL** ✅ |
+
+**No auto-fail condition hit on any scanner.**
 
 ### 1.1 gitleaks false positives (not blocking)
 
-The 3 hits are all in **gitignored build artifacts**, not source and not in the task-044 diff:
+The authoritative git-log scan (`1160f04^..HEAD`, all 4 task-044 commits incl. `db2eeef`)
+reports **no leaks found**. The 3 filesystem hits are all in **gitignored build artifacts**
+(`git ls-files` → not tracked), not source and not in any task-044 diff:
 
 - `src-tauri/target/debug/deps/libmuda-*.rmeta` (×2)
 - `src-tauri/target/release/deps/libmuda-*.rmeta` (×1)
 
 All match the `generic-api-key` heuristic against the literal keybinding string
-`` `shift+alt+KeyQ` `` compiled into the `muda` menu crate — not credential material.
-The task-044 commit scan and the source files are clean.
+`` `shift+alt+KeyQ` `` compiled into the `muda` menu crate — not credential material. Same
+FPs triaged in the prior review.
 
 ### 1.2 OSV advisories (advisory, pre-existing, not blocking)
 
-17 advisories across transitive Tauri/GTK deps. **task-044 changed no lockfile**
-(`git show 1160f04` touches no `Cargo.toml`/`Cargo.lock`/`package*.json`), so none are
-introduced by this change. Highest CVSS-scored finding:
+18 advisories across transitive Tauri/GTK3 deps. **task-044 changed no lockfile** — the full
+source range `1160f04^..HEAD` touches only `src-tauri/src/{settings/mod.rs,settings/tests.rs,lib.rs}`
+(no `Cargo.toml`/`Cargo.lock`/`package*.json`), so none are introduced by this change. Only
+one advisory carries a CVSS vector:
 
-- `glib` 0.18.5 — RUSTSEC-2024-0429 / GHSA-wrw7-89jp-8q8g — **CVSS 6.9** (< 7.0 threshold; fix in 0.20.0)
+- `glib` — GHSA-wrw7-89jp-8q8g / RUSTSEC-2024-0429 — CVSS:4.0 vector `AV:N/AC:L/.../VI:L/...`
+  (**well below the 7.0 threshold**; fix in glib 0.20.0).
 
-The remaining 16 (atk/gdk/gtk/gtk-sys/gtk3-macros/gdkx11/gdkwayland-sys,
-`proc-macro-error`, `unic-*`) are **unmaintained-crate** RUSTSEC advisories carrying no
-CVSS vector — they do not meet the `CVE ≥ 7.0 (CVSS)` auto-fail criterion. These are the
-same GTK3/transitive set already triaged under TASK-043 (dependency advisory bump) and
-remain tracked there for separate remediation, gated on the upstream Tauri GTK4 migration.
-
-**No auto-fail condition hit on any scanner.**
+The remaining 17 (atk/gdk/gtk family, `proc-macro-error`, `unic-*`) are **unmaintained-crate**
+RUSTSEC advisories carrying **no CVSS vector** — they do not meet the `CVE ≥ 7.0 (CVSS)`
+auto-fail criterion. This is the same GTK3/transitive set triaged under TASK-043 and tracked
+there for remediation, gated on the upstream Tauri GTK4 migration.
 
 ---
 
-## 2. Manual secure-code review — C1–C4 + SW-5 conditions
+## 2. Manual secure-code review — full re-review after `db2eeef`
 
-Reviewed `src-tauri/src/settings/mod.rs`, `settings/secret_store.rs`, `lib.rs` (diff
-`1160f04`) and the SEC-relevant tests in `settings/tests.rs`.
+Reviewed `settings/mod.rs` (resolver + set/clear), `settings/tests.rs` (security tests), and
+`lib.rs` IPC commands against the binding `arch-review.md` Addendum. The implementation
+matches the Addendum's required semantics line-for-line.
 
-| # | Condition | Finding | Verdict |
-|---|---|---|---|
-| C1 | Atomic credential pair across settings + Keychain | `set_langfuse_secret_repo` captures `prior_public` via the **strict** read (a real read failure aborts before any write); writes public→`settings` first (cheap, reliable, prompt-free), then secret→Keychain. On Keychain `set` failure it restores the settings row to its prior value (reinstate or `clear_setting`) and returns the coarse `e.0`. Fragile store written last ⇒ the only rollback ever needed is a local SQLite rewrite/delete. Pair ends both-new or both-prior, never one-store. | ✅ |
-| C2 | Secret stays Keychain / presence-only | Secret only ever flows to `secrets.set(SECRET_KEY_ACCOUNT, …)`. `LangfuseSettings` carries presence flags (`has_public_key`/`has_secret_key`) — no secret field. The only `write_setting` calls target `KEY_PUBLIC_KEY`. T5 scans **every** settings row for the secret value and asserts absence + no credential-bearing key name. | ✅ |
-| C3 | Strict DB read — no env fallback on a real read failure | `resolve_credentials` reads public via `read_setting_strict` (`.optional()?` ⇒ `Ok(None)` only for a genuinely absent row, `Err` for a real failure) with `.map_err(…)?` short-circuiting **before** the env branch; secret side `secrets.get(…).map_err(\|e\| e.0)?` likewise. A broken store can never be downgraded to env, so no mixed-source pair. | ✅ |
-| C4 | Atomic clear — Keychain first, abort before settings on failure | `clear_langfuse_secret_repo` deletes the Keychain secret first and returns on its error before touching `settings`, preserving the prior consistent pair; then `clear_setting(KEY_PUBLIC_KEY)`. | ✅ |
-
-| SW-5 condition | Finding | Verdict |
+| Property | Finding (code refs `settings/mod.rs`) | Verdict |
 |---|---|---|
-| No public/secret leaks in errors | All `SecretStoreError` messages are coarse, hardcoded strings; underlying driver errors discarded via `map_err(\|_\| …)`. The public-read error in the resolver is a fixed string. Public key is non-secret regardless. | ✅ |
-| No stale env/settings public paired with a legacy Keychain secret | Rollback always restores a consistent pair; legacy Keychain public-key item is best-effort `secrets.delete(PUBLIC_KEY_ACCOUNT)` on both set (post-success) and clear, so it is never read again and never re-pairs. `PUBLIC_KEY_ACCOUNT` is now write/delete-only (never read). | ✅ |
-| Clear wipes both stores | C4 — secret + settings row both removed (+ legacy item). | ✅ |
-| No new deps / egress / capabilities | `git show 1160f04` touches no `Cargo.toml`/lockfile/`tauri.conf.json`/`capabilities/*`/entitlements. No network primitives added (sole `http` match is the "HTTP Basic-Auth username" doc comment). Only SQLite + Keychain I/O. | ✅ |
+| **Public = non-secret in SQLite** | Public key written via `write_setting(conn, KEY_PUBLIC_KEY, …)` to the plaintext `settings` table; this is the HTTP Basic-Auth username (non-secret), approved as such in `arch-review.md`. | ✅ |
+| **Secret = Keychain-only / presence-only** | The secret value (`secret_key`) flows **only** to `secrets.set(SECRET_KEY_ACCOUNT, …)` (L430). Audited every `write_setting` call — all six target non-secret keys (`KEY_IMPORT_RANGE/BASE_URL/SOURCE/ENVIRONMENTS/ENABLED/PUBLIC_KEY`); none carries the secret. `LangfuseSettings` exposes `has_secret_key` presence only (no secret field). T5 scans every settings row for the secret value + asserts absence. SEC-009 / C2 hold. | ✅ |
+| **Pair-level env fallback (D1) — no mixed credentials** | `resolve_credentials` (L300–333) reads both stores strictly, then matches the pair as a **unit**: both present ⇒ stored pair (env never consulted); both absent ⇒ env pair iff **both** env keys set; **exactly one store ⇒ `None`** (lone key discarded, env not consulted for the missing side). "No mixed-source pair" is now a structural property of the match (DEC-026), not a per-field accident. Verified by T-PAIR-A/B/C and the explicit "no mixed pair" assertions. | ✅ |
+| **No env downgrade on a real read failure (C3)** | Public via `read_setting_strict` (`.optional()?` ⇒ `Ok(None)` only for a genuinely absent row, `Err` for a real failure) with `.map_err(…)?` short-circuiting **before** the env branch; secret side `secrets.get(…).map_err(\|e\| e.0)?` likewise. A broken store can never be downgraded to env. | ✅ |
+| **Error messages secret-free** | `INCONSISTENT_SET_ERR` / `INCONSISTENT_CLEAR_ERR` are fixed strings; `secret_err.0` is the coarse `SecretStoreError` string (driver error discarded via `map_err`); the public-read error is a fixed string; no input is echoed. Tests assert the INCONSISTENT errors and the settings view contain no secret needle (L285/314/878–900). | ✅ |
+| **set/clear residual one-store windows inert** | `set`: SQLite first, Keychain last; on Keychain failure the public row is restored to prior (reinstate or delete), so the pair ends both-new or both-prior. `clear` (reordered to **SQLite-first** per Decision 2): clears public first, aborts before Keychain on its failure (both remain); on Keychain-delete failure restores the non-secret public key from `prior_public` (the only recoverable artifact — a deleted secret is never re-read, SEC-009). The single one-store state reachable via a returned result requires a catastrophic local SQLite failure and is surfaced explicitly as the secret-free `INCONSISTENT_*_ERR`, never swallowed. Any such half-state (incl. crash between mutations) is rendered **inert** by the D1 resolver (one-store ⇒ `None`) ⇒ at worst "not configured," fixed by one re-save. Verified by T-SET-ROLLBACK-FAIL ×2 and T-CLEAR-COMP. | ✅ |
+| **No new deps / egress / capabilities** | Full range `1160f04^..HEAD` touches no `Cargo.toml`/lockfile/`tauri.conf.json`/`capabilities/*`/entitlements/`.plist`. `lib.rs` change adds only the **Tauri-injected** `State<AppState>` handle to `set_/clear_langfuse_secret`; the renderer argument shape (`{publicKey, secretKey}`) is unchanged → no new IPC surface, no new network primitive. Only SQLite + Keychain I/O. | ✅ |
 
 ---
 
-## 3. Concurrence with SW-4 design escalation (DEC-026 credential-pair integrity)
+## 3. Prior release gate — RESOLVED
 
-SW-4 Code Review ran in parallel and returned **ESCALATE** (`review.md`) on two cross-store
-correctness gaps. One overlaps the Security remit (DEC-026 credential-pair integrity), so I
-record my security position here rather than opening a competing escalation:
+The prior sec.md (§3) recorded PASS-but-blocked: SW-4 had escalated the DEC-026
+credential-pair-integrity concern (per-field env fallback → mixed pair) and the two-store
+failure contract to the Architect, and I gated release on that decision. That decision has
+**landed** (`arch-review.md` Addendum, 2026-06-21: "PASS — design decided, no task split, no
+BA escalation"), and `db2eeef` implements it exactly:
 
-- **Per-field env fallback can assemble a mixed-source pair** (`mod.rs` `resolve_credentials`,
-  ~L260–290). When exactly one store is **genuinely absent**, that field independently falls
-  back to its env var, so `settings` public absent + Keychain secret present + env public set
-  ⇒ env-public paired with a stale Keychain secret. This is the documented existing-install
-  upgrade state (no auto-migration; user re-saves once).
-  - **Security severity: LOW, not a security auto-fail.** No secret disclosure: SEC-009/C2
-    hold (the secret never enters plaintext and is never echoed), and the assembled pair only
-    ever reaches the user's own configured `base_url` (no third-party egress, no cross-tenant
-    leak). C3 still holds — a genuine *read failure* (vs absence) is never downgraded to env.
-  - **It is, however, a real credential-integrity weakening of the DEC-026 pair invariant**,
-    and the spec sanctions it only because the no-mixed-pair guarantee is written per-field
-    (failure-scoped) rather than pair-level. That is a **design decision for the Architect**:
-    whether the env fallback should be pair-level (both-from-env or neither).
-- **Compensation/atomicity on SQLite failure** (set rollback `let _ = …`; clear deletes the
-  Keychain secret before the settings row with no recovery) is a reliability/integrity gap,
-  not a secret-handling defect. No security impact beyond the same low-severity one-store →
-  mixed-pair window above.
+- **Decision 1 (pair-level env fallback)** closes the mixed-source-pair window — the precise
+  low-severity integrity weakening I flagged. Now structurally impossible (§2, T-PAIR-A/B/C).
+- **Decision 2 (two-store consistency contract)** — fragile Keychain mutation last + reliable
+  SQLite compensation, clear reordered to SQLite-first, INCONSISTENT errors never swallowed.
 
-I **concur with routing to the Architect** for the env-fallback semantics + two-store failure
-contract. **This change must not release until that decision lands**, regardless of the
-security gate result below.
+There is **no remaining security-side release block.** No FAIL-DESIGN is raised: the design
+question is decided and correctly realized.
 
 ---
 
 ## 4. Verdict
 
-**PASS (security gate)** — no scanner/SAST/secrets auto-fail condition is hit; SEC-009 and
-C2/C3 (secret non-echo, secret-never-in-plaintext, no env downgrade on a real read failure)
-are verified in code and tests; no secret disclosure, no new deps/egress/capabilities. The
-trust boundary (secret in Keychain, non-secret public key in local plaintext settings) was
-approved in `arch-review.md` and is correctly realized. Advisory items (OSV transitive
-GTK/unic advisories, max CVSS 6.9) are pre-existing, not introduced here, tracked under
+**PASS (security gate).** No scanner/SAST/secrets auto-fail condition is hit. The trust
+boundary (secret in Keychain, non-secret public key in local plaintext settings) was approved
+in `arch-review.md` and is correctly realized. SEC-009 and C1–C4 hold; the DEC-026 pair
+invariant is now structural (no mixed-source pair, no usable one-store credential); all error
+paths are secret-free. No new deps/egress/capabilities. Advisory OSV items (max CVSS 4.0 with
+a vector; rest no-CVSS unmaintained-crate) are pre-existing, not introduced here, tracked under
 TASK-043.
 
-The DEC-026 credential-pair-integrity concern in §3 is **low security severity (no
-disclosure)** and is **already escalated by SW-4 to the Architect** — I do not raise a
-separate FAIL-DESIGN, but I gate release on that decision.
-
-**Routing**: the change is **blocked at the Architect** via SW-4's ESCALATE (and my §3
-concurrence). It does **not** proceed to SW-6 until the Architect resolves env-fallback
-semantics + the two-store failure contract, then SW-2 reworks and SW-3/SW-4/SW-5 re-run as
-needed. SW-6 must also add the RELEASE.md one-time re-save note (existing installs, no
-auto-migration).
+**Routing**: PASS → proceed. Hold for SW-4 (sw-code-reviewer) before release to SW-6
+(sw-release-manager). SW-6 RELEASE.md must carry the two user-facing notes from the handoff:
+(1) one-time re-save for existing installs (public key absent in settings until re-saved);
+(2) pair-level env behavior change (one key in a store + the other in env now resolves to
+`None` — env is a whole-pair dev override).

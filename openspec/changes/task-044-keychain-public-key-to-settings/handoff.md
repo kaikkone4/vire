@@ -1,46 +1,39 @@
-# Handoff — TASK-044 keychain-public-key-to-settings (F2a)
+# Handoff — TASK-044 keychain-public-key-to-settings
 
-- **Change dir**: openspec/changes/task-044-keychain-public-key-to-settings/
-- **Branch / PR**: feat/task-044-keychain-public-key-to-settings · PR (draft) #32
-- **Phase / gate**: SW-3 QA **PASS** (2026-06-21, recheck after db2eeef)
-- **Tier**: L2
+- **Change dir**: `openspec/changes/task-044-keychain-public-key-to-settings/`
+- **Branch / PR**: `feat/task-044-keychain-public-key-to-settings` / PR #32
+- **Phase / gate**: SW-4 Code Review **PASS** + SW-5 Security **PASS** (2026-06-21, recheck after `db2eeef`)
+- **Reviewed commits**: `1160f04` + `db2eeef`
 
-## Last gate result
+## Gate result
 
-**SW-3 PASS** (2026-06-21 recheck). Full scenario matrix re-verified against commits 1160f04 +
-db2eeef. 33 tests pass (0 fail). `cargo fmt` PASS. Clippy clean on touched files. `npm run build`
-PASS. All spec scenarios S1–S7 + C1–C4 + Decision 1/2 addendum tests covered.
+SW-4 PASS. The architect fix implements pair-level env fallback, renders both half-state directions
+inert, prevents mixed stored/env pairs, surfaces failed set compensation with distinct secret-free
+errors, and changes clear to SQLite-first with public-key restoration on Keychain delete failure.
+The renderer IPC payload and command names are unchanged.
 
-Key corrections vs prior qa.md: S5/C4 now correctly reflect **SQLite-first** clear order
-(db2eeef); T-PAIR-A/B/C, T-SET-ROLLBACK-FAIL ×2, T-CLEAR-COMP, T-CLEAR-SQLITE-FAIL all added
-and verified.
+Checks: 33 settings tests PASS; `cargo fmt` PASS; `npm run build` PASS; source diff check PASS.
+Clippy reports only the documented pre-existing findings in untouched files.
 
-## Active blockers
+SW-5 PASS (security gate; see `sec.md`). Tier-1 stack clean: semgrep 0 ERROR, gitleaks 0 in
+commits/source (3 FPs in gitignored `target/` artifacts), OSV no CVSS ≥ 7.0, Trivy 0 HIGH/CRITICAL.
+Manual: public = non-secret in SQLite; secret Keychain-only / presence-only; pair-level env fallback
+makes a mixed-source pair structurally impossible; error paths secret-free; one-store windows
+rendered inert by the resolver; no new deps/egress/capabilities (`lib.rs` adds only the Tauri-injected
+`State` handle, renderer arg shape unchanged). The prior PASS-but-gated release block (Architect
+escalation) is **resolved** by `db2eeef`; no FAIL-DESIGN raised.
+
+## Blocking issues
 
 None.
 
-## Exact next action
+## Non-blocking suggestion
 
-Route to **SW-4** (sw-code-reviewer) AND **SW-5** (sw-security-agent) **in parallel**. SW-6
-RELEASE.md must note:
-1. One-time re-save required for existing installs (public key absent in settings until re-saved).
-2. Pair-level env behavior change: dev with exactly one key in a store + other in env now gets
-   `None` (env is a whole-pair override only).
+Add direct coverage for the `INCONSISTENT_CLEAR_ERR` restore-failure branch; see `review.md`.
 
-## Required files (read these, not the whole tree)
+## Next action
 
-- `src-tauri/src/settings/mod.rs` — D1 resolver, D2 set/clear, `INCONSISTENT_*`, module doc
-- `src-tauri/src/settings/tests.rs` — 33 tests
-- `src-tauri/src/lib.rs:847–868` — IPC commands (State handle, no signature change)
-- `arch-review.md` — Addendum (2026-06-21) = binding design
-- `openspec/changes/task-044-keychain-public-key-to-settings/qa.md` — full scenario matrix
-
-## Notes carried forward
-
-- Manual T6 (1 Keychain prompt on fresh macOS launch) still needs human verification on real macOS.
-- Pre-existing clippy warnings in untouched files (`langfuse/importer.rs`, `langfuse/tests.rs`,
-  `lib.rs`) remain out of scope.
-- `clear_aborts_before_settings_when_keychain_delete_fails` replaced by `t_clear_comp_…`
-  (mechanism: restore-after, not abort-before; same "prior pair preserved" guarantee).
-- Accepted behavior change: dev with exactly one key in a store + other in env now gets `None`.
-  Code comment in `resolve_credentials` + RELEASE.md note required.
+SW-6 COMPLETE (2026-06-21). RELEASE.md v0.6.2 written at
+`openspec/changes/task-044-keychain-public-key-to-settings/RELEASE.md` and root `RELEASE.md`
+updated. PR #32 promoted to ready-for-review. Tag `task-044/v0.6.2` pending SSH key (dry-run
+record in RELEASE.md). Manual macOS Keychain dialog verification still pending (non-blocking).
