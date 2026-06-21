@@ -1,8 +1,8 @@
 # Handoff — TASK-041 macOS Keychain repeated-prompt stability
 
 - **Change dir**: openspec/changes/task-041-keychain-access-stability/
-- **Branch / PR**: (none yet — docs/research only; no code change)
-- **Phase / gate**: SW-4 CODE REVIEW **PASS** + SW-5 SEC **PASS** (2026-06-21) → ready for SW-6
+- **Branch / PR**: `docs/task-041-keychain-access-stability` / PR #31 (ready-for-review)
+- **Phase / gate**: SW-6 RELEASE **PASS** (2026-06-21) — all gates complete
 - **Tier**: L2
 
 ## Last gate result
@@ -34,8 +34,15 @@ SW-1 ARCH PASS, 2026-06-20.)
   GRANTED by SW-5 (`sec.md`)**. TASK-044 unblocked; carries SEC conditions C1–C4 to its own
   SW-5 gate. TASK-042 signing foundation carries C5–C6.
 
-## Exact next action
-Pi-Assistant: route to **SW-6 Release Manager**; SW-4 and SW-5 both PASS. Preserve the intended
+## SW-6 outcome (2026-06-21)
+- RELEASE.md written with all three declarations (docs-only/none, forward-only, compatibility matrix).
+- All 9 artifacts committed to `docs/task-041-keychain-access-stability` (commit `6d25d99`).
+- PR #31 created and marked ready-for-review.
+- Tag `task-041/v0.6.0` is a dry-run (SSH key unavailable in agent session); run manually after merge (command in RELEASE.md §Tag signing).
+- TASK-041 SW flow **COMPLETE**. Janne merges PR #31 to close.
+
+## Exact next action (post-SW-6)
+Pi-Assistant: TASK-041 complete. Carry forward the intended
 implementation split:
 - **F1 (stable Developer ID signing)** → FOLD into TASK-042's "F — release-signing-foundation"
   (do NOT create a separate signing task / second pipeline); blocked on Janne's enrolment.

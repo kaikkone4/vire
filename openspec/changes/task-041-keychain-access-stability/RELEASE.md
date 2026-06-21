@@ -3,9 +3,9 @@
 - **Task:** TASK-041
 - **Tier:** L2 project (task L1 — docs/research-only; no app code changed)
 - **Branch:** `docs/task-041-keychain-access-stability`
-- **PR:** (see below)
+- **PR:** #31
 - **Tag:** `task-041/v0.6.0` (SSH-signed; dry-run — see §Tag signing below)
-- **Head commit:** (set after commit)
+- **Head commit:** `6d25d99`
 - **Base version:** v0.6.0 (TASK-034) — **unchanged by this release**
 - **Date:** 2026-06-21
 - **Gates passed:** SW-3 QA (PASS), SW-4 Code Review (PASS), SW-5 Security (PASS), SW-6 Release (this doc)
