@@ -3,41 +3,42 @@
 # Handoff — TASK-046 active-window evidence storage
 
 - **Branch / PR**: `feat/task-046-active-window-evidence-storage` / #34
-- **Phase / gate**: SW-2 (SW-4 blockers fixed) → re-run SW-3 QA then SW-4
-- **Tier**: L2 · SEC-001
-- **Commit**: `2fa9f9d` fix(task-046): SW-4 blockers — upsert idempotency, config precedence, vocab enforcement, exact-ts prune
+- **Phase / gate**: SW-2 round-3 fix complete → route to SW-3 + SW-4 recheck
+- **Head commit**: `59747b4`
+- **QA**: SW-3 PASS at `6c1200d` (209+5); recheck needed at `59747b4`
 
-## Fixes applied (SW-4 blocking issues)
+## SW-2 round-3 fixes applied (`59747b4`)
 
-1. **Nullable `app_bundle_id` upsert**: Normalise `None → ""` sentinel before binding the
-   unique-conflict column (`BUNDLE_NULL_SENTINEL = ""`); map `"" → None` on read in
-   `evidence_blocks_in_range`. Regression tests: idempotent upsert with `None`, round-trip read.
+All three §8 arch-review blockers resolved — no design/spec change:
 
-2. **`ActiveWindowConfig.from_settings`**: Replaces `from_env()`. Reads DB `settings` table
-   first (keys: `active_window_retention_days`, `active_window_title_mode`), falls back to env,
-   then compile-time defaults. `lib.rs:154` wired up. Tests: defaults, stored override for
-   retention and title_mode, invalid-value fallback.
+1. **§8.1 `capture_health` vocab** (`store.rs:155-157, 197-199`): `check_vocab` guard on
+   `Option<&str>` before SQL bind in both `insert_raw_observation` and `upsert_evidence_block`.
+   None accepted; Some(s) must be in `HEALTH_STATE_VOCAB`. 4 new tests (reject + None-ok for
+   each path).
 
-3. **Vocabulary enforcement at write boundary**: `TITLE_STATE_VOCAB`, `IDLE_STATE_VOCAB`,
-   `SOURCE_VOCAB`, `HEALTH_STATE_VOCAB` const arrays + `check_vocab`/`check_detail` helpers.
-   Called at the top of `insert_raw_observation`, `upsert_evidence_block`, `record_capture_health`
-   before any SQL. `detail` bounded to `MAX_DETAIL_BYTES = 200`. `apply_title_gate` Stored branch
-   now forces `title_state=captured` when title is present (prevents title + absence-state
-   inconsistency). Tests: invalid title_state, idle_state, source, health state, oversized detail,
-   title/state consistency.
+2. **§8.2 `apply_title_gate` total truth table** (`store.rs:393-450`): rewrote to return
+   `Result`; classifies title into Present/Empty/Absent; rejects all contradictory
+   (state, title) pairs fail-closed (no silent normalization). `Some("")` now correctly
+   routes to Empty → `(None, "empty")`, closing the `Some("")+empty→captured` defect.
+   Both callers propagate with `?`. Updated 2 existing tests; 3 new matrix tests covering
+   no-title+captured, empty+empty, title+absence across both modes and both write paths.
+   Also applied nonblocking `Some("")` bundle normalization at `upsert_evidence_block`
+   call site (`store.rs:203`).
 
-4. **Prune by exact per-table timestamps**: `DELETE … WHERE datetime(sample_ts) < datetime(?1,?2)`
-   / `end_ts` / `start_ts`. Wrapped in `unchecked_transaction()` (atomic). Tests: intra-day
-   cutoff (same-day before cutoff time → deleted), exact-cutoff row kept, one-second-before
-   deleted.
+3. **§8.3 config env precedence tests** (`tests.rs`): added `ENV_LOCK` (static `Mutex<()>`)
+   + `EnvGuard` (RAII save/restore). 4 new serialized tests: env-only retention, env-only
+   title_mode, DB-over-env retention, DB-over-env title_mode. Hardened 2 existing tests
+   (default + invalid-fallback) to lock + clear env instead of assuming ambient absence.
 
-## Checks
+## Checks at `59747b4`
 
-- `cargo test`: PASS — 209 unit + 5 adversarial (was 195 + 5; 14 new regression tests added).
-- `cargo clippy`: 48 warnings; 40 pre-existing, 8 new active-window future-seam dead code.
-- Security: no change to allowlist, redaction gate, prune scope, or deps → SW-5 PASS carries forward.
-- Scope: no UI, IPC, capture, network, deps, CSP, or Tauri config change.
+- `cargo test` ✓ 220 library + 5 adversarial (was 209+5)
+- `cargo clippy --lib` ✓ 48 warn (unchanged — 45 staged dead-code + 3 pre-existing)
+- `cargo fmt --check` ✓
+- Preserved: nullable-bundle sentinel, DB-first config, vocab/detail checks, exact-ts prune
 
 ## Required next action
 
-Re-run SW-3 (QA) then SW-4 (code review) against commit `2fa9f9d`.
+SW-3 recheck at `59747b4` → SW-4 recheck. No SW-5 re-review (allowlist/redaction/prune/deps
+unchanged per §8.4 scope guard). Files changed: `store.rs`, `tests.rs` (both under
+`src-tauri/src/active_window/`).
