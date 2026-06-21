@@ -724,19 +724,250 @@ fn clear_removes_both_stores_and_deletes_legacy_keychain_public() {
     );
 }
 
-/// T4 (C4): when the Keychain secret delete fails, clear aborts **before** touching settings, so the
-/// prior consistent pair is preserved (no one-store hazard).
+// ----- TASK-044 / arch-review Addendum Decision 1: pair-level env fallback ------------------
+
+/// T-PAIR-A — settings-public present, Keychain-secret absent, **both** env keys set ⇒ no
+/// credentials. The lone stored public key is discarded and env is NOT consulted for the missing
+/// secret, so no stored-public + env-secret mixed pair is produced.
 #[test]
-fn clear_aborts_before_settings_when_keychain_delete_fails() {
+fn t_pair_a_lone_settings_public_with_env_yields_no_credentials() {
     let c = conn();
+    let secrets = MemorySecretStore::default();
+    write_setting(&c, KEY_PUBLIC_KEY, "pk-stored-lone").unwrap();
+    let env = MapEnv::new()
+        .with("VIRE_LANGFUSE_PUBLIC_KEY", "pk-env")
+        .with("VIRE_LANGFUSE_SECRET_KEY", "sk-env-secret");
+    assert!(
+        resolve_config_with(&c, &secrets, &env)
+            .unwrap()
+            .credentials
+            .is_none(),
+        "lone settings public + env secret must NOT form a mixed pair"
+    );
+}
+
+/// T-PAIR-B — settings-public absent, Keychain-secret present, **both** env keys set ⇒ no
+/// credentials. This is the existing-install upgrade hazard (a stale Keychain secret pre-relocation):
+/// the env public key must NOT pair with the surviving Keychain secret.
+#[test]
+fn t_pair_b_lone_keychain_secret_with_env_yields_no_credentials() {
+    let c = conn();
+    let secrets = MemorySecretStore::default();
+    secrets.set(SECRET_KEY_ACCOUNT, "sk-stored-lone").unwrap();
+    let env = MapEnv::new()
+        .with("VIRE_LANGFUSE_PUBLIC_KEY", "pk-env")
+        .with("VIRE_LANGFUSE_SECRET_KEY", "sk-env-secret");
+    assert!(
+        resolve_config_with(&c, &secrets, &env)
+            .unwrap()
+            .credentials
+            .is_none(),
+        "lone Keychain secret + env public must NOT form a mixed pair (existing-install hazard)"
+    );
+}
+
+/// T-PAIR-C — both stores absent, **both** env keys set ⇒ the env pair resolves (dev-mode
+/// regression: env is a whole-pair override consulted only when neither store holds its key).
+#[test]
+fn t_pair_c_both_stores_absent_resolves_the_env_pair() {
+    let c = conn();
+    let secrets = MemorySecretStore::default();
+    let env = MapEnv::new()
+        .with("VIRE_LANGFUSE_PUBLIC_KEY", "pk-env")
+        .with("VIRE_LANGFUSE_SECRET_KEY", "sk-env-secret");
+    let creds = resolve_config_with(&c, &secrets, &env)
+        .unwrap()
+        .credentials
+        .expect("both stores absent + both env keys ⇒ env pair");
+    assert_eq!(creds.public_key, "pk-env");
+    assert_eq!(creds.secret_key.expose(), "sk-env-secret");
+}
+
+// ----- TASK-044 / arch-review Addendum Decision 2: two-store consistency contract ----------
+
+/// Install a trigger that ABORTs any DELETE of the settings public-key row — simulates a catastrophic
+/// local SQLite failure on the rollback/clear DELETE, with no production seam (Addendum test note:
+/// `BEFORE DELETE … RAISE(ABORT)` on the in-memory `settings` table).
+fn abort_public_key_delete(c: &Connection) {
+    c.execute_batch(
+        "CREATE TRIGGER t_abort_public_delete BEFORE DELETE ON settings
+         WHEN OLD.key = 'langfuse_public_key'
+         BEGIN SELECT RAISE(ABORT, 'forced sqlite delete failure'); END;",
+    )
+    .unwrap();
+}
+
+/// Install a trigger that ABORTs an UPDATE of the settings public-key row back to `restore_value` —
+/// simulates a catastrophic SQLite failure on the rollback's restore UPDATE only; the initial write
+/// to a different (new) value is left to succeed.
+fn abort_public_key_restore(c: &Connection, restore_value: &str) {
+    c.execute_batch(&format!(
+        "CREATE TRIGGER t_abort_public_restore BEFORE UPDATE ON settings
+         WHEN NEW.key = 'langfuse_public_key' AND NEW.value = '{restore_value}'
+         BEGIN SELECT RAISE(ABORT, 'forced sqlite restore failure'); END;",
+    ))
+    .unwrap();
+}
+
+/// A Keychain whose secret DELETE fails (get/set succeed) — exercises the clear compensation: after
+/// the SQLite public row is deleted first, a failed Keychain secret delete must restore the public
+/// row so the prior pair is preserved (Addendum Decision 2, clear).
+#[derive(Default)]
+struct SecretDeleteFailsStore {
+    inner: std::sync::Mutex<HashMap<String, String>>,
+}
+
+impl SecretStore for SecretDeleteFailsStore {
+    fn get(&self, account: &str) -> Result<Option<String>, SecretStoreError> {
+        Ok(self.inner.lock().unwrap().get(account).cloned())
+    }
+    fn set(&self, account: &str, value: &str) -> Result<(), SecretStoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(account.to_string(), value.to_string());
+        Ok(())
+    }
+    fn delete(&self, account: &str) -> Result<(), SecretStoreError> {
+        if account == SECRET_KEY_ACCOUNT {
+            return Err(SecretStoreError(
+                "could not remove the credential from the system keychain".into(),
+            ));
+        }
+        self.inner.lock().unwrap().remove(account);
+        Ok(())
+    }
+}
+
+/// A Keychain whose DELETE panics (get/set succeed) — proves clear aborts BEFORE the Keychain delete
+/// is reached when the SQLite public-row delete fails first.
+#[derive(Default)]
+struct DeleteTripwireSecretStore {
+    inner: std::sync::Mutex<HashMap<String, String>>,
+}
+
+impl SecretStore for DeleteTripwireSecretStore {
+    fn get(&self, account: &str) -> Result<Option<String>, SecretStoreError> {
+        Ok(self.inner.lock().unwrap().get(account).cloned())
+    }
+    fn set(&self, account: &str, value: &str) -> Result<(), SecretStoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(account.to_string(), value.to_string());
+        Ok(())
+    }
+    fn delete(&self, _account: &str) -> Result<(), SecretStoreError> {
+        panic!("Keychain delete must not be reached when the SQLite public-row delete fails first");
+    }
+}
+
+/// T-SET-ROLLBACK-FAIL (prior pair) — a prior pair exists; the Keychain secret write fails AND a
+/// trigger ABORTs the restore UPDATE ⇒ the compensation cannot complete ⇒ the distinct, secret-free
+/// `INCONSISTENT_SET_ERR` is returned (never the raw Keychain string), and it is not swallowed.
+#[test]
+fn t_set_rollback_fail_prior_pair_returns_inconsistent_set_err() {
+    const P_OLD: &str = "pk-old-stored";
+    const P_NEW: &str = "pk-new-stored";
+    let c = conn();
+    write_setting(&c, KEY_PUBLIC_KEY, P_OLD).unwrap();
+    // Abort the rollback UPDATE that restores P_OLD; the initial write to P_NEW still succeeds.
+    abort_public_key_restore(&c, P_OLD);
+    let store = SecretWriteFailsStore::default();
+    let err = set_langfuse_secret_repo(&c, &store, P_NEW.into(), SECRET.into()).unwrap_err();
+    assert_eq!(err, INCONSISTENT_SET_ERR);
+    for needle in [SECRET, PUBLIC, P_OLD, P_NEW, "sk-", "pk-"] {
+        assert!(
+            !err.contains(needle),
+            "INCONSISTENT_SET_ERR must be secret-free, found {needle}"
+        );
+    }
+}
+
+/// T-SET-ROLLBACK-FAIL (no prior) — no prior pair; the Keychain secret write fails AND a trigger
+/// ABORTs the rollback DELETE ⇒ `INCONSISTENT_SET_ERR` (secret-free), not swallowed.
+#[test]
+fn t_set_rollback_fail_no_prior_returns_inconsistent_set_err() {
+    const P_NEW: &str = "pk-new-stored";
+    let c = conn();
+    // No prior public row; abort the rollback DELETE. The initial INSERT of P_NEW still succeeds.
+    abort_public_key_delete(&c);
+    let store = SecretWriteFailsStore::default();
+    let err = set_langfuse_secret_repo(&c, &store, P_NEW.into(), SECRET.into()).unwrap_err();
+    assert_eq!(err, INCONSISTENT_SET_ERR);
+    assert!(
+        !err.contains("sk-") && !err.contains("pk-"),
+        "INCONSISTENT_SET_ERR must be secret-free"
+    );
+}
+
+/// T-CLEAR-COMP — full prior pair (public in settings + secret in a delete-failing Keychain); clear
+/// deletes the SQLite public row first, the Keychain secret delete fails, and the public row is
+/// restored ⇒ `Err` (raw secret-free Keychain cause) with BOTH stores still holding the prior pair;
+/// the resolver returns that prior pair. (Replaces `clear_aborts_before_settings_when_keychain_delete_fails`:
+/// mechanism is now restore-after instead of abort-before, same net "prior pair preserved" guarantee.)
+#[test]
+fn t_clear_comp_failed_secret_delete_restores_and_preserves_the_prior_pair() {
+    let c = conn();
+    let store = SecretDeleteFailsStore::default();
     write_setting(&c, KEY_PUBLIC_KEY, PUBLIC).unwrap();
-    // `FailingSecretStore::delete` errors, standing in for a Keychain delete failure.
-    let err = clear_langfuse_secret_repo(&c, &FailingSecretStore).unwrap_err();
+    store.set(SECRET_KEY_ACCOUNT, SECRET).unwrap();
+
+    let err = clear_langfuse_secret_repo(&c, &store).unwrap_err();
     assert!(!err.is_empty());
-    assert!(!err.contains("sk-") && !err.contains("pk-"));
+    assert!(
+        !err.contains("sk-") && !err.contains("pk-"),
+        "clear failure must be secret-free"
+    );
+    assert_ne!(
+        err, INCONSISTENT_CLEAR_ERR,
+        "the restore succeeded ⇒ the raw Keychain cause, not the inconsistent-state error"
+    );
+
+    // Both stores still hold the prior pair (public restored, secret never deleted).
     assert_eq!(
         read_setting_strict(&c, KEY_PUBLIC_KEY).unwrap().as_deref(),
-        Some(PUBLIC),
-        "settings public row untouched when the Keychain secret delete fails"
+        Some(PUBLIC)
+    );
+    assert_eq!(
+        store.get(SECRET_KEY_ACCOUNT).unwrap().as_deref(),
+        Some(SECRET)
+    );
+
+    // The resolver returns the preserved prior pair.
+    let creds = resolve_config_with(&c, &store, &MapEnv::new())
+        .unwrap()
+        .credentials
+        .expect("prior pair preserved across a failed clear");
+    assert_eq!(creds.public_key, PUBLIC);
+    assert_eq!(creds.secret_key.expose(), SECRET);
+}
+
+/// T-CLEAR-SQLITE-FAIL — a prior pair; a trigger ABORTs the DELETE of the settings public row ⇒ clear
+/// returns `Err` and aborts BEFORE the Keychain delete (the tripwire store would panic if reached),
+/// so both stores remain.
+#[test]
+fn t_clear_sqlite_fail_aborts_before_keychain_and_keeps_both_stores() {
+    let c = conn();
+    let store = DeleteTripwireSecretStore::default();
+    write_setting(&c, KEY_PUBLIC_KEY, PUBLIC).unwrap();
+    store.set(SECRET_KEY_ACCOUNT, SECRET).unwrap();
+    abort_public_key_delete(&c);
+
+    let err = clear_langfuse_secret_repo(&c, &store).unwrap_err();
+    assert!(!err.is_empty());
+    assert!(
+        !err.contains("sk-") && !err.contains("pk-"),
+        "clear failure must be secret-free"
+    );
+
+    // Both stores remain: the SQLite delete was aborted, and the Keychain delete was never reached.
+    assert_eq!(
+        read_setting_strict(&c, KEY_PUBLIC_KEY).unwrap().as_deref(),
+        Some(PUBLIC)
+    );
+    assert_eq!(
+        store.get(SECRET_KEY_ACCOUNT).unwrap().as_deref(),
+        Some(SECRET)
     );
 }

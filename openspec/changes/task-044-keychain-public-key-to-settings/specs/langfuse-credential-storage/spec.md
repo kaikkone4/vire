@@ -49,12 +49,18 @@ key value is permitted (it is non-secret) but is not required by this change.
 ### Requirement: The credential pair is set and cleared atomically across both stores
 
 The app SHALL maintain the credential pair as an atomic unit spanning the SQLite `settings`
-public key and the Keychain secret key, such that after any set or clear the pair is **either
-both present (the new pair or the prior pair) or both absent — never exactly one store
-populated**. On a partial failure during set, the app SHALL restore the previously-written
-store to its prior state so no half-written pair remains. On clear, the app SHALL remove both
-the `settings` public-key row and the Keychain secret, and SHALL fail safely (leaving the prior
-consistent pair) rather than leaving exactly one store populated.
+public key and the Keychain secret key, such that after any set or clear that returns, the pair
+is **either both present (the new pair or the prior pair) or both absent — never exactly one
+store populated — whenever every local SQLite operation in the path succeeds**. The app SHALL
+perform the fragile Keychain mutation last and compensate its failure with a reliable local
+SQLite operation: on a partial failure during set it SHALL restore the previously-written store
+to its prior state, and on clear it SHALL restore the `settings` public-key row if the Keychain
+delete fails, so no half-written pair remains. Because the two stores have no shared transaction,
+the app SHALL treat the residual window — a local SQLite operation failing immediately after
+another succeeded, or a process crash between the two mutations — by (a) surfacing a distinct,
+secret-free error when a compensation step fails, never silently discarding it, and (b) relying
+on the resolver to render any one-store state inert: such a state SHALL resolve to no credentials,
+never a usable or mixed-source pair, recoverable by a single re-save.
 
 #### Scenario: Failed secret write rolls back the public key
 
@@ -69,17 +75,24 @@ consistent pair) rather than leaving exactly one store populated.
 
 - **WHEN** the user clears the stored credentials
 - **THEN** both the Keychain secret and the settings public-key row are removed
-- **AND** if the Keychain delete fails, the settings row is left untouched so the prior pair
-  remains consistent.
+- **AND** if the Keychain delete fails, the settings public-key row is restored to its prior value
+  so the prior consistent pair is preserved (the net result is both-present — never one store
+  populated)
+- **AND** if the local settings delete fails first, the clear aborts before the Keychain delete so
+  both stores remain.
 
-### Requirement: The resolver never pairs one store's key with the other's env fallback on a real read failure
+### Requirement: The resolver never produces a mixed-source credential pair
 
-When resolving credentials for an import or a Test connection, the app SHALL read the public
-key from `settings` first and the secret key from the Keychain first, consulting the marked
-developer env fallback for either key **only when that store reports the key genuinely absent**.
-A genuine read failure of either store SHALL surface as a coarse, secret-free error and SHALL
-NOT be downgraded to the env fallback, so a broken store can never be mistaken for "no
-credential" and silently combined with an env-sourced or stale counterpart.
+When resolving credentials for an import or a Test connection, the app SHALL read the public key
+from `settings` first and the secret key from the Keychain first. The marked developer env
+fallback is a **pair-level** alternative: the app SHALL consult it **only when neither store holds
+its key**, and SHALL then require **both** env keys to be present. When exactly one store holds its
+key, the app SHALL resolve to no credentials rather than fill the missing key from env — so a
+stored key is never combined with an env-sourced key. A genuine read failure of either store SHALL
+surface as a coarse, secret-free error and SHALL NOT be downgraded to the env fallback, so a broken
+store can never be mistaken for "no credential". In no case SHALL the resolver combine a value from
+one store with a value from a different source (env, or the other store's stale counterpart) into a
+mixed-source pair.
 
 #### Scenario: A store read failure does not enable the env fallback
 
@@ -88,6 +101,14 @@ credential" and silently combined with an env-sourced or stale counterpart.
 - **THEN** credential resolution returns a secret-free error
 - **AND** the env fallback is not used to fill the failed key
 - **AND** no mixed-source credential pair is produced.
+
+#### Scenario: One store present and the other absent does not pair with env
+
+- **WHEN** exactly one of the two stores holds its key (e.g. an existing install whose Keychain
+  secret remains but whose `settings` public key has not yet been re-saved) and the developer env
+  fallback keys are set
+- **THEN** credential resolution returns no credentials
+- **AND** the present stored key is not combined with an env-sourced key for the missing side.
 
 ### Requirement: A fresh launch issues at most one Keychain prompt for the credential pair
 

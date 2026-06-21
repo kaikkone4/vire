@@ -60,21 +60,29 @@ first. SQLite rollback is a local rewrite/delete that never prompts and effectiv
 fails; a Keychain rollback is a fragile OS call. Writing the **fragile** store (Keychain)
 **last** means a step-4 failure leaves only the cheap SQLite rollback to perform.
 
-### 3.2 `clear_langfuse_secret_repo(conn, secrets)` — fragile store first, abort-before-second
+### 3.2 `clear_langfuse_secret_repo(conn, secrets)` — SQLite-first, compensate the fragile delete
 
-1. `secrets.delete(SECRET_KEY_ACCOUNT)` — Keychain (fragile) **first**. On error, **return
-   immediately without touching settings** ⇒ both stores remain ⇒ prior consistent pair (safe;
-   no mixed pair).
-2. `write`/delete the settings public row (`DELETE FROM settings WHERE key = KEY_PUBLIC_KEY`,
-   or a `clear_setting` helper) — local, reliable.
-3. Best-effort `secrets.delete(PUBLIC_KEY_ACCOUNT)` to remove any **legacy** Keychain public
-   item (§4); idempotent, no-op when absent.
+> **SUPERSEDED by `arch-review.md` Addendum (2026-06-21), Decision 2.** The original
+> "fragile-store-first, abort-before-second" ordering below is **replaced** by the SQLite-first +
+> compensation design, because Keychain-first leaves **no recovery path** when the SQLite delete
+> fails after the secret is gone (a deleted secret cannot be restored). The reordered design:
 
-Ordering rationale: both delete orders have a symmetric one-store-left hazard window, but the
-window is only reachable if the *second* delete fails. Putting the **fragile Keychain delete
-first and aborting on its failure** keeps the common failure in the safe both-present state;
-the residual window (secret gone, settings delete fails) requires a local SQLite delete to
-fail — effectively never — and is the same hazard-class the current `clear` already carries.
+1. Capture `prior_public = read_setting_strict(conn, KEY_PUBLIC_KEY)` — a genuine read failure
+   aborts **before any mutation** (both stores untouched ⇒ prior pair).
+2. `clear_setting(conn, KEY_PUBLIC_KEY)` — SQLite (reliable) **first**. On failure, abort **before**
+   touching the Keychain ⇒ both stores remain ⇒ prior consistent pair (safe).
+3. `secrets.delete(SECRET_KEY_ACCOUNT)` — Keychain (fragile) **last**. On failure, **restore the
+   public row** from `prior_public` (reliable local write) ⇒ back to the prior pair. If that restore
+   itself fails (catastrophic local SQLite failure), return a **distinct, secret-free** error
+   (`INCONSISTENT_CLEAR_ERR`) — never swallow it.
+4. Best-effort `secrets.delete(PUBLIC_KEY_ACCOUNT)` to remove any **legacy** Keychain public item
+   (§4); idempotent, no-op when absent.
+
+Ordering rationale: the fragile Keychain mutation is performed **last in both set and clear**, and
+its failure is compensated by a reliable local SQLite op. The realistic failure (denied prompt /
+locked keychain) is therefore **recoverable** (prior pair restored). The only unrecoverable window
+requires a local SQLite op to fail immediately after another succeeded (catastrophic) — surfaced via
+the distinct error and rendered inert by the pair-level resolver (§3.3: a one-store state ⇒ `None`).
 
 ### 3.3 `resolve_credentials(conn, secrets, env)` — preserve "no silent env downgrade on a real read failure"
 
@@ -91,8 +99,14 @@ fail — effectively never — and is the same hazard-class the current `clear` 
   read is for **correctness/contract symmetry** (honoring C1's spirit), not a secrecy control;
   it is low-cost and recommended, not a security blocker.
 - **secret**: unchanged — `secrets.get(SECRET_KEY_ACCOUNT)?` (the `?` already short-circuits a
-  real Keychain read failure to `Err`, never env), then env fallback only on `Ok(None)`.
-- Pair rule unchanged: both present ⇒ `Some(Credentials)`, else `None`.
+  real Keychain read failure to `Err`, never env).
+- **Pair rule — SUPERSEDED by `arch-review.md` Addendum (2026-06-21), Decision 1: env fallback is
+  PAIR-LEVEL, not per-field.** Read both stores strictly, then match the pair as a unit: both stores
+  present ⇒ stored pair (env never consulted); both stores absent ⇒ env pair iff **both** env keys
+  present, else `None`; **exactly one store present ⇒ `None`** (the lone stored key is discarded; env
+  is **not** consulted for the missing side). This makes "no mixed-source pair" structural — a
+  half-state (incl. the existing-install state: settings-public absent + Keychain-secret present)
+  can never combine a stored key with an env key. The earlier per-field draft below is replaced.
 - `resolve_credentials` now needs the `conn` (it previously took only `secrets`, `env`); thread
   the `Connection` through `resolve_config_with` (`mod.rs:215-223`).
 
