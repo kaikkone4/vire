@@ -56,6 +56,11 @@ pub struct TimeEntry {
     /// Provenance tag (DEC-003): `'manual'` for hand-entered time, `'ai_suggested'` for an accepted
     /// suggestion. Manual entries never expose it on input; it defaults to `'manual'` at the DB layer.
     pub origin: String,
+    /// AI cost carried over from the accepted suggestion (TASK-034 B, DEC-003). `None` for manual
+    /// entries and for AI entries whose source reported no cost — absence ≠ zero (DEC-004), so it
+    /// renders "—", never 0. `cost_currency` is usually `None` (not source-derivable — see design §4).
+    pub cost_total: Option<f64>,
+    pub cost_currency: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -82,6 +87,11 @@ pub struct SummaryRow {
     /// Accepted AI-suggested time (origin='ai_suggested'), kept distinct so it is never tallied into the
     /// billable human total.
     pub ai_minutes: i64,
+    /// Accepted AI-suggested cost (origin='ai_suggested'), summed separately and never folded into a
+    /// human total (TASK-034 B, DEC-003). `None` (→ "—") when no AI entry in range carries a cost —
+    /// absence ≠ zero (DEC-004). `ai_cost_currency` is usually `None` (not source-derivable — design §4).
+    pub ai_cost_total: Option<f64>,
+    pub ai_cost_currency: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureStatus {
@@ -123,6 +133,11 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "origin",
         "TEXT NOT NULL DEFAULT 'manual'",
     )?;
+    // Additive AI cost provenance (TASK-034 B1, DEC-003 completion). Nullable: a manual entry has no AI
+    // cost and existing rows backfill to NULL — absence ≠ zero (DEC-004), so NULL renders "—", never 0.
+    // Currency is not source-derivable (Langfuse carries no per-call currency) and is usually NULL.
+    langfuse::store::add_column_if_absent(conn, "time_entries", "cost_total", "REAL")?;
+    langfuse::store::add_column_if_absent(conn, "time_entries", "cost_currency", "TEXT")?;
     langfuse::store::migrate(conn)?;
     // Additive env→project map; created after `projects` exists so its FK resolves (TASK-027 D1).
     env_mapping::migrate(conn)?;
@@ -171,6 +186,53 @@ fn parse_duration(date: &str, start: &str, end: &str) -> Result<i64, String> {
         return Err("End time must be after start time".into());
     }
     Ok(mins)
+}
+/// DEC-034/035: keep an accepted suggestion from ever storing a zero/negative span, staying inside the
+/// same-day `date + HH:MM` model. The engine records block bounds at second precision and a
+/// `max(1, round)` duration, but accept re-derives start/end at `HH:MM` (`hhmm_from_block_ts`); a block
+/// contained in a single clock minute therefore collapses to `start == end`, which `parse_duration`
+/// would reject. When (and only when) the derived `end` is not strictly after `start`, normalize the
+/// span to `minutes` (the engine's already-valid `duration_minutes` ≥ 1, or 1 when absent):
+/// - **non-boundary** → anchor on the start: `(start, start + minutes)` (forward bump);
+/// - **day's last minute** (`start + minutes` would cross midnight, i.e. `start == 23:59`) → anchor on
+///   the end instead, where no later same-day end exists: `(23:59 - minutes, 23:59)`, flooring the
+///   derived start at `00:00`. The only realistic case is a 1-minute span from `23:59` → `23:58 → 23:59`.
+///
+/// A positive span (including an explicit user edit) is returned untouched, and a malformed `start`/`end`
+/// still surfaces its validation error rather than being silently rewritten. The manual-entry path is
+/// unaffected and still rejects `start == end` as a human typo.
+fn normalize_same_minute_span(
+    date: &str,
+    start: &str,
+    end: &str,
+    duration_minutes: Option<i64>,
+) -> Result<(String, String), String> {
+    let s = NaiveDateTime::parse_from_str(&format!("{} {}", date, start), "%Y-%m-%d %H:%M")
+        .map_err(|_| "Start date/time must be valid".to_string())?;
+    let e = NaiveDateTime::parse_from_str(&format!("{} {}", date, end), "%Y-%m-%d %H:%M")
+        .map_err(|_| "End date/time must be valid".to_string())?;
+    if (e - s).num_minutes() > 0 {
+        return Ok((start.to_string(), end.to_string()));
+    }
+    let minutes = duration_minutes.filter(|m| *m > 0).unwrap_or(1);
+    let bumped = s + chrono::Duration::minutes(minutes);
+    if bumped.date() == s.date() {
+        // Non-boundary: anchor on the start, end = start + minutes (same day).
+        return Ok((start.to_string(), bumped.format("%H:%M").to_string()));
+    }
+    // Day's last minute: no later same-day end exists, so anchor on the end at 23:59 and derive the
+    // start backward (floor at 00:00 for the unrealistic case of minutes spanning the whole day).
+    let end_dt = s.date().and_hms_opt(23, 59, 0).unwrap();
+    let start_dt = end_dt - chrono::Duration::minutes(minutes);
+    let start_dt = if start_dt.date() == s.date() {
+        start_dt
+    } else {
+        s.date().and_hms_opt(0, 0, 0).unwrap()
+    };
+    Ok((
+        start_dt.format("%H:%M").to_string(),
+        end_dt.format("%H:%M").to_string(),
+    ))
 }
 fn parse_date(date: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| "Date must use YYYY-MM-DD".into())
@@ -292,7 +354,7 @@ pub fn create_entry_repo(conn: &Connection, input: TimeEntryInput) -> Result<Tim
     get_entry(conn, &id)
 }
 fn get_entry(conn: &Connection, id: &str) -> Result<TimeEntry, String> {
-    conn.query_row("SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.origin,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.id=?1", params![id], row_to_entry).map_err(|e| e.to_string())
+    conn.query_row("SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.origin,e.cost_total,e.cost_currency,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.id=?1", params![id], row_to_entry).map_err(|e| e.to_string())
 }
 fn row_to_entry(r: &rusqlite::Row) -> rusqlite::Result<TimeEntry> {
     Ok(TimeEntry {
@@ -305,8 +367,10 @@ fn row_to_entry(r: &rusqlite::Row) -> rusqlite::Result<TimeEntry> {
         duration_minutes: r.get(6)?,
         note: r.get(7)?,
         origin: r.get(8)?,
-        created_at: r.get(9)?,
-        updated_at: r.get(10)?,
+        cost_total: r.get(9)?,
+        cost_currency: r.get(10)?,
+        created_at: r.get(11)?,
+        updated_at: r.get(12)?,
     })
 }
 pub fn update_entry_repo(
@@ -343,7 +407,7 @@ pub fn list_entries_repo(
     project_id: Option<String>,
 ) -> Result<Vec<TimeEntry>, String> {
     validate_date_range(&start, &end)?;
-    let mut sql = "SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.origin,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2".to_string();
+    let mut sql = "SELECT e.id,e.project_id,p.name,e.date,e.start_time,e.end_time,e.duration_minutes,e.note,e.origin,e.cost_total,e.cost_currency,e.created_at,e.updated_at FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2".to_string();
     if project_id.is_some() {
         sql.push_str(" AND e.project_id=?3");
     }
@@ -370,9 +434,14 @@ pub fn summary_repo(
     // DEC-003: human ('manual') and AI ('ai_suggested') minutes are summed into separate columns so AI
     // time is never tallied into the billable human total. Anything not explicitly 'ai_suggested' counts
     // as human (conservative — a legacy/unknown origin can never silently land in the AI column).
+    // AI cost is summed only over `ai_suggested` rows. Bare `SUM` (no COALESCE) returns NULL when no AI
+    // row in range carries a cost so the column stays NULL → "—" (absence ≠ zero, DEC-004), never 0.
+    // Currency is uniform-or-NULL in practice (design §4); `MAX` picks it without inventing one.
     let mut sql = "SELECT p.id,p.name,\
         COALESCE(SUM(CASE WHEN e.origin='ai_suggested' THEN 0 ELSE e.duration_minutes END),0),\
-        COALESCE(SUM(CASE WHEN e.origin='ai_suggested' THEN e.duration_minutes ELSE 0 END),0) \
+        COALESCE(SUM(CASE WHEN e.origin='ai_suggested' THEN e.duration_minutes ELSE 0 END),0),\
+        SUM(CASE WHEN e.origin='ai_suggested' THEN e.cost_total END),\
+        MAX(CASE WHEN e.origin='ai_suggested' THEN e.cost_currency END) \
         FROM time_entries e JOIN projects p ON p.id=e.project_id WHERE e.date>=?1 AND e.date<=?2"
         .to_string();
     if project_id.is_some() {
@@ -386,6 +455,8 @@ pub fn summary_repo(
             project_name: r.get(1)?,
             duration_minutes: r.get(2)?,
             ai_minutes: r.get(3)?,
+            ai_cost_total: r.get(4)?,
+            ai_cost_currency: r.get(5)?,
         })
     };
     let rows: Result<Vec<_>, _> = if let Some(pid) = project_id {
@@ -428,12 +499,14 @@ pub fn export_csv_repo(
     let entries = list_entries_repo(conn, start, end, project_id)?;
     // DEC-003: each row carries its `origin` so a consumer can separate AI-suggested time from billable
     // human time; AI minutes are never folded into the human column.
+    // DEC-003 completion: AI cost rides alongside `origin` so a consumer can attribute it per row.
+    // Empty cells when NULL (absence ≠ zero); the numeric cost needs no escaping, currency reuses it.
     let mut out = String::from(
-        "date,project,start_time,end_time,duration_minutes,note,origin,total_duration_hours\n",
+        "date,project,start_time,end_time,duration_minutes,note,origin,cost_total,cost_currency,total_duration_hours\n",
     );
     for e in &entries {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{:.2}\n",
+            "{},{},{},{},{},{},{},{},{},{:.2}\n",
             e.date,
             csv_escape(&e.project_name),
             e.start_time,
@@ -441,6 +514,8 @@ pub fn export_csv_repo(
             e.duration_minutes,
             csv_escape(e.note.as_deref().unwrap_or("")),
             csv_escape(&e.origin),
+            e.cost_total.map(|c| c.to_string()).unwrap_or_default(),
+            csv_escape(e.cost_currency.as_deref().unwrap_or("")),
             e.duration_minutes as f64 / 60.0
         ));
     }
@@ -529,6 +604,13 @@ pub fn accept_suggestion_repo(
     };
 
     validate_date(&date)?;
+    // DEC-034/035: a timed suggestion whose start and end fall in the same clock minute must still be
+    // acceptable with a positive same-day span. Normalize to the engine's valid duration — anchored on
+    // the start (end = start + minutes) everywhere except the day's last minute, where it anchors on the
+    // end (start = 23:59 - minutes). Rebind both ends. The manual `create_time_entry`/`update` path keeps
+    // rejecting `start == end` (a human typo).
+    let (start_time, end_time) =
+        normalize_same_minute_span(&date, &start_time, &end_time, suggestion.duration_minutes)?;
     let duration = parse_duration(&date, &start_time, &end_time)?;
     if !project_exists_active(&tx, &project_id)? {
         return Err("Accepted suggestions must reference an active project".into());
@@ -537,10 +619,12 @@ pub fn accept_suggestion_repo(
 
     let entry_id = Uuid::new_v4().to_string();
     let ts = now();
+    // DEC-003 completion: copy the suggestion's cost provenance verbatim onto the entry so it reaches
+    // Reports/CSV. Cost is not user-editable (no field on `SuggestionEdit`); NULL stays NULL (→ "—").
     tx.execute(
-        "INSERT INTO time_entries(id,project_id,date,start_time,end_time,duration_minutes,note,origin,created_at,updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,'ai_suggested',?8,?8)",
-        params![entry_id, project_id, date, start_time, end_time, duration, note, ts],
+        "INSERT INTO time_entries(id,project_id,date,start_time,end_time,duration_minutes,note,origin,cost_total,cost_currency,created_at,updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,'ai_suggested',?8,?9,?10,?10)",
+        params![entry_id, project_id, date, start_time, end_time, duration, note, suggestion.cost_total, suggestion.cost_currency, ts],
     )
     .map_err(|e| e.to_string())?;
     // Guarded UPDATE: the `status='pending'` predicate closes the door on a concurrent decision between
@@ -1849,5 +1933,226 @@ mod tests {
         );
         assert!(csv.contains(",manual,"), "manual row labeled");
         assert!(csv.contains(",ai_suggested,"), "ai row labeled");
+    }
+
+    // ----- TASK-034 A: accept never stores a zero/negative span (DEC-034 / day-end DEC-035) ----------
+
+    #[test]
+    fn accept_of_same_minute_block_bumps_end_and_never_stores_zero() {
+        let mut c = conn();
+        let pid = seeded_project(&c);
+        // Engine artifact: a block contained in one clock minute (second-precision bounds, duration 1).
+        // Re-derived at HH:MM both ends read "09:00"; without the bump accept would reject start == end.
+        seed_suggestion(
+            &c,
+            "z1",
+            &pid,
+            "2026-06-01",
+            Some("2026-06-01 09:00:10"),
+            Some("2026-06-01 09:00:50"),
+            Some(1),
+        );
+        let entry = accept_suggestion_repo(&mut c, "z1".into(), None).unwrap();
+        assert_eq!(entry.start_time, "09:00");
+        assert_eq!(
+            entry.end_time, "09:01",
+            "end rounded up to start + duration"
+        );
+        assert!(
+            entry.end_time > entry.start_time,
+            "span is strictly positive"
+        );
+        assert!(entry.duration_minutes >= 1, "never zero");
+        assert_eq!(entry.duration_minutes, 1);
+        assert_eq!(entry.origin, "ai_suggested");
+    }
+
+    #[test]
+    fn accept_of_same_minute_block_without_engine_duration_bumps_by_minimum_one() {
+        let mut c = conn();
+        let pid = seeded_project(&c);
+        // Defensive: same-minute bounds but no engine duration → minimum 1 minute, still never zero.
+        seed_suggestion(
+            &c,
+            "z2",
+            &pid,
+            "2026-06-02",
+            Some("2026-06-02 14:30:05"),
+            Some("2026-06-02 14:30:40"),
+            None,
+        );
+        let entry = accept_suggestion_repo(&mut c, "z2".into(), None).unwrap();
+        assert_eq!(entry.start_time, "14:30");
+        assert_eq!(entry.end_time, "14:31");
+        assert_eq!(entry.duration_minutes, 1, "minimum one minute");
+    }
+
+    #[test]
+    fn accept_of_day_end_same_minute_block_anchors_on_end_at_2359() {
+        // DEC-035: at the day's last minute a forward bump would cross midnight and (under the old
+        // clamp) collapse back to `start == end`, hard-erroring. Anchor on the end instead: keep
+        // `23:59` and derive the start backward, so the span stays positive and same-day (`23:58 → 23:59`).
+        let mut c = conn();
+        let pid = seeded_project(&c);
+        seed_suggestion(
+            &c,
+            "z3",
+            &pid,
+            "2026-06-12",
+            Some("2026-06-12 23:59:10"),
+            Some("2026-06-12 23:59:50"),
+            Some(1),
+        );
+        let entry = accept_suggestion_repo(&mut c, "z3".into(), None).unwrap();
+        assert_eq!(
+            entry.start_time, "23:58",
+            "start derived backward from 23:59"
+        );
+        assert_eq!(
+            entry.end_time, "23:59",
+            "end anchored at the day's last minute"
+        );
+        assert!(
+            entry.end_time > entry.start_time,
+            "span is strictly positive"
+        );
+        assert_eq!(entry.duration_minutes, 1, "never zero, no midnight cross");
+        assert_eq!(entry.origin, "ai_suggested");
+    }
+
+    #[test]
+    fn manual_entry_with_equal_start_and_end_is_still_rejected() {
+        // DEC-034 is scoped to the accept path only — the manual path keeps rejecting start == end.
+        let c = conn();
+        let pid = seeded_project(&c);
+        assert!(create_entry_repo(
+            &c,
+            TimeEntryInput {
+                project_id: pid,
+                date: "2026-06-03".into(),
+                start_time: "09:00".into(),
+                end_time: "09:00".into(),
+                note: None,
+            }
+        )
+        .is_err());
+    }
+
+    // ----- TASK-034 B: AI cost reaches the entry, Reports summary, and CSV (DEC-003 completion) -------
+
+    #[test]
+    fn accept_copies_suggestion_cost_provenance_onto_the_entry() {
+        let mut c = conn();
+        let pid = seeded_project(&c);
+        // seed_suggestion seeds cost_total=1.5, cost_currency='USD'.
+        seed_suggestion(
+            &c,
+            "k1",
+            &pid,
+            "2026-07-01",
+            Some("2026-07-01 09:00:00"),
+            Some("2026-07-01 10:00:00"),
+            Some(60),
+        );
+        let entry = accept_suggestion_repo(&mut c, "k1".into(), None).unwrap();
+        assert_eq!(entry.cost_total, Some(1.5), "cost copied verbatim");
+        assert_eq!(entry.cost_currency.as_deref(), Some("USD"));
+    }
+
+    #[test]
+    fn summary_and_csv_carry_ai_cost_separately_and_manual_cost_is_null() {
+        let mut c = conn();
+        let pid = seeded_project(&c);
+        // Manual entry — no AI cost (absence ≠ zero → NULL, never 0).
+        let m = create_entry_repo(
+            &c,
+            TimeEntryInput {
+                project_id: pid.clone(),
+                date: "2026-08-01".into(),
+                start_time: "09:00".into(),
+                end_time: "10:00".into(),
+                note: None,
+            },
+        )
+        .unwrap();
+        assert!(m.cost_total.is_none(), "manual entry carries no AI cost");
+        assert!(m.cost_currency.is_none());
+        // Accepted AI suggestion on the same project/day — seed cost 1.5 USD.
+        seed_suggestion(
+            &c,
+            "k2",
+            &pid,
+            "2026-08-01",
+            Some("2026-08-01 11:00:00"),
+            Some("2026-08-01 11:30:00"),
+            Some(30),
+        );
+        accept_suggestion_repo(&mut c, "k2".into(), None).unwrap();
+
+        let s = summary_repo(
+            &c,
+            "2026-08-01".into(),
+            "2026-08-01".into(),
+            Some(pid.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            s[0].duration_minutes, 60,
+            "human minutes unchanged in meaning"
+        );
+        assert_eq!(s[0].ai_minutes, 30);
+        assert_eq!(s[0].ai_cost_total, Some(1.5), "AI cost summed separately");
+        assert_eq!(s[0].ai_cost_currency.as_deref(), Some("USD"));
+
+        // A range with only the manual entry → AI cost stays NULL (absence ≠ zero).
+        create_entry_repo(
+            &c,
+            TimeEntryInput {
+                project_id: pid.clone(),
+                date: "2026-08-02".into(),
+                start_time: "09:00".into(),
+                end_time: "10:00".into(),
+                note: None,
+            },
+        )
+        .unwrap();
+        let s2 = summary_repo(
+            &c,
+            "2026-08-02".into(),
+            "2026-08-02".into(),
+            Some(pid.clone()),
+        )
+        .unwrap();
+        assert_eq!(s2[0].ai_minutes, 0);
+        assert!(
+            s2[0].ai_cost_total.is_none(),
+            "no AI rows ⇒ NULL cost, never 0"
+        );
+
+        // CSV header gains the cost columns; the AI row carries its currency.
+        let f = NamedTempFile::new().unwrap();
+        export_csv_repo(
+            &c,
+            "2026-08-01".into(),
+            "2026-08-01".into(),
+            Some(pid),
+            f.path(),
+        )
+        .unwrap();
+        let csv = std::fs::read_to_string(f.path()).unwrap();
+        let header = csv.lines().next().unwrap();
+        assert!(header.contains("cost_total"), "CSV header has cost_total");
+        assert!(
+            header.contains("cost_currency"),
+            "CSV header has cost_currency"
+        );
+        assert!(
+            csv.contains(",1.5,USD,"),
+            "AI row carries cost and currency"
+        );
+        assert!(
+            csv.contains(",manual,,,"),
+            "manual row's cost cells are empty (NULL ≠ 0)"
+        );
     }
 }

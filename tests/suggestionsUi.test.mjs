@@ -5,6 +5,8 @@ import {
   spanLabel,
   tokensLabel,
   costLabel,
+  addMinutesHHMM,
+  subMinutesHHMM,
   suggestionRow,
   suggestionGroups,
   unmappedNotice,
@@ -50,6 +52,58 @@ const untimed = (over = {}) =>
     reason: '3 traces with no usable timestamps — needs manual time',
     ...over,
   });
+
+// A timed block whose start and end fall in the same clock minute (DEC-034). The engine still derives
+// a duration (>= 1 min); accept rounds the end up to start + duration so the stored span is never zero.
+const sameMinute = (over = {}) =>
+  timed({
+    id: 's-3',
+    block_start_ts: '2026-06-20 09:00:10',
+    block_end_ts: '2026-06-20 09:00:50',
+    duration_minutes: 1,
+    ...over,
+  });
+
+test('addMinutesHHMM mirrors the backend bump: adds minutes, clamps a midnight cross to 23:59', () => {
+  assert.equal(addMinutesHHMM('09:00', 1), '09:01');
+  assert.equal(addMinutesHHMM('09:12', 96), '10:48');
+  // A bump that would cross midnight is clamped to the same day's 23:59 (matches lib.rs).
+  assert.equal(addMinutesHHMM('23:59', 1), '23:59');
+});
+
+test('subMinutesHHMM mirrors the day-end back-anchor: subtracts minutes, floors at 00:00', () => {
+  assert.equal(subMinutesHHMM('23:59', 1), '23:58');
+  assert.equal(subMinutesHHMM('10:48', 96), '09:12');
+  // A subtraction that would cross before midnight floors at 00:00 (matches normalize_same_minute_span).
+  assert.equal(subMinutesHHMM('00:00', 5), '00:00');
+});
+
+test('A3: same-minute block pre-fills the edit End default to start + duration (never == start)', () => {
+  const html = suggestionRow(sameMinute());
+  // Start renders the block minute; End is bumped to start + duration (>= 1) so the editable span the
+  // user sees equals what accept will store — strictly after Start, never a zero span.
+  assert.match(html, /data-edit-field="start_time" type="time" value="09:00"/);
+  assert.match(html, /data-edit-field="end_time" type="time" value="09:01"/);
+  assert.doesNotMatch(html, /data-edit-field="end_time" type="time" value="09:00"/);
+});
+
+test('A3 (DEC-035): a 23:59 same-minute block anchors on the end — Start 23:58 / End 23:59', () => {
+  const html = suggestionRow(
+    sameMinute({ block_start_ts: '2026-06-20 23:59:10', block_end_ts: '2026-06-20 23:59:50' }),
+  );
+  // At the day's last minute no later same-day end exists, so accept anchors on the end: Start is worked
+  // backward (23:59 - duration) and End is the block's 23:59 — mirroring normalize_same_minute_span. The
+  // visible edit span equals what accept stores, never a zero 23:59/23:59 row.
+  assert.match(html, /data-edit-field="start_time" type="time" value="23:58"/);
+  assert.match(html, /data-edit-field="end_time" type="time" value="23:59"/);
+  assert.doesNotMatch(html, /data-edit-field="start_time" type="time" value="23:59"/);
+});
+
+test('A3: a normal multi-minute block keeps its real End — no bump applied', () => {
+  const html = suggestionRow(timed());
+  assert.match(html, /data-edit-field="start_time" type="time" value="09:12"/);
+  assert.match(html, /data-edit-field="end_time" type="time" value="10:48"/);
+});
 
 test('durationLabel: known → Xh Ym; unknown → "needs manual time", never a zero duration', () => {
   assert.equal(durationLabel(96), '1h 36m');
@@ -98,6 +152,15 @@ test('untimed row cannot be accepted without an edited span — needs-manual-tim
   // Tokens/cost still render "—", never "0".
   assert.match(html, /— tok · —/);
   assert.match(html, /Vire never invents a duration/);
+  // C2: the "not auto-trackable" state is surfaced on the row itself (badge), not only in the panel.
+  // It sits in the summary <tr>, before the always-open edit panel.
+  assert.match(html, /not auto-trackable — add time manually/);
+  assert.ok(html.indexOf('not auto-trackable') < html.indexOf('data-edit-panel="s-2"'));
+});
+
+test('C2: a timed row carries no not-auto-trackable badge (it is trackable)', () => {
+  const html = suggestionRow(timed());
+  assert.doesNotMatch(html, /not auto-trackable/);
 });
 
 test('suggestions are grouped by project with a project heading, sorted by date', () => {
@@ -112,23 +175,62 @@ test('suggestions are grouped by project with a project heading, sorted by date'
   assert.ok(html.indexOf('data-sug-row="b"') < html.indexOf('data-sug-row="a"'));
 });
 
-test('unmapped evidence is surfaced with a Settings link — never dropped or zeroed', () => {
+test('C1: unmapped evidence is surfaced with a Settings link and the trackability copy', () => {
   const html = unmappedNotice([{ environment: 'veronavi', trace_count: 7 }]);
   assert.match(html, /Unmapped AI evidence/);
   assert.match(html, /<b>veronavi<\/b> — 7 traces with no project mapping/);
+  // C1: tightened copy names the cause + the action.
+  assert.match(html, /not trackable until mapped/);
+  assert.match(html, /Map in Settings/);
   assert.match(html, /data-goto-view="Settings"/);
   // Nothing unmapped → no notice.
   assert.equal(unmappedNotice([]), '');
 });
 
-test('empty state names the candidate causes — never a bare empty table', () => {
+test('C3/C4: empty state names every candidate cause with an action — never a bare empty table', () => {
   const noneAtAll = suggestionsBody({ suggestions: [], unmapped: [] });
-  assert.match(noneAtAll, /no AI evidence has been imported yet, or every suggestion has already been accepted or dismissed/);
+  // Nothing imported / all decided, with its action.
+  assert.match(noneAtAll, /Nothing imported yet, or all decided/);
+  assert.match(noneAtAll, /Open Settings to import/);
+  // Untimed / not-auto-trackable cause is always named (a cause of "no actionable suggestion").
+  assert.match(noneAtAll, /Evidence has no usable time/);
+  assert.match(noneAtAll, /not auto-trackable/);
   assert.match(noneAtAll, /Refresh suggestions/);
+  // Default (source healthy) → no source-down cause and no "0".
+  assert.doesNotMatch(noneAtAll, /unavailable or disabled/);
+  assert.ok(!noneAtAll.includes('>0<') && !/\b0 suggestions\b/.test(noneAtAll));
+
   // Evidence present but unmapped → the mapping cause + the unmapped notice.
   const unmappedOnly = suggestionsBody({ suggestions: [], unmapped: [{ environment: 'veronavi', trace_count: 3 }] });
-  assert.match(unmappedOnly, /not mapped to a project yet/);
+  assert.match(unmappedOnly, /isn't mapped to a project/);
+  assert.match(unmappedOnly, /not trackable until mapped/);
   assert.match(unmappedOnly, /Unmapped AI evidence/);
+
+  // Source disabled/down is named as a cause only when the view reports it degraded.
+  const sourceDown = suggestionsBody({ suggestions: [], unmapped: [] }, { sourceDegraded: true });
+  assert.match(sourceDown, /unavailable or disabled/);
+  assert.match(sourceDown, /never zero/);
+});
+
+test('C3: a disabled source is surfaced alongside a non-empty pending list, not only in the empty state', () => {
+  // SW-4 blocker: with pending suggestions present the groups render and the empty state never runs, so a
+  // disabled source — which main.ts's shared sourceBanner() also skips — would vanish. The body must carry
+  // an always-visible disabled notice with a Settings action on top of the rendered groups.
+  const html = suggestionsBody(
+    { suggestions: [timed()], unmapped: [] },
+    { sourceDegraded: true, sourceDisabled: true },
+  );
+  assert.match(html, /data-sug-row="s-1"/); // the pending list still renders
+  assert.match(html, /AI evidence source: disabled/);
+  assert.match(html, /never zero/);
+  assert.match(html, /data-goto-view="Settings"/);
+  // The notice sits above the rendered groups.
+  assert.ok(html.indexOf('AI evidence source: disabled') < html.indexOf('data-sug-row="s-1"'));
+});
+
+test('C3: a healthy source adds no disabled notice to a non-empty pending list', () => {
+  const html = suggestionsBody({ suggestions: [timed()], unmapped: [] });
+  assert.doesNotMatch(html, /AI evidence source: disabled/);
 });
 
 test('project names and reasons are escaped (no raw HTML injection)', () => {

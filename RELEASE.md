@@ -1,5 +1,73 @@
 # Vire — Release Notes
 
+## v0.6.0 — Suggestions UAT polish: cost, normalization, trackability (TASK-034)
+
+**Branch:** `feat/task-034-suggestions-uat-polish`
+**PR:** #29
+
+### What changed
+
+Polish pass on the AI time-entry Suggestions view (TASK-032), covering four workstreams:
+
+**A — Same-minute / 23:59 span normalization (bug fix).** AI-suggested blocks whose start and
+end timestamps fall in the same minute are now normalized to a non-zero span before accept:
+forward-bump if room exists, or anchor on day-end for the `23:59` edge case
+(`23:59:10 → 23:59:50` stores as `23:58 → 23:59`, 1 min, no midnight cross). The frontend
+suggestion row mirrors both branches so the UI defaults are always consistent with the backend.
+Manual entry rejection of `start == end` is unchanged.
+
+**B — AI cost persistence, reporting, and CSV (new capability).** Two additive nullable columns
+(`cost_total REAL`, `cost_currency TEXT`) are added to `time_entries` via idempotent
+`add_column_if_absent`. Accepting a suggestion copies its cost verbatim; manual entries write
+`NULL` (absence ≠ zero, DEC-004). The summary query computes `ai_cost_total` separately from
+human minutes (DEC-003). The Reports/Summary view gains an AI cost sub-line per project card and
+a mixed-currency guard ("—" when currencies differ). CSV export gains `cost_total`/`cost_currency`
+columns; manual-entry rows emit empty strings.
+
+**C — Trackability and disabled-source notices (new UI).** Unmapped-environment suggestions now
+show a "not trackable until mapped" notice with a direct link to Settings. Untimed blocks carry
+a badge "not auto-trackable — add time manually". The empty-state view lists all causes
+(nothing imported, unmapped, untimed, source-down) with actionable links — no blank table, no
+bare "0".
+
+**D — 30-minute gap spec correction (no code change).** `GAP_MINUTES = 30` in the engine was
+always a compile-time constant; the spec incorrectly described it as configurable. Spec corrected.
+
+### Compatibility and rollback
+
+Two additive nullable columns on `time_entries` (`cost_total`, `cost_currency`); no IPC, schema
+breaking change, or dependency. Rolling back to v0.5.0 leaves the columns inert — older builds
+neither read nor write them. AI-accepted entries created under v0.6.0 persist as plain entries in
+older builds (cost not displayed; no data loss). See
+[openspec/changes/task-034-suggestions-uat-polish/RELEASE.md](openspec/changes/task-034-suggestions-uat-polish/RELEASE.md)
+for the full rollback table and component compatibility matrix.
+
+### Tests
+
+**Rust** (`cargo test --lib`): **165 passed / 0 failed**
+(new tests: A4 ×4 — same-minute, no-duration, 23:59 day-end DEC-035, manual reject unchanged;
+B6 ×2 — cost copy, cost/manual separation)
+
+**Frontend** (`npm run test:frontend` with `LANGFUSE_*` unset): **105 passed / 0 failed**
+(new tests: `suggestionsUi.test.mjs` — `subMinutesHHMM` unit, DEC-035 23:59 day-end, C1–C4
+trackability/notices, SEC-012 secret-free render; `summaryCards.test.mjs` (new) — 7 B5 cost
+and aggregate tests)
+
+### Manual smoke steps before shipping
+
+- M1 — Suggestions view: accept a same-minute block (if available); confirm it stores without
+  error and appears in Today with a non-zero duration.
+- M2 — Accept a suggestion with a known AI cost; open Reports → confirm the project card shows
+  the AI cost sub-line; export CSV and verify `cost_total`/`cost_currency` columns are populated.
+- M3 — With an unmapped environment: open Suggestions; confirm the "not trackable until mapped"
+  notice and "Map in Settings" link appear.
+- M4 — With no suggestions at all: confirm the empty-state panel lists causes with actions, not
+  a blank table.
+
+(Human-only; outstanding UAT gate — requires packaged `.app` on physical Mac.)
+
+---
+
 ## v0.5.0 — Reports quick-range presets (TASK-033)
 
 **Branch:** `feat/task-033-reports-quick-ranges`
