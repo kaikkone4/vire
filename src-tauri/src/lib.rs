@@ -1,3 +1,4 @@
+mod active_window;
 mod env_mapping;
 mod langfuse;
 mod runtime_observer;
@@ -144,7 +145,15 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     runtime_observer::store::migrate(conn)?;
     // Additive suggestions table; created after `projects`/`time_entries`/`env_mapping` so its
     // `project_id` FK resolves and the read-time evidence join has its inputs (TASK-032 A2).
-    suggestions::store::migrate(conn)
+    suggestions::store::migrate(conn)?;
+    // Additive active-window evidence tables (TASK-046). No FK into existing tables so ordering
+    // is unconstrained; placed last. App behavior stays identical — tables start empty.
+    active_window::store::migrate(conn)?;
+    // Startup housekeeping: prune expired active-window rows once per launch (C6 — touches only
+    // active_window_* tables, never time_entries or any approved summary).
+    let aw_cfg = active_window::config::ActiveWindowConfig::from_env();
+    active_window::store::prune_expired(conn, &now(), aw_cfg.retention_days)?;
+    Ok(())
 }
 
 fn clean_opt(s: Option<String>) -> Option<String> {
