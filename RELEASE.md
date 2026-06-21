@@ -1,5 +1,41 @@
 # Vire — Release Notes
 
+## v0.6.3 — Target-scoped Rust dependency advisory gate (TASK-047, TASK-043 Stream B)
+
+**Branch:** `feat/task-047-tauri-gtk-rustsec-cleanup`
+
+### What changed
+
+Dependency security-posture only — **zero shipped-crate delta** (`git diff main -- src-tauri/Cargo.toml
+src-tauri/Cargo.lock` is empty; no source, IPC, capability, schema, or `tauri.conf.json` change).
+
+Adds `src-tauri/deny.toml` (a `cargo-deny` config whose advisory graph is scoped via `[graph].targets`
+to the shipped Apple targets `aarch64`/`x86_64-apple-darwin`) plus a `dependency-advisories` GitHub
+Actions gate that runs `cargo deny check advisories`. The Tauri-v2 Linux GTK3 chain (`glib`, `gtk`,
+`gdk`, `atk`, `gtk3-macros`, …) is `cfg`-gated to Linux/BSD upstream and is **not** in the macOS
+dependency graph (proven by `cargo tree`), so its advisories do not fire on the shipped target. The 12
+deferred Linux-only advisory IDs are documented with per-ID rationale in `deny.toml` and the change's
+`ops-review.md` / `sec.md`. Adding a Linux triple to `[graph].targets` is the intended **tripwire** —
+it re-surfaces `glib` RUSTSEC-2024-0429 + the gtk3-rs unmaintained cluster rather than burying them.
+
+Corrects the TASK-043 brief: vire is **Tauri v2** (2.11.2), not v1; there are no `tauri-plugin-updater`
+Rust deps.
+
+### Run the gate locally
+
+```sh
+cd src-tauri && cargo deny check advisories
+```
+
+(Requires `cargo install cargo-deny`. CI installs it automatically.)
+
+### Compatibility and rollback
+
+No runtime impact; the macOS `.app` is byte-identical. Deployment size: **patch**. Rollback: delete
+`src-tauri/deny.toml` + `.github/workflows/dependency-advisories.yml` (fully automated, no data impact).
+
+---
+
 ## v0.6.2 — Langfuse public key relocated from Keychain to SQLite settings (TASK-044)
 
 **Branch:** `feat/task-044-keychain-public-key-to-settings`

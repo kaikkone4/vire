@@ -1,0 +1,39 @@
+# Rust dependency advisory gate — TASK-047 (TASK-043 Stream B enforcement).
+#
+# Runs the target-scoped `cargo deny check advisories` defined by src-tauri/deny.toml.
+# The check is GRAPH-ONLY and TARGET-SCOPED (deny.toml [graph].targets = Apple targets),
+# so it evaluates exactly the crates that ship in the macOS .app regardless of the runner
+# OS — ubuntu-latest is used purely because it is the fastest/cheapest runner. The gate's
+# correctness comes from deny.toml's target scoping, not from the runner platform.
+#
+# Local equivalent for contributors:  (cd src-tauri && cargo deny check advisories)
+name: dependency-advisories
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (advisories, Apple-target-scoped)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Run target-scoped advisory check
+        working-directory: src-tauri
+        run: cargo deny check advisories
