@@ -45,6 +45,17 @@
 - PR #35 promoted to **ready-for-review**: https://github.com/kaikkone4/vire/pull/35
 - CI advisory gate: no `statusCheckRollup` yet (PR was draft; gate fires on PR push event).
 
+## Merge-conflict fix — PASS (2026-06-21)
+
+- Cause: PR #35 went CONFLICTING after TASK-045 (v0.6.3) + TASK-046 (v0.7.0) merged to main.
+- Merged `origin/main` into branch; resolved `RELEASE.md` + `README.md` only.
+  - `RELEASE.md`: kept all entries, descending order v0.7.1 → v0.7.0 → v0.6.3 → v0.6.2…;
+    added `---` separators. TASK-045/046 entries preserved.
+  - `README.md`: kept `Current version: v0.7.1`; advisory-gate section + prior compat notes intact.
+- `deny.toml`/workflow byte-identical to pre-merge (no semantic change).
+- Checks: OpenSpec strict PASS; `git diff --check` clean; no conflict markers; trailing newlines OK.
+- Pushed `63a196e`. PR #35 now **MERGEABLE / CLEAN**.
+
 ## Route
 
 SW-6 PASS → **merge-ready**. Janne merges PR #35. Tag `task-047/v0.7.1` to be created after merge (requires SSH key at `~/.ssh/id_ed25519.pub`).
