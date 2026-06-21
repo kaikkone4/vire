@@ -20,8 +20,11 @@ const TITLE_STATE_VOCAB: &[&str] = &[
     title_state::EMPTY,
 ];
 
-const IDLE_STATE_VOCAB: &[&str] =
-    &[idle_state::ACTIVE, idle_state::IDLE_CANDIDATE, idle_state::AWAY];
+const IDLE_STATE_VOCAB: &[&str] = &[
+    idle_state::ACTIVE,
+    idle_state::IDLE_CANDIDATE,
+    idle_state::AWAY,
+];
 
 const SOURCE_VOCAB: &[&str] = &[source::NSWORKSPACE, source::ACCESSIBILITY, source::QUARTZ];
 
@@ -188,7 +191,10 @@ pub fn upsert_evidence_block(
     check_vocab(&block.source, SOURCE_VOCAB, "source")?;
     let (persisted_title, effective_state) =
         apply_title_gate(block.window_title.as_deref(), &block.title_state, mode);
-    let bundle_key = block.app_bundle_id.as_deref().unwrap_or(BUNDLE_NULL_SENTINEL);
+    let bundle_key = block
+        .app_bundle_id
+        .as_deref()
+        .unwrap_or(BUNDLE_NULL_SENTINEL);
     conn.execute(
         "INSERT INTO active_window_evidence
             (id, day, start_ts, end_ts, duration_seconds, app_name, app_bundle_id,
@@ -377,11 +383,7 @@ pub fn prune_expired(
 /// `Redacted` mode: if the caller observed a title (`title_state='captured'`), the value is
 /// discarded and the state becomes `'redacted'`. All non-`captured` states pass through
 /// unchanged (absence states, empty) because there is no title to discard.
-fn apply_title_gate(
-    title: Option<&str>,
-    state: &str,
-    mode: TitleMode,
-) -> (Option<String>, String) {
+fn apply_title_gate(title: Option<&str>, state: &str, mode: TitleMode) -> (Option<String>, String) {
     match mode {
         TitleMode::Stored => {
             if title.is_some() {

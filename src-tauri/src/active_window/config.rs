@@ -36,16 +36,17 @@ impl ActiveWindowConfig {
             .or_else(env_title_mode)
             .unwrap_or(TitleMode::Redacted);
 
-        Ok(ActiveWindowConfig { retention_days, title_mode })
+        Ok(ActiveWindowConfig {
+            retention_days,
+            title_mode,
+        })
     }
 }
 
 fn db_setting_str(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
-    match conn.query_row(
-        "SELECT value FROM settings WHERE key=?1",
-        [key],
-        |r| r.get::<_, String>(0),
-    ) {
+    match conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+        r.get::<_, String>(0)
+    }) {
         Ok(v) => Ok(Some(v)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e),

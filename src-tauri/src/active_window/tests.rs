@@ -26,7 +26,11 @@ fn raw_obs(sample_ts: &str, day: &str, title: Option<&str>) -> RawObservation {
         app_name: Some("TestApp".into()),
         app_bundle_id: Some("com.example.test".into()),
         window_title: title.map(Into::into),
-        title_state: if title.is_some() { ts.into() } else { no_ts.into() },
+        title_state: if title.is_some() {
+            ts.into()
+        } else {
+            no_ts.into()
+        },
         idle_state: idle_state::ACTIVE.into(),
         source: source::NSWORKSPACE.into(),
         capture_health: None,
@@ -45,7 +49,11 @@ fn evidence_block(id: &str, day: &str, title: Option<&str>) -> EvidenceBlock {
         app_name: Some("TestApp".into()),
         app_bundle_id: Some("com.example.test".into()),
         window_title: title.map(Into::into),
-        title_state: if title.is_some() { ts.into() } else { no_ts.into() },
+        title_state: if title.is_some() {
+            ts.into()
+        } else {
+            no_ts.into()
+        },
         idle_state: idle_state::ACTIVE.into(),
         source: source::NSWORKSPACE.into(),
         capture_health: None,
@@ -96,9 +104,7 @@ const PROHIBITED_COLS: &[&str] = &[
 ];
 
 fn table_columns(c: &Connection, table: &str) -> Vec<String> {
-    let mut stmt = c
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .unwrap();
+    let mut stmt = c.prepare(&format!("PRAGMA table_info({table})")).unwrap();
     stmt.query_map([], |r| r.get::<_, String>(1))
         .unwrap()
         .map(Result::unwrap)
@@ -158,12 +164,16 @@ fn raw_observation_in_drops_prohibited_keys_before_anything_is_persisted() {
     // Insert via the typed API.
     let c = conn();
     let raw = RawObservation {
-        sample_ts: obs.sample_ts.unwrap_or_else(|| "2026-06-21T10:00:00Z".into()),
+        sample_ts: obs
+            .sample_ts
+            .unwrap_or_else(|| "2026-06-21T10:00:00Z".into()),
         day: "2026-06-21".into(),
         app_name: obs.app_name,
         app_bundle_id: obs.app_bundle_id,
         window_title: obs.window_title,
-        title_state: obs.title_state.unwrap_or_else(|| title_state::ABSENT_NO_WINDOW.into()),
+        title_state: obs
+            .title_state
+            .unwrap_or_else(|| title_state::ABSENT_NO_WINDOW.into()),
         idle_state: obs.idle_state.unwrap_or_else(|| idle_state::ACTIVE.into()),
         source: obs.source.unwrap_or_else(|| source::NSWORKSPACE.into()),
         capture_health: obs.capture_health,
@@ -179,8 +189,15 @@ fn raw_observation_in_drops_prohibited_keys_before_anything_is_persisted() {
         )
         .unwrap();
     for prohibited in [
-        "SECRET", "PROHIBITED", "rm -rf", "AKIASECRET", "SYNTHETIC_TOKEN", "CLIPBOARD",
-        "ctrl+c", "base64", "id_rsa",
+        "SECRET",
+        "PROHIBITED",
+        "rm -rf",
+        "AKIASECRET",
+        "SYNTHETIC_TOKEN",
+        "CLIPBOARD",
+        "ctrl+c",
+        "base64",
+        "id_rsa",
     ] {
         assert!(
             !dump.contains(prohibited),
@@ -196,7 +213,11 @@ fn raw_observation_in_drops_prohibited_keys_before_anything_is_persisted() {
 #[test]
 fn default_redacted_mode_stores_null_title_and_redacted_state() {
     let c = conn();
-    let obs = raw_obs("2026-06-21T10:00:00Z", "2026-06-21", Some("SYNTHETIC_TITLE_DO_NOT_STORE"));
+    let obs = raw_obs(
+        "2026-06-21T10:00:00Z",
+        "2026-06-21",
+        Some("SYNTHETIC_TITLE_DO_NOT_STORE"),
+    );
     store::insert_raw_observation(&c, &obs, TitleMode::Redacted, "2026-06-21T10:00:00Z").unwrap();
     let (title, ts): (Option<String>, String) = c
         .query_row(
@@ -205,14 +226,21 @@ fn default_redacted_mode_stores_null_title_and_redacted_state() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert!(title.is_none(), "window_title must be NULL under redacted mode");
+    assert!(
+        title.is_none(),
+        "window_title must be NULL under redacted mode"
+    );
     assert_eq!(ts, title_state::REDACTED, "title_state must be 'redacted'");
 }
 
 #[test]
 fn stored_mode_persists_title_with_captured_state() {
     let c = conn();
-    let obs = raw_obs("2026-06-21T10:00:00Z", "2026-06-21", Some("My Document Title"));
+    let obs = raw_obs(
+        "2026-06-21T10:00:00Z",
+        "2026-06-21",
+        Some("My Document Title"),
+    );
     store::insert_raw_observation(&c, &obs, TitleMode::Stored, "2026-06-21T10:00:00Z").unwrap();
     let (title, ts): (Option<String>, String) = c
         .query_row(
@@ -248,8 +276,7 @@ fn stored_mode_evidence_block_round_trips_title() {
     let block = evidence_block("b1", "2026-06-21", Some("Round Trip Title"));
     store::upsert_evidence_block(&c, &block, TitleMode::Stored, "2026-06-21T09:30:00Z").unwrap();
     let views =
-        store::evidence_blocks_in_range(&c, "2026-06-21", "2026-06-21", TitleMode::Stored)
-            .unwrap();
+        store::evidence_blocks_in_range(&c, "2026-06-21", "2026-06-21", TitleMode::Stored).unwrap();
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].window_title.as_deref(), Some("Round Trip Title"));
     assert_eq!(views[0].title_state, title_state::CAPTURED);
@@ -317,8 +344,16 @@ fn stored_mode_forces_captured_state_when_title_is_present() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(title.as_deref(), Some("Actual Title"), "title must be stored in Stored mode");
-    assert_eq!(ts, title_state::CAPTURED, "gate must force title_state='captured' when title is present");
+    assert_eq!(
+        title.as_deref(),
+        Some("Actual Title"),
+        "title must be stored in Stored mode"
+    );
+    assert_eq!(
+        ts,
+        title_state::CAPTURED,
+        "gate must force title_state='captured' when title is present"
+    );
 }
 
 // ----- controlled vocabulary enforcement (Fix 3) -----------------------------------------------
@@ -339,7 +374,10 @@ fn insert_raw_observation_rejects_invalid_title_state() {
     };
     let result =
         store::insert_raw_observation(&c, &obs, TitleMode::Redacted, "2026-06-21T10:00:00Z");
-    assert!(result.is_err(), "invalid title_state must be rejected at the write boundary");
+    assert!(
+        result.is_err(),
+        "invalid title_state must be rejected at the write boundary"
+    );
 }
 
 #[test]
@@ -358,7 +396,10 @@ fn insert_raw_observation_rejects_invalid_idle_state() {
     };
     let result =
         store::insert_raw_observation(&c, &obs, TitleMode::Redacted, "2026-06-21T10:00:00Z");
-    assert!(result.is_err(), "invalid idle_state must be rejected at the write boundary");
+    assert!(
+        result.is_err(),
+        "invalid idle_state must be rejected at the write boundary"
+    );
 }
 
 #[test]
@@ -366,8 +407,12 @@ fn upsert_evidence_block_rejects_invalid_source() {
     let c = conn();
     let mut block = evidence_block("b1", "2026-06-21", None);
     block.source = "invalid_source".into();
-    let result = store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z");
-    assert!(result.is_err(), "invalid source must be rejected at the write boundary");
+    let result =
+        store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z");
+    assert!(
+        result.is_err(),
+        "invalid source must be rejected at the write boundary"
+    );
 }
 
 #[test]
@@ -382,7 +427,10 @@ fn record_capture_health_rejects_invalid_state() {
         source: source::NSWORKSPACE.into(),
     };
     let result = store::record_capture_health(&c, &ev, "2026-06-21T10:00:00Z");
-    assert!(result.is_err(), "invalid health state must be rejected at the write boundary");
+    assert!(
+        result.is_err(),
+        "invalid health state must be rejected at the write boundary"
+    );
 }
 
 #[test]
@@ -398,7 +446,10 @@ fn record_capture_health_rejects_oversized_detail() {
         source: source::NSWORKSPACE.into(),
     };
     let result = store::record_capture_health(&c, &ev, "2026-06-21T10:00:00Z");
-    assert!(result.is_err(), "detail exceeding MAX_DETAIL_BYTES must be rejected");
+    assert!(
+        result.is_err(),
+        "detail exceeding MAX_DETAIL_BYTES must be rejected"
+    );
 }
 
 // ----- capture health first-class --------------------------------------------------------------
@@ -470,13 +521,14 @@ fn upsert_evidence_block_is_idempotent() {
     store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z").unwrap();
     store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:01Z").unwrap();
     let count: i64 = c
-        .query_row(
-            "SELECT COUNT(*) FROM active_window_evidence",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM active_window_evidence", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(count, 1, "re-upserting the same block must not create duplicate rows");
+    assert_eq!(
+        count, 1,
+        "re-upserting the same block must not create duplicate rows"
+    );
 }
 
 #[test]
@@ -489,13 +541,14 @@ fn upsert_evidence_block_is_idempotent_when_bundle_id_is_none() {
     store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:00Z").unwrap();
     store::upsert_evidence_block(&c, &block, TitleMode::Redacted, "2026-06-21T09:30:01Z").unwrap();
     let count: i64 = c
-        .query_row(
-            "SELECT COUNT(*) FROM active_window_evidence",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM active_window_evidence", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(count, 1, "re-upserting a no-bundle block must not create duplicate rows");
+    assert_eq!(
+        count, 1,
+        "re-upserting a no-bundle block must not create duplicate rows"
+    );
 }
 
 #[test]
@@ -582,17 +635,24 @@ fn prune_removes_only_expired_active_window_rows_and_leaves_time_entries_intact(
 
     // Prune with now=2026-06-21, retention=30 days → cutoff=2026-05-22T00:00:00.
     let stats = store::prune_expired(&c, "2026-06-21", 30).unwrap();
-    assert_eq!(stats.raw_evidence_deleted, 1, "expired raw row must be deleted");
-    assert_eq!(stats.evidence_deleted, 1, "expired evidence block must be deleted");
-    assert_eq!(stats.capture_health_deleted, 1, "expired health row must be deleted");
+    assert_eq!(
+        stats.raw_evidence_deleted, 1,
+        "expired raw row must be deleted"
+    );
+    assert_eq!(
+        stats.evidence_deleted, 1,
+        "expired evidence block must be deleted"
+    );
+    assert_eq!(
+        stats.capture_health_deleted, 1,
+        "expired health row must be deleted"
+    );
 
     // In-window raw row must survive.
     let raw_count: i64 = c
-        .query_row(
-            "SELECT COUNT(*) FROM active_window_raw_evidence",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM active_window_raw_evidence", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(raw_count, 1, "in-window raw row must survive prune");
 
@@ -612,7 +672,7 @@ fn prune_uses_exact_per_table_timestamp_not_calendar_day() {
     let c = conn();
     let cutoff_day = "2026-05-22";
     let before_cutoff = "2026-05-22T09:00:00Z"; // same cutoff day, before cutoff time
-    let after_cutoff = "2026-05-22T12:00:00Z";  // same cutoff day, after cutoff time (now=noon)
+    let after_cutoff = "2026-05-22T12:00:00Z"; // same cutoff day, after cutoff time (now=noon)
     let now_ts = "2026-06-21T12:00:00Z"; // retention=30 → cutoff = 2026-05-22 12:00:00
 
     // Raw: sample_ts before cutoff → must be deleted.
@@ -658,7 +718,9 @@ fn prune_uses_exact_per_table_timestamp_not_calendar_day() {
         "row with sample_ts before exact cutoff must be deleted even when on the cutoff day"
     );
     let remaining: i64 = c
-        .query_row("SELECT COUNT(*) FROM active_window_raw_evidence", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM active_window_raw_evidence", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(remaining, 1, "row with sample_ts after cutoff must survive");
 }
@@ -708,7 +770,10 @@ fn prune_keeps_row_at_exact_cutoff_deletes_one_second_before() {
     .unwrap();
 
     let stats = store::prune_expired(&c, now_ts, 30).unwrap();
-    assert_eq!(stats.raw_evidence_deleted, 1, "row one second before cutoff must be deleted");
+    assert_eq!(
+        stats.raw_evidence_deleted, 1,
+        "row one second before cutoff must be deleted"
+    );
     let row_at_cutoff: i64 = c
         .query_row(
             "SELECT COUNT(*) FROM active_window_raw_evidence WHERE app_bundle_id='com.at-cutoff'",
@@ -716,7 +781,10 @@ fn prune_keeps_row_at_exact_cutoff_deletes_one_second_before() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(row_at_cutoff, 1, "row exactly at the cutoff timestamp must survive");
+    assert_eq!(
+        row_at_cutoff, 1,
+        "row exactly at the cutoff timestamp must survive"
+    );
 }
 
 // ----- config: precedence (Fix 2) --------------------------------------------------------------
@@ -747,7 +815,10 @@ fn config_stored_retention_overrides_default() {
     )
     .unwrap();
     let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
-    assert_eq!(cfg.retention_days, 90, "stored retention_days must take precedence");
+    assert_eq!(
+        cfg.retention_days, 90,
+        "stored retention_days must take precedence"
+    );
 }
 
 #[test]
@@ -759,7 +830,11 @@ fn config_stored_title_mode_stored_overrides_default() {
     )
     .unwrap();
     let cfg = config::ActiveWindowConfig::from_settings(&c).unwrap();
-    assert_eq!(cfg.title_mode, TitleMode::Stored, "stored title_mode must take precedence");
+    assert_eq!(
+        cfg.title_mode,
+        TitleMode::Stored,
+        "stored title_mode must take precedence"
+    );
 }
 
 #[test]
