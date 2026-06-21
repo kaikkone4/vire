@@ -4,7 +4,7 @@
 
 - **Change / branch / PR**: `task-034-suggestions-uat-polish` /
   `feat/task-034-suggestions-uat-polish` / #29
-- **Phase / gate**: SW-4 **PASS** + SW-5 **PASS** (2026-06-21); route to SW-6
+- **Phase / gate**: SW-4 **PASS** + SW-5 **PASS** + SW-6 **PASS** + DOCS **PASS** (2026-06-21)
 - **Reviewed implementation through**: fix-loop commit `51d52fb`
 - **Tier**: L1
 
@@ -46,6 +46,20 @@ minor, rollback: partial-automated, compatibility matrix). Root `RELEASE.md` upd
 entry. Tag `task-034/v0.6.0` dry-run recorded (SSH key absent — manual step for Janne). PR #29
 promoted draft → ready-for-review.
 
+## DOCS result (documentation gate)
+
+PASS — 2026-06-21. Two drift items fixed in `README.md`:
+
+1. **Compatibility/rollback section**: added TASK-034 schema delta (`cost_total REAL`,
+   `cost_currency TEXT` additive nullable columns on `time_entries`) and their rollback behaviour
+   (inert to older builds, no data loss).
+2. **Manual verification**: added new section "AI suggestions UAT polish (TASK-034 — required before
+   release)" (steps 22–25) covering AI cost in Reports cards, CSV cost columns, trackability notices
+   (unmapped/untimed/disabled-source), and same-minute normalization edge case.
+
+No drift in `docs/langfuse-local-setup.md`, `docs/backup-restore.md`, or `openspec/` docs.
+`RELEASE.md` (root and task) was already complete.
+
 ## Artifacts / next action
 
 - `RELEASE.md` — SW-6 release doc (all three declarations).
@@ -54,3 +68,4 @@ promoted draft → ready-for-review.
 - `qa.md` — SW-3 coverage matrix.
 - **Pending (manual):** `git tag -s task-034/v0.6.0 … 28f4e00` + `git push origin task-034/v0.6.0`
 - **Pending (human):** macOS UAT on packaged `.app`
+- **PR #29**: ready-for-review; all automated gates passed. Merge after SSH-signed tag.

@@ -2,7 +2,7 @@
 
 Vire is a local-only macOS desktop app for project time tracking, AI usage evidence, and billing review. It imports AI traces (pi, Claude Code) from a **local Docker self-hosted Langfuse stack** as the primary AI time/usage/cost evidence source and requires human approval before any billable or profitability total is computed.
 
-Current state: v0.1 Tauri v2 shell with manual time entries, projects, summaries, and CSV export. The local Docker Langfuse trace importer MVP is available (TASK-019); automatic macOS activity capture is in active development (TASK-005).
+Current version: v0.6.0. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
 
 ## Run locally
 
@@ -73,6 +73,14 @@ npm run tauri:build
     one run can page through (≥ 50 000), the run surfaces a distinct *capped* terminal diagnostic — never
     an infinite re-run loop. Re-running cannot advance past this point; it is an explicit terminal limit
     of the source API's pagination, surfaced rather than silently truncated.
+12. **AI time-entry suggestions** (TASK-032): the *Suggestions* view (sidebar → Suggestions) shows
+    AI-evidence time blocks awaiting your review. **Nothing is auto-posted** — every time entry is created
+    only when you click **Accept** or **Accept with edits**. Accepted suggestions appear in Today and
+    Reports as a separate AI sub-line; they are never folded into your manual (billable) total. The
+    exported CSV includes an `origin` column (`manual` or `ai_suggested`) so you can separate AI-suggested
+    time in downstream tooling. If Langfuse evidence exists for an environment that has no Vire project
+    mapping, a banner in Suggestions names those environments and links to Settings to resolve them — the
+    evidence is surfaced, never silently dropped.
 
 > The build is a local prototype: it is **not** code-signed or notarized. On first launch macOS
 > Gatekeeper may require right-click → Open (or *System Settings → Privacy & Security → Open Anyway*).
@@ -106,16 +114,22 @@ This build is forward/backward compatible with prior Vire builds on the same Mac
 - **Data:** the packaged app uses the same local database, `app_data_dir()/vire.sqlite`, as the dev and
   prior builds. `init_db` is idempotent (`CREATE TABLE IF NOT EXISTS` + `INSERT OR IGNORE`), and the new
   Langfuse configuration persists as **additive rows in the existing key/value `settings` table** — no
-  schema change to `projects`/`time_entries`, no destructive migration. TASK-029 adds one new table
-  (`langfuse_backfill_progress`, a single-row resume cursor) and one new settings row
-  (`langfuse_import_range`); no existing table or column is altered.
+  destructive migration. TASK-029 adds one new table (`langfuse_backfill_progress`, a single-row resume
+  cursor) and one new settings row (`langfuse_import_range`). TASK-032 adds one new table
+  (`time_entry_suggestions`) and one new additive column (`time_entries.origin TEXT NOT NULL DEFAULT
+  'manual'`); existing rows are backfilled to `'manual'` — no destructive migration, no existing data
+  altered. TASK-034 adds two additive nullable columns (`cost_total REAL`, `cost_currency TEXT`) on
+  `time_entries` via `add_column_if_absent` — older builds ignore them silently; no data loss.
 - **Secrets:** the Langfuse secret/public key live in app-scoped macOS Keychain entries (service
   `dev.vire.app`). They persist across reinstall and are **not** bundled in the artifact.
 - **Rollback:** reverting to any prior build opens the same `vire.sqlite` and ignores unknown additive
-  `settings` rows and the new `langfuse_backfill_progress` table → **no data loss, no destructive
-  migration**. A prior build simply falls back to environment variables (`VIRE_LANGFUSE_*`) for Langfuse
-  config, which remain a marked dev fallback. The default import window changes from 7 days to 30 days
-  (TASK-029); re-importing a trace already stored is a durable-dedupe no-op.
+  `settings` rows, the new `langfuse_backfill_progress` and `time_entry_suggestions` tables, the
+  `time_entries.origin` column, and the `cost_total`/`cost_currency` columns → **no data loss, no
+  destructive migration**. AI-accepted entries created before rollback persist as plain entries in older
+  builds (cost not displayed). A prior build simply falls back to environment variables
+  (`VIRE_LANGFUSE_*`) for Langfuse config, which remain a marked dev fallback. The default import window
+  changes from 7 days to 30 days (TASK-029); re-importing a trace already stored is a durable-dedupe
+  no-op.
 
 ## Tests
 
@@ -130,15 +144,19 @@ The test suite covers project create/update/archive persistence and active filte
 
 ### Dev mode (quick sanity)
 
-1. Launch with `npm run tauri:dev` and confirm the sidebar includes Today, Projects, Manual Entry, Reports, and Settings.
+1. Launch with `npm run tauri:dev` and confirm the sidebar includes Today, Projects, Manual Entry, Reports, Suggestions, and Settings.
 2. Confirm the Today/Settings capture status says `Manual Mode / Capture deferred` and there are no automatic capture controls.
 3. Create a project, edit it, then archive it. Confirm archived projects disappear from active entry pickers but remain visible in all-project/report history.
 4. Add, edit, and delete a manual entry; deletion requires confirmation.
 5. Restart the app and confirm projects and entries persist.
-6. In Reports, choose a date range/project filter and export CSV:
+6. In Reports, confirm the four quick-range preset buttons (**Last 7 days**, **Last 14 days**, **Last 30 days**, **Last 90 days**) appear above the date inputs (TASK-033). Click **Last 7 days** — confirm the start/end date inputs populate and the report re-renders. Select a project filter, then click **Last 30 days** — confirm the project filter is preserved. Manually edit either date field — confirm no preset button stays highlighted.
+7. In Reports, choose a date range/project filter and export CSV:
    - **Success:** pick a writable `.csv` location and confirm — file is written, `Exported N entries.` alert appears, app stays responsive (no beachball).
    - **Cancel:** open the save dialog and dismiss without choosing — no file is written, app returns to a fully responsive state with no endless loading.
    - **Re-entry:** after a success or cancel, click Export CSV again — dialog opens and resolves normally (no stuck state from the prior run).
+7. Open the Suggestions view (sidebar → Suggestions). Confirm it renders without error — an empty state
+   ("No pending suggestions") is expected if no Langfuse evidence has been imported. Confirm that no
+   time entries appear in Today until you explicitly click Accept on a suggestion.
 
 ### Packaged app and Langfuse settings (TASK-026 — required before release)
 
@@ -164,6 +182,57 @@ These steps require an active local Langfuse stack.
 13. **Backfill now:** with integration enabled, confirm **Backfill now** is visible. Click it; confirm the import report appears on completion and shows incremental progress (not a blank or frozen UI).
 14. **Schema diagnostics:** if any traces were skipped, confirm the import report groups skip reasons (e.g. `N skipped: N observations-not-embedded`) rather than repeating the same free-string warning N times. Structural samples (if present) must show JSON key names and type names only — no field values, no credentials.
 15. **Rollback smoke (TASK-029 additions):** open a prior Vire build on the same Mac — confirm the `langfuse_import_range` settings row and the `langfuse_backfill_progress` table are silently ignored (no crash, no import failure, no data loss).
+
+### AI time-entry suggestions (TASK-032 — required before release)
+
+Substituting your own imported Langfuse evidence where indicated. Steps 18–20 require at least one pending suggestion; steps 16–17 and 21 are verifiable without evidence.
+
+16. **Open Suggestions view:** click *Suggestions* in the sidebar. Confirm the view renders — an empty
+    state ("No pending suggestions") is expected with no imported evidence. Confirm no time entries
+    appeared in Today as a result of opening this view.
+17. **No auto-posting:** confirm that entries appear in Today only after you explicitly click **Accept**
+    or **Accept with edits**. Generating or refreshing suggestions must not post any entry.
+18. **Accept a suggestion** (requires evidence): if suggestions are listed, click **Accept** on one.
+    Confirm it disappears from Suggestions, then appears in Today as an `AI-suggested Xh Ym` sub-line.
+    Confirm the manual (billable) total in Today is unchanged — AI time is reported separately, never
+    folded into the human total.
+19. **Dismiss a suggestion** (requires evidence): click **Dismiss** on a pending suggestion and confirm
+    the dismissal dialog appears; after confirming, the suggestion disappears and does not reappear after
+    clicking **Refresh suggestions**.
+20. **CSV origin column** (requires accepted entry): export CSV from Reports. Confirm the file includes
+    an `origin` column; the accepted entry's row reads `ai_suggested`; manually-added entries read
+    `manual`.
+21. **Unmapped env guidance** (if applicable): if any Langfuse environment has no Vire project mapping,
+    confirm a banner appears at the top of Suggestions naming those environments and their trace counts,
+    with a link to Settings to map them. Confirm no evidence from unmapped environments is silently
+    dropped — it appears in the banner, not in a suggestion.
+
+### AI suggestions UAT polish (TASK-034 — required before release)
+
+Steps 22–24 require at least one accepted suggestion with a known AI cost; step 24 also exercises
+context-dependent Suggestions notices. Step 25 is optional (requires a same-minute block).
+
+22. **AI cost in Reports** (requires accepted suggestion with cost): open Reports, choose a date range
+    that includes the accepted entry's project. Confirm the project card shows an
+    `AI-suggested Xh · $Y.YY` (or equivalent currency) sub-line. In the lead "Total tracked" card,
+    confirm AI cost is shown separately. If entries span mixed currencies, confirm "—" appears rather
+    than a summed total.
+23. **CSV cost columns** (requires accepted entry with cost): export CSV from Reports. Confirm two new
+    columns `cost_total` and `cost_currency` are present; the accepted AI-suggested row carries the
+    cost values; manually-added rows have empty strings in those columns.
+24. **Trackability notices in Suggestions** (context-dependent):
+    - *Unmapped environment:* if a Langfuse environment has no project mapping, open Suggestions —
+      confirm a "not trackable until mapped" notice with a "Map in Settings" link appears for that
+      environment's suggestions (not a bare empty table).
+    - *Untimed suggestion:* if a suggestion block carries no time span, confirm a
+      "not auto-trackable — add time manually" badge appears on that row.
+    - *Disabled source / empty state:* with no pending suggestions and the Langfuse integration
+      disabled (Settings → disable), open Suggestions — confirm the empty state lists "source down"
+      as a cause with an actionable link, not a blank table or bare "0".
+25. **Same-minute normalization** (optional — requires a same-minute block): if a suggestion with
+    identical `HH:MM` start and end is available, accept it — confirm it stores as a non-zero span
+    (at least 1 min) with no error. For the `23:59` edge case, confirm the stored entry spans
+    `23:58 → 23:59`, not midnight.
 
 ## Local Langfuse Docker stack
 
