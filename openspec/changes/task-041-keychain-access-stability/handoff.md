@@ -2,7 +2,7 @@
 
 - **Change dir**: openspec/changes/task-041-keychain-access-stability/
 - **Branch / PR**: `docs/task-041-keychain-access-stability` / PR #31 (ready-for-review)
-- **Phase / gate**: SW-6 RELEASE **PASS** (2026-06-21) — all gates complete
+- **Phase / gate**: SW-6 RELEASE **PASS** (2026-06-21) → DOCS gate **PASS** (2026-06-21) — all gates complete
 - **Tier**: L2
 
 ## Last gate result
@@ -33,6 +33,15 @@ SW-1 ARCH PASS, 2026-06-20.)
 - ~~**SEC sign-off** that the Langfuse public key is not secrecy-sensitive~~ — **RESOLVED:
   GRANTED by SW-5 (`sec.md`)**. TASK-044 unblocked; carries SEC conditions C1–C4 to its own
   SW-5 gate. TASK-042 signing foundation carries C5–C6.
+
+## DOCS gate outcome (2026-06-21)
+**PASS — no drift.** Research/decision-only task; zero app code, config, or binary changed.
+- `README.md` (lines 45, 123): Keychain references are accurate and complete; no mention of
+  repeated-prompt defect needed (defect unresolved; fix deferred to TASK-042/TASK-044).
+- `docs/langfuse-local-setup.md`: Keychain/credential guidance correct; no update needed.
+- `docs/backup-restore.md`: no keychain-prompt references; no update needed.
+- No new user-facing behavior → no user-doc change. No API surface changed → no OpenAPI drift.
+- No files written; no commit on DOCS gate (nothing to change).
 
 ## SW-6 outcome (2026-06-21)
 - RELEASE.md written with all three declarations (docs-only/none, forward-only, compatibility matrix).
