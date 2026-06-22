@@ -1182,6 +1182,11 @@ pub fn run() {
                 db_path: path.clone(),
                 import_lock: import_lock.clone(),
             });
+            // TASK-048: zero-permission active-app + idle capture on its own OS thread (mirrors the
+            // Langfuse scheduler below). Gated by `active_window_capture_enabled` (default OFF) read
+            // inside the loop; while disabled it samples nothing, touches no native API, and writes no
+            // rows. No renderer/IPC/network/CSP surface — writes go only through the TASK-046 store API.
+            active_window::capture::spawn(path.clone());
             // TASK-027 B: automatic import on a dedicated OS thread (off the UI/Tauri runtime). One import
             // at startup, then a periodic tick. Each cycle serializes with the manual path via the shared
             // slot and honors the disabled switch + loopback boundary inside `run_auto_import_cycle`. The
