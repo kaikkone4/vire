@@ -107,8 +107,19 @@ fn day_of(ts: &str) -> String {
 
 // ----- sampling --------------------------------------------------------------------------------
 
+/// Clear the transient per-tick state used while capture is running. Dropping the open block makes
+/// a later re-enable start a fresh block; clearing `last_sample_ts` makes the intentionally-disabled
+/// span invisible to sampling-gap detection, so re-enabling never records a `sampling_gap` for a
+/// period when capture was deliberately off. `last_prune_day` is retention cadence, not tick state,
+/// and is left intact.
+fn reset_disabled_state(state: &mut CaptureState) {
+    state.open = None;
+    state.last_sample_ts = None;
+}
+
 /// Enable-gated entry point: persist this tick only when capture is enabled. With capture disabled
-/// this writes nothing and the in-memory open block is dropped, so re-enabling starts a clean block.
+/// this writes nothing and resets the transient tick state, so re-enabling starts a clean block and
+/// records no false gap for the disabled period.
 pub fn maybe_sample(
     conn: &Connection,
     state: &mut CaptureState,
@@ -118,7 +129,7 @@ pub fn maybe_sample(
     day: &str,
 ) -> rusqlite::Result<()> {
     if !cfg.capture_enabled {
-        state.open = None;
+        reset_disabled_state(state);
         return Ok(());
     }
     sample_once(conn, state, sample, cfg, sample_ts, day)
@@ -134,6 +145,13 @@ pub fn maybe_sample(
 /// 3. **Active app** — insert one raw observation (title NULL, `absent_no_permission`,
 ///    `nsworkspace`) and coalesce into the open evidence block, closing + reopening when
 ///    `(day, app_bundle_id, idle_state)` changes.
+///
+/// **Atomicity.** Every write of a tick (gap/no-gui health row, raw observation, evidence upsert)
+/// lands inside a single SQLite transaction, and the in-memory coalescing state (`open`,
+/// `last_sample_ts`) is published **only after** the transaction commits. A failure on any write
+/// rolls the whole tick back and returns `Err` without advancing in-memory state — so the database
+/// never holds a partial tick and coalescing state can never run ahead of persisted evidence. The
+/// next tick simply retries from the last consistent point.
 fn sample_once(
     conn: &Connection,
     state: &mut CaptureState,
@@ -142,9 +160,14 @@ fn sample_once(
     sample_ts: &str,
     day: &str,
 ) -> rusqlite::Result<()> {
+    // All persistence for this tick happens inside one transaction; in-memory state is mutated only
+    // after `tx.commit()` succeeds. Work on a local copy of the open block until then.
+    let tx = conn.unchecked_transaction()?;
+    let mut open = state.open.clone();
+
     // 1. Sampling-gap detection (covers sleep/suspend without notification observers).
-    if let Some(prev) = state.last_sample_ts.clone() {
-        let gap = duration_secs(&prev, sample_ts);
+    if let Some(prev) = state.last_sample_ts.as_deref() {
+        let gap = duration_secs(prev, sample_ts);
         if gap > (cfg.sample_seconds.saturating_mul(2)) as i64 {
             let ev = CaptureHealthEvent {
                 day: day.to_owned(),
@@ -155,8 +178,8 @@ fn sample_once(
                 detail: Some(format!("gap_seconds={gap}")),
                 source: source::NSWORKSPACE.to_owned(),
             };
-            store::record_capture_health(conn, &ev, sample_ts)?;
-            state.open = None;
+            store::record_capture_health(&tx, &ev, sample_ts)?;
+            open = None;
         }
     }
 
@@ -170,7 +193,9 @@ fn sample_once(
             detail: None,
             source: source::NSWORKSPACE.to_owned(),
         };
-        store::record_capture_health(conn, &ev, sample_ts)?;
+        store::record_capture_health(&tx, &ev, sample_ts)?;
+        tx.commit()?;
+        // Commit succeeded → publish state.
         state.open = None;
         state.last_sample_ts = Some(sample_ts.to_owned());
         return Ok(());
@@ -189,18 +214,18 @@ fn sample_once(
         source: source::NSWORKSPACE.to_owned(),
         capture_health: None,
     };
-    store::insert_raw_observation(conn, &obs, cfg.title_mode, sample_ts)?;
+    store::insert_raw_observation(&tx, &obs, cfg.title_mode, sample_ts)?;
 
-    // Coalesce into the open block, or open a new one on any key change (incl. day rollover).
-    let continues = state.open.as_ref().is_some_and(|b| {
+    // Coalesce into the (local) open block, or open a new one on any key change (incl. day rollover).
+    let continues = open.as_ref().is_some_and(|b| {
         b.day == day && b.app_bundle_id == app.app_bundle_id && b.idle_state == idle
     });
-    if continues {
-        if let Some(b) = state.open.as_mut() {
-            b.end_ts = sample_ts.to_owned();
-        }
+    let next_open = if continues {
+        let mut b = open.expect("`continues` implies an open block is present");
+        b.end_ts = sample_ts.to_owned();
+        b
     } else {
-        state.open = Some(OpenBlock {
+        OpenBlock {
             id: Uuid::new_v4().to_string(),
             day: day.to_owned(),
             start_ts: sample_ts.to_owned(),
@@ -208,27 +233,29 @@ fn sample_once(
             app_name: app.app_name.clone(),
             app_bundle_id: app.app_bundle_id.clone(),
             idle_state: idle,
-        });
-    }
+        }
+    };
 
-    if let Some(b) = state.open.clone() {
-        let block = EvidenceBlock {
-            id: b.id,
-            day: b.day,
-            start_ts: b.start_ts.clone(),
-            end_ts: b.end_ts.clone(),
-            duration_seconds: duration_secs(&b.start_ts, &b.end_ts),
-            app_name: b.app_name,
-            app_bundle_id: b.app_bundle_id,
-            window_title: None,
-            title_state: title_state::ABSENT_NO_PERMISSION.to_owned(),
-            idle_state: b.idle_state.to_owned(),
-            source: source::NSWORKSPACE.to_owned(),
-            capture_health: None,
-        };
-        store::upsert_evidence_block(conn, &block, cfg.title_mode, sample_ts)?;
-    }
+    let block = EvidenceBlock {
+        id: next_open.id.clone(),
+        day: next_open.day.clone(),
+        start_ts: next_open.start_ts.clone(),
+        end_ts: next_open.end_ts.clone(),
+        duration_seconds: duration_secs(&next_open.start_ts, &next_open.end_ts),
+        app_name: next_open.app_name.clone(),
+        app_bundle_id: next_open.app_bundle_id.clone(),
+        window_title: None,
+        title_state: title_state::ABSENT_NO_PERMISSION.to_owned(),
+        idle_state: next_open.idle_state.to_owned(),
+        source: source::NSWORKSPACE.to_owned(),
+        capture_health: None,
+    };
+    store::upsert_evidence_block(&tx, &block, cfg.title_mode, sample_ts)?;
 
+    tx.commit()?;
+
+    // Commit succeeded → publish the new coalescing state.
+    state.open = Some(next_open);
     state.last_sample_ts = Some(sample_ts.to_owned());
     Ok(())
 }
@@ -266,28 +293,29 @@ fn read_frontmost_app() -> Option<FrontmostApp> {
     })
 }
 
-/// Seconds since the most recent input event of any tracked type. Reads only event *age* from the
-/// combined session counter — it installs no event tap and reads no event content.
+/// CoreGraphics "any input event" sentinel. CoreGraphics defines `kCGAnyInputEventType` as
+/// `(CGEventType)(~0)` (`0xFFFF_FFFF`); `objc2-core-graphics` 0.3 does not re-export that macro, so
+/// the exact value is reconstructed here. Passed to `seconds_since_last_event_type`, it returns the
+/// age of the most recent event of **any** input type — key down/up, modifier-only `FlagsChanged`,
+/// every mouse button, moves/drags, scroll, and tablet. This is the design's "min across input
+/// types" (design §3) expressed exactly, and avoids the prior five-type subset that omitted key-up,
+/// modifier-only, mouse-up/drag, other-button, and tablet input — any of which could otherwise
+/// misclassify an active user as idle/away.
+#[cfg(target_os = "macos")]
+const ANY_INPUT_EVENT_TYPE: objc2_core_graphics::CGEventType =
+    objc2_core_graphics::CGEventType(0xFFFF_FFFF);
+
+/// Seconds since the most recent input event of **any** type. Reads only event *age* from the
+/// combined session counter via the any-input query — it installs no event tap and reads no event
+/// content.
 #[cfg(target_os = "macos")]
 fn idle_seconds() -> f64 {
-    use objc2_core_graphics::{CGEventSource, CGEventSourceStateID, CGEventType};
-    const EVENTS: [CGEventType; 5] = [
-        CGEventType::KeyDown,
-        CGEventType::MouseMoved,
-        CGEventType::LeftMouseDown,
-        CGEventType::RightMouseDown,
-        CGEventType::ScrollWheel,
-    ];
-    EVENTS
-        .iter()
-        .map(|&et| {
-            CGEventSource::seconds_since_last_event_type(
-                CGEventSourceStateID::CombinedSessionState,
-                et,
-            )
-        })
-        .fold(f64::INFINITY, f64::min)
-        .max(0.0)
+    use objc2_core_graphics::{CGEventSource, CGEventSourceStateID};
+    CGEventSource::seconds_since_last_event_type(
+        CGEventSourceStateID::CombinedSessionState,
+        ANY_INPUT_EVENT_TYPE,
+    )
+    .max(0.0)
 }
 
 #[cfg(target_os = "macos")]
@@ -351,8 +379,9 @@ fn run_tick(db_path: &Path, conn: &mut Option<Connection>, state: &mut CaptureSt
     let interval = Duration::from_secs(cfg.sample_seconds.max(1));
 
     if !cfg.capture_enabled {
-        // Disabled: no native read, no write. Drop any open block so re-enabling starts clean.
-        state.open = None;
+        // Disabled: no native read, no write. Reset transient tick state so re-enabling starts a
+        // clean block and never records a sampling_gap for the intentionally-disabled period.
+        reset_disabled_state(state);
         return interval;
     }
 
@@ -361,8 +390,10 @@ fn run_tick(db_path: &Path, conn: &mut Option<Connection>, state: &mut CaptureSt
     let sample = read_sample();
     // Persist through the enable-gated entry point (the gate above already skipped the native read
     // when disabled; this keeps the gate enforced at the single tested call site). Errors are
-    // intentionally dropped: a transient write failure must not wedge the loop, degraded states are
-    // already first-class health rows, and no app name/title is ever logged.
+    // intentionally dropped: each tick is persisted atomically (see `sample_once`), so a transient
+    // write failure rolls back cleanly and leaves in-memory state consistent — the next tick simply
+    // retries. Dropping the error keeps the loop alive without risking a partial tick, degraded
+    // states are already first-class health rows, and no app name/title is ever logged.
     let _ = maybe_sample(c, state, &sample, &cfg, &ts, &day);
     let _ = maybe_prune(c, state, &cfg, &ts);
     interval
@@ -373,6 +404,34 @@ mod tests {
     use super::*;
     use crate::active_window::model::TitleMode;
     use rusqlite::Connection;
+    use std::sync::Mutex;
+
+    // Serialize the env-mutating test(s) in this module and save/restore the touched var, mirroring
+    // the discipline in `active_window/tests.rs` so an ambient `VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED`
+    // can neither leak across tests nor flip a value under a parallel run.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn remove(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn conn() -> Connection {
         let c = Connection::open_in_memory().unwrap();
@@ -587,9 +646,93 @@ mod tests {
     }
 
     #[test]
+    fn disable_then_reenable_records_no_false_sampling_gap() {
+        // Regression (SW-4 #2): an intentionally-disabled span must not be mistaken for a sampling
+        // gap when capture is re-enabled. enabled → disabled → enabled, with the re-enable far
+        // beyond 2× the interval after the last enabled tick.
+        let c = conn();
+        let mut st = CaptureState::default();
+        let cfg = cfg(); // interval 5 → gap threshold 10s
+        let s = Sample {
+            frontmost: app("com.app.a"),
+            idle_seconds: 0.0,
+        };
+
+        // Enabled tick establishes the gap-detection anchor.
+        maybe_sample(&c, &mut st, &s, &cfg, "2026-06-21 09:00:00", "2026-06-21").unwrap();
+        assert!(st.last_sample_ts.is_some());
+
+        // Capture disabled (intentional). Must clear the gap-detection anchor and the open block.
+        let mut disabled = cfg.clone();
+        disabled.capture_enabled = false;
+        maybe_sample(
+            &c,
+            &mut st,
+            &s,
+            &disabled,
+            "2026-06-21 09:01:00",
+            "2026-06-21",
+        )
+        .unwrap();
+        assert!(
+            st.last_sample_ts.is_none() && st.open.is_none(),
+            "disabling must reset transient gap-detection / coalescing state"
+        );
+
+        // Re-enable 30 min later — > 2× interval since the last enabled tick.
+        maybe_sample(&c, &mut st, &s, &cfg, "2026-06-21 09:30:00", "2026-06-21").unwrap();
+
+        let health = store::capture_health_in_range(&c, "2026-06-21", "2026-06-21").unwrap();
+        assert!(
+            health.iter().all(|h| h.state != health_state::SAMPLING_GAP),
+            "no sampling_gap may be recorded across an intentional disabled span"
+        );
+        // The re-enabled tick still persists its own activity.
+        assert_eq!(raw_count(&c), 2, "both enabled ticks persist a raw row");
+    }
+
+    // ----- §6: per-tick atomicity (transactional raw + block + health) -------------------------
+
+    #[test]
+    fn failed_block_write_rolls_back_raw_and_preserves_state() {
+        // Regression (SW-4 #3): a tick is one transaction. If the evidence-block upsert fails after
+        // the raw insert, the whole tick rolls back (no partial row on disk) and in-memory
+        // coalescing state does not advance past the persisted evidence.
+        let c = conn();
+        let mut st = CaptureState::default();
+        // Force the second write to fail after the raw insert: drop the evidence table so the
+        // upsert errors with "no such table" while the raw insert would otherwise succeed.
+        c.execute_batch("DROP TABLE active_window_evidence")
+            .unwrap();
+        let s = Sample {
+            frontmost: app("com.app.a"),
+            idle_seconds: 0.0,
+        };
+
+        let res = sample_once(&c, &mut st, &s, &cfg(), "2026-06-21 09:00:00", "2026-06-21");
+        assert!(res.is_err(), "tick must fail when the block upsert fails");
+
+        assert_eq!(
+            raw_count(&c),
+            0,
+            "raw insert must roll back with the failed block upsert — no partial tick"
+        );
+        assert!(
+            st.open.is_none(),
+            "open block must not advance on a failed tick"
+        );
+        assert!(
+            st.last_sample_ts.is_none(),
+            "gap-detection anchor must not advance on a failed tick"
+        );
+    }
+
+    #[test]
     fn config_default_is_disabled() {
-        // Fresh DB, no env override controlling the switch: capture must default OFF.
-        std::env::remove_var("VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED");
+        // Fresh DB, no env override controlling the switch: capture must default OFF. Hold the env
+        // lock and save/restore the var so this test neither observes nor leaks ambient env state.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = EnvGuard::remove("VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED");
         let c = conn();
         let resolved = CaptureConfig::from_settings(&c).unwrap();
         assert!(
@@ -679,6 +822,28 @@ mod tests {
         // Second call same day is a no-op (coarse cadence).
         assert_eq!(st.last_prune_day.as_deref(), Some("2026-06-21"));
         maybe_prune(&c, &mut st, &cfg, "2026-06-21 12:00:00").unwrap();
+    }
+
+    // ----- §6: idle reader uses CoreGraphics any-input semantics -------------------------------
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn idle_reader_queries_any_input_event_type() {
+        // Regression (SW-4 #1): the idle reader must query the CoreGraphics any-input event type
+        // rather than an enumerated subset, so input through any event (key-up, modifier-only
+        // FlagsChanged, mouse-up/drag, other-button, tablet) refreshes the idle age. CoreGraphics
+        // defines kCGAnyInputEventType as (CGEventType)(~0); pinning the sentinel proves we ask for
+        // "any input", not five hand-picked types.
+        assert_eq!(
+            ANY_INPUT_EVENT_TYPE.0,
+            u32::MAX,
+            "idle reader must use the kCGAnyInputEventType sentinel ((CGEventType)(~0))"
+        );
+        // And the live any-input reader returns a real, non-negative age via that sentinel.
+        assert!(
+            idle_seconds() >= 0.0,
+            "any-input idle age must be a real non-negative number from CGEventSource"
+        );
     }
 
     // ----- §0: live zero-permission probe (skipped unless explicitly requested) ----------------
