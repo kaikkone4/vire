@@ -1,5 +1,65 @@
 # Vire — Release Notes
 
+## v0.7.1 — Target-scoped Rust dependency advisory gate (TASK-047, TASK-043 Stream B)
+
+**Branch:** `feat/task-047-tauri-gtk-rustsec-cleanup`
+
+### What changed
+
+Dependency security-posture only — **zero shipped-crate delta** (`git diff main -- src-tauri/Cargo.toml
+src-tauri/Cargo.lock` is empty; no source, IPC, capability, schema, or `tauri.conf.json` change).
+
+Adds `src-tauri/deny.toml` (a `cargo-deny` config whose advisory graph is scoped via `[graph].targets`
+to the shipped Apple targets `aarch64`/`x86_64-apple-darwin`) plus a `dependency-advisories` GitHub
+Actions gate that runs the pinned **cargo-deny 0.19.9** `cargo deny check advisories`. Against the
+shipped Apple graph the locked crates carry **17 RustSec advisories**, split two ways:
+
+- **12 Linux-only (deferred, target-scoped out):** the Tauri-v2 GTK3 chain (`glib`, `gtk`, `gdk`, `atk`,
+  `gtk3-macros`, `proc-macro-error`, …) is `cfg`-gated to Linux/BSD upstream and is **not** in the macOS
+  dependency graph (proven by `cargo tree`), so its advisories do not fire on the shipped target. These
+  IDs stay **out** of `ignore` — adding a Linux triple to `[graph].targets` is the intended **tripwire**
+  that re-surfaces the gtk3-rs unmaintained cluster (and, via `osv-scanner`, `glib` RUSTSEC-2024-0429).
+- **5 Apple-present (accepted via documented `ignore`):** unmaintained `unic-*` crates
+  (RUSTSEC-2025-0075/0080/0081/0098/0100) reach the shipped graph through `urlpattern → tauri-utils`;
+  they are unscored, have no upstream fix, and are explicitly accepted so the scoped gate exits 0.
+
+All 17 IDs are documented with per-ID rationale in `deny.toml` and the change's `ops-review.md` / `sec.md`,
+and the gate result is verified by a real `cargo deny check advisories` run.
+
+Corrects the TASK-043 brief: vire is **Tauri v2** (2.11.2), not v1; there are no `tauri-plugin-updater`
+Rust deps.
+
+### Run the gate locally
+
+```sh
+cargo install cargo-deny --version 0.19.9 --locked
+cd src-tauri && cargo deny check advisories
+```
+
+(Pin the same version CI uses — `cargo-deny 0.19.9`; `unmaintained = "all"` requires cargo-deny ≥ 0.18.)
+
+### Compatibility and rollback
+
+No runtime impact. The change is config/docs only — **no source, `Cargo.toml`, `Cargo.lock`, or shipped
+dependency-graph delta** (`git diff main -- src-tauri/Cargo.toml src-tauri/Cargo.lock` is empty; no
+`src-tauri/src/**`, `src/**`, `tauri.conf.json`, or capability files touched), so the built macOS `.app`
+carries no dependency or source change from this task. Deployment size: **patch**. Rollback: delete
+`src-tauri/deny.toml` + `.github/workflows/dependency-advisories.yml` (fully automated, no data impact).
+
+**Component compatibility matrix:**
+
+| Dependency / component | Min version | Pinned / locked | Notes |
+|---|---|---|---|
+| `cargo-deny` (CI gate) | 0.18.0 | **0.19.9** | `unmaintained = "all"` requires ≥ 0.18; pinned in workflow |
+| Rust toolchain | stable | stable (cargo 1.95.0 tested) | No constraint change |
+| Tauri runtime | 2.11.2 | 2.11.2 | Zero `Cargo.lock` delta — all crate versions unchanged from v0.7.0 |
+| npm / frontend deps | unchanged | unchanged | No `package.json` / `package-lock.json` delta |
+| macOS target | Ventura 13+ | — | Same as v0.7.0 |
+
+See [openspec/changes/task-047-tauri-gtk-rustsec-cleanup/RELEASE.md](openspec/changes/task-047-tauri-gtk-rustsec-cleanup/RELEASE.md) for the full gate artifact.
+
+---
+
 ## v0.7.0 — Active-window evidence storage foundation (TASK-046)
 
 **Branch:** `feat/task-046-active-window-evidence-storage`
