@@ -4176,6 +4176,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "keyring",
+ "objc2-app-kit",
+ "objc2-core-graphics",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

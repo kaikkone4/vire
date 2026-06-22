@@ -28,5 +28,13 @@ url = "2"
 # binding dependency (Security framework). Mac-first prototype; apple-native is the only backend.
 keyring = { version = "3", features = ["apple-native"] }
 
+# TASK-048: zero-permission active-app + idle capture (macOS-only, in-process — no Swift sidecar /
+# externalBin / IPC, design §3). These are the ONLY two new direct deps (tasks.md §1); objc2 +
+# objc2-foundation are pulled in transitively. NSWorkspace gives frontmost-app identity and
+# CGEventSource gives last-event age (idle) — both zero-permission (no TCC), no event tap, no AX.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSRunningApplication"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEventSource", "CGEventTypes"] }
+
 [dev-dependencies]
 tempfile = "3"
