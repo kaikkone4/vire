@@ -4,6 +4,7 @@ mod langfuse;
 mod runtime_observer;
 mod settings;
 mod suggestions;
+mod update_check;
 
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -1172,6 +1173,7 @@ fn db_path(app: &tauri::App) -> Result<PathBuf, std::io::Error> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let path = db_path(app)?;
             let conn = Connection::open(&path)?;
@@ -1230,7 +1232,9 @@ pub fn run() {
             list_evidence_projects,
             list_time_entry_suggestions,
             accept_time_entry_suggestion,
-            dismiss_time_entry_suggestion
+            dismiss_time_entry_suggestion,
+            update_check::check_for_update,
+            update_check::open_releases_page
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vire");
