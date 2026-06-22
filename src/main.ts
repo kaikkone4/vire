@@ -11,6 +11,7 @@ import { type SuggestionList, suggestionsBody } from './suggestions-ui';
 import { summaryCards } from './summary-cards';
 import { nextScrollTop } from './scroll';
 import { REPORT_RANGE_PRESETS, reportRange } from './report-ranges';
+import { type UpdateCheckResult, updateCheckPanel } from './update-check-ui';
 
 type View='Today'|'Projects'|'Manual Entry'|'Reports'|'Suggestions'|'Settings';
 type Project={id:string;name:string;notes?:string|null;archived:boolean};
@@ -31,6 +32,7 @@ const today=()=>localDateInputValue();
 let current:View='Today', projects:Project[]=[], allProjects:Project[]=[], entries:Entry[]=[], summaries:Summary[]=[];
 let editingProject:Project|null=null, editingEntry:Entry|null=null, lastError='', sourceHealth:SourceHealth|null=null, runtimeRecon:RuntimeReconciliation|null=null;
 let langfuseSettings:LangfuseSettings|null=null, testConnResult:TestConnectionResult|null=null, lastImportReport:ImportReport|null=null, lastImportMode:ImportMode='incremental', langfuseImportRange:string=DEFAULT_IMPORT_RANGE, discoveredEnvs:DiscoveredEnvState[]=[];
+let updateCheckState:UpdateCheckResult|null=null, updateCheckPending=false;
 // Last view shell() rendered. Used to keep the user's scroll position across same-view re-renders and
 // reset to the top on a view change (TASK-031). null = nothing rendered yet → first render starts at top.
 let lastRenderedView:View|null=null;
@@ -70,7 +72,17 @@ async function renderSuggestions(){const list=await call<SuggestionList>('list_t
 // error surfaces via run()/alertError rather than being re-validated here.
 function editsFor(id:string){const panel=document.querySelector<HTMLElement>(`[data-edit-panel="${CSS.escape(id)}"]`);const get=(f:string)=>panel?.querySelector<HTMLInputElement>(`[data-edit-field="${f}"]`)?.value??'';return{date:get('date')||null,start_time:get('start_time')||null,end_time:get('end_time')||null,note:optionalText(get('note'))};}
 function bindSuggestions(){document.querySelector('#refreshSuggestions')?.addEventListener('click',()=>run(async()=>{await call('list_time_entry_suggestions',{regenerate:true});await renderSuggestions();}));document.querySelectorAll<HTMLButtonElement>('[data-goto-view]').forEach(b=>b.onclick=()=>{current=b.dataset.gotoView as View;rerender();});document.querySelectorAll<HTMLButtonElement>('[data-edit]').forEach(b=>b.onclick=()=>{const panel=document.querySelector<HTMLElement>(`[data-edit-panel="${CSS.escape(b.dataset.edit!)}"]`);if(panel)panel.hidden=!panel.hidden;});document.querySelectorAll<HTMLButtonElement>('[data-accept]').forEach(b=>b.onclick=()=>run(async()=>{await call('accept_time_entry_suggestion',{id:b.dataset.accept});await renderSuggestions();}));document.querySelectorAll<HTMLButtonElement>('[data-accept-edited]').forEach(b=>b.onclick=()=>run(async()=>{const id=b.dataset.acceptEdited!;await call('accept_time_entry_suggestion',{id,edits:editsFor(id)});await renderSuggestions();}));document.querySelectorAll<HTMLButtonElement>('[data-dismiss]').forEach(b=>b.onclick=()=>run(async()=>{if(confirm('Dismiss this suggestion? It posts no time entry and will not reappear on refresh.')){await call('dismiss_time_entry_suggestion',{id:b.dataset.dismiss});await renderSuggestions();}}));}
-async function renderSettings(){try{runtimeRecon=await call<RuntimeReconciliation>('get_runtime_reconciliation');}catch{runtimeRecon=null;} try{langfuseSettings=await call<LangfuseSettings>('get_langfuse_settings');}catch{langfuseSettings=null;} try{discoveredEnvs=await call<DiscoveredEnvState[]>('list_discovered_environments');}catch{discoveredEnvs=[];} try{langfuseImportRange=await call<string>('get_langfuse_import_range');}catch{langfuseImportRange=DEFAULT_IMPORT_RANGE;} shell(`${errorBanner()}${sourceBanner()}${capture()}<header><h1>Settings</h1><p>Local-only status and privacy.</p></header><section class="panel"><h2>Storage</h2><p>Vire v0.1 stores projects, manual entries, and minimal settings in a local SQLite database on this Mac. There are no accounts, cloud sync, hosted APIs, or network features.</p><h2>Capture status</h2><p>Automatic capture is deferred. This app does not collect screenshots, keystrokes, active windows, idle state, terminal commands, browser contents, full URLs, screen pixels, or file contents.</p></section>${langfusePanel()}${sourcePanel()}${mappingPanel(discoveredEnvs,projects)}`);bindImportControls();bindLangfuse();bindEnvMapping();}
+async function renderSettings(){try{runtimeRecon=await call<RuntimeReconciliation>('get_runtime_reconciliation');}catch{runtimeRecon=null;} try{langfuseSettings=await call<LangfuseSettings>('get_langfuse_settings');}catch{langfuseSettings=null;} try{discoveredEnvs=await call<DiscoveredEnvState[]>('list_discovered_environments');}catch{discoveredEnvs=[];} try{langfuseImportRange=await call<string>('get_langfuse_import_range');}catch{langfuseImportRange=DEFAULT_IMPORT_RANGE;} shell(`${errorBanner()}${sourceBanner()}${capture()}<header><h1>Settings</h1><p>Local data, privacy, and explicit integrations.</p></header><section class="panel"><h2>Storage</h2><p>Vire v0.1 stores projects, manual entries, and minimal settings in a local SQLite database on this Mac. There are no accounts, cloud sync, or Vire-hosted APIs. Network access occurs only for explicit user actions, including configured Langfuse operations and the user-initiated GitHub update check below; the update check sends no app data.</p><h2>Capture status</h2><p>Automatic capture is deferred. This app does not collect screenshots, keystrokes, active windows, idle state, terminal commands, browser contents, full URLs, screen pixels, or file contents.</p></section>${updateCheckPanel(updateCheckState,updateCheckPending)}${langfusePanel()}${sourcePanel()}${mappingPanel(discoveredEnvs,projects)}`);bindImportControls();bindLangfuse();bindEnvMapping();bindUpdateCheck();}
+function bindUpdateCheck(){
+  document.querySelector('#checkForUpdates')?.addEventListener('click',()=>{
+    if(updateCheckPending)return;
+    updateCheckPending=true;
+    document.querySelector<HTMLButtonElement>('#checkForUpdates')!.disabled=true;
+    document.querySelector<HTMLButtonElement>('#checkForUpdates')!.textContent='Checking…';
+    void call<UpdateCheckResult>('check_for_update').then(r=>{updateCheckState=r;updateCheckPending=false;if(current==='Settings')void renderSettings();}).catch(e=>{updateCheckState={status:'unknown',reason:errorText(e)};updateCheckPending=false;if(current==='Settings')void renderSettings();});
+  });
+  document.querySelector('#openReleasesPage')?.addEventListener('click',()=>run(async()=>{await call('open_releases_page');}));
+}
 // Import/backfill/range controls (TASK-029 D). Each import button disables both buttons and shows
 // progress text while in flight, then rerenders (which re-enables them). The range form canonicalizes
 // the picker selection before persisting; the backend re-validates and returns the canonical value.
