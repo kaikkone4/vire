@@ -14,13 +14,20 @@ Added a **zero-permission, opt-in capture loop** (macOS only) that samples the f
 - No `CGEventTap`, no Accessibility API (`AXIsProcessTrusted`, `AXUIElementCopyAttributeValue`), no window-list (`CGWindowListCopyWindowInfo`), no Screen Recording.
 - `window_title` is always `NULL`; `title_state` is always `absent_no_permission` on every evidence row.
 - Sampling gap health rows carry only `gap_seconds=N` — no app name or bundle ID in the detail field.
-- No IPC command, renderer change, `tauri.conf.json` change, CSP change, or network egress.
+- TASK-048 added no IPC command, no renderer change, no CSP change, and no network egress, and made no runtime-surface change to `tauri.conf.json`. (The v0.8.0 version bump and macOS DMG layout metadata in `tauri.conf.json` are packaging-only changes from TASK-049 — see the TASK-049 packaging note below.)
 
 **Enable switch:** only explicit affirmatives (`1`/`true`/`yes`/`on`) enable capture; all other values keep it OFF. The loop spawns a dedicated OS thread at startup, reads config on its first tick, and writes nothing while disabled.
 
 **Scope deferred to future tasks:** window titles (requires Screen Recording opt-in), Accessibility metadata (requires AX permission), in-app UI and toggle controls, IPC commands to read capture status.
 
 **New macOS-only Rust crates:** `objc2-app-kit 0.3.2`, `objc2-core-graphics 0.3.2` under `[target.'cfg(target_os = "macos")'.dependencies]`. Both carry zero RustSec advisories (OSV-scanner, Trivy verified).
+
+### Version and packaging metadata (TASK-049)
+
+This v0.8.0 entry also rolls up the version bump and macOS DMG install-window layout from TASK-049 (`feat/task-049-version-docs-macos-icon-cleanup`, PR #37) — documentation and packaging metadata only, with **no source, schema, IPC, CSP, capability, or dependency change**:
+
+- **Version:** `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` bumped from `0.1.0` to `0.8.0`, so the Tauri/Cargo metadata, the `cargo` self-version, and the in-app current-version string all agree.
+- **macOS DMG layout:** added `bundle.macOS.dmg` install-window metadata (`windowSize` 660×400, app icon at `x=180, y=170`, Applications-folder alias at `x=480, y=170`) so the drag-to-install DMG opens with a deliberate two-icon layout. This is cosmetic metadata consumed only by the DMG bundler at package time; it has no effect on the built `.app` runtime.
 
 ### Configuration
 
@@ -48,7 +55,8 @@ No new table, column, or mandatory settings row. Writes only to the TASK-046 tab
 | macOS | Ventura 13+ (unchanged) |
 | `objc2-app-kit` / `objc2-core-graphics` | macOS-only, `cfg`-gated; absent from other platform graphs |
 | SQLite DB (`vire.sqlite`) | No DDL change; reads existing TASK-046 tables |
-| `tauri.conf.json` / IPC / CSP / renderer | Unchanged |
+| IPC / CSP / renderer | Unchanged |
+| `tauri.conf.json` | No runtime-surface change from TASK-048; TASK-049 updates only the version string and macOS DMG layout metadata (packaging-only, no runtime effect) |
 
 ### Tests
 

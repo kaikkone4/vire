@@ -2,7 +2,7 @@
 
 Vire can optionally sample the frontmost macOS application and a coarse idle state at a configurable cadence using only zero-permission OS APIs.
 
-**Default: OFF.** Nothing runs unless explicitly enabled.
+**Default: OFF.** A capture thread is spawned at startup and reads the configuration on each tick, but while capture is disabled it calls no native capture API and writes no evidence.
 
 ## Privacy posture
 
@@ -63,7 +63,7 @@ If no GUI session is available (e.g. early startup), a `no_gui_session` health r
 | `active_window_evidence` | Coalesced reviewable blocks (upserted on `(day, start_ts, app_bundle_id)`). |
 | `active_window_capture_health` | First-class health and gap rows — every capture gap is explained, never silent. |
 
-No column exists in any of these tables for window titles, screenshots, keystrokes, URLs, or credentials.
+These tables carry `window_title` and `title_state` columns (TASK-046 schema), but TASK-048 never collects a title — `window_title` is always persisted as `NULL` (the code-layer invariant above). No column exists in any of these tables for screenshots, keystrokes, URLs, or credentials.
 
 ## Not yet available
 
