@@ -2,7 +2,9 @@
 
 Vire is a local-only macOS desktop app for project time tracking, AI usage evidence, and billing review. It imports AI traces (pi, Claude Code) from a **local Docker self-hosted Langfuse stack** as the primary AI time/usage/cost evidence source and requires human approval before any billable or profitability total is computed.
 
-Current version: v0.7.1. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
+Current version: v0.8.0. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
+
+**New in v0.8.0:** an opt-in zero-permission active-app and idle capture loop (default OFF; no in-app UI in this release — see [docs/active-window-capture.md](docs/active-window-capture.md)).
 
 ## Run locally
 
@@ -39,6 +41,12 @@ npm run tauri:dev
 | `VIRE_RUNTIME_LOG_PATH` | `~/.local/state/pi-observe/events.jsonl` | Optional. Explicit path to pi-observe session log. |
 | `VIRE_RUNTIME_ENV_MAP` | (empty) | Optional. CSV map of project token → Langfuse environment. |
 | `VIRE_RUNTIME_MATCH_SLOP_SECS` | `300` | Optional. Time-window slop for session/trace matching. |
+| `VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED` | `false` (off) | Set `1`/`true`/`yes`/`on` to enable active-app + idle capture. Default **OFF**. macOS only. |
+| `VIRE_ACTIVE_WINDOW_RETENTION_DAYS` | `30` | Retention window for active-window evidence rows (days). |
+| `VIRE_ACTIVE_WINDOW_TITLE_MODE` | `redacted` | `redacted` (default — never write window titles) or `stored` (future opt-in). |
+| `VIRE_ACTIVE_WINDOW_SAMPLE_SECONDS` | `5` | Capture sampling cadence in seconds. Optional. |
+| `VIRE_ACTIVE_WINDOW_IDLE_CANDIDATE_SECONDS` | `60` | Inactivity threshold for `idle_candidate` state (seconds). Optional. |
+| `VIRE_ACTIVE_WINDOW_IDLE_AWAY_SECONDS` | `300` | Inactivity threshold for `away` state (seconds). Optional. |
 
 The app also accepts the bare `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` names as a fallback when the `VIRE_*` names are not set.
 
@@ -70,13 +78,22 @@ npm run tauri:build
 | Artifact | Path |
 |---|---|
 | App bundle | `src-tauri/target/release/bundle/macos/Vire.app` |
-| Disk image (where the toolchain supports it) | `src-tauri/target/release/bundle/dmg/Vire_0.1.0_<arch>.dmg` |
+| Disk image (where the toolchain supports it) | `src-tauri/target/release/bundle/dmg/Vire_<version>_<arch>.dmg` (e.g. `Vire_0.8.0_aarch64.dmg`) |
 
 ### Install and run
 
 1. Build with `npm run tauri:build`.
 2. Open `src-tauri/target/release/bundle/macos/Vire.app` directly, or mount the `.dmg` and drag
-   `Vire.app` into `/Applications`, then launch it.
+   **only `Vire.app`** onto the `Applications` shortcut in the DMG window, then launch it. Drag just
+   the app — do **not** Select-All (⌘A) and drag the whole window, or you will also copy the DMG's
+   hidden metadata into `/Applications`.
+   - If Finder's *Show hidden files* (⌘⇧.) is enabled you will see two dimmed entries in the DMG —
+     `.VolumeIcon.icns` (the custom volume icon, built from the app icon) and `.DS_Store` (Finder
+     window layout). These are normal macOS DMG metadata, not corruption, and are invisible with the
+     default Finder setting. Tauri v2 has no config to suppress them
+     ([tauri#9253](https://github.com/tauri-apps/tauri/issues/9253),
+     [tauri#11190](https://github.com/tauri-apps/tauri/issues/11190)); dragging only `Vire.app` keeps
+     them out of `/Applications`.
 3. **No dev server is required at runtime** — do not run `npm run dev` / `npm run tauri:dev` to use the
    packaged app. The bundled assets are served from inside the `.app`.
 4. **Langfuse configuration comes from in-app settings** (Settings → AI evidence import): base URL,
@@ -162,6 +179,11 @@ This build is forward/backward compatible with prior Vire builds on the same Mac
   `time_entries` via `add_column_if_absent` — older builds ignore them silently; no data loss.
   TASK-044 adds a `langfuse_public_key` row to the `settings` table (no DDL change; the table
   pre-existed); a pre-v0.6.2 rollback ignores the row silently — no data loss.
+  TASK-046 adds three tables (`active_window_raw_evidence`, `active_window_evidence`,
+  `active_window_capture_health`) and two `settings` rows (`active_window_retention_days`,
+  `active_window_title_mode`); prior builds ignore all three tables and both keys silently — no data
+  loss. TASK-048 adds the capture loop that writes to those tables; it writes nothing when disabled
+  (the default) and adds no new table, column, or mandatory settings row.
 - **Secrets (TASK-044):** the Langfuse **secret** key lives in an app-scoped macOS Keychain entry
   (service `dev.vire.app`, account `langfuse_secret_key`). The **public** key is stored in the
   local SQLite `settings` table alongside other non-secret configuration (base URL, environments)
@@ -417,7 +439,11 @@ The full per-session review and approval UI is out of scope for this release (TA
 
 ## Privacy status
 
-Vire stores data in a local SQLite database on this Mac. It has no accounts, cloud sync, hosted API, or automatic data upload. It does not capture active windows, idle state, screenshots, keystrokes, browser contents, full URLs, terminal commands, screen pixels, or file contents in the current v0.1 shell.
+Vire stores data in a local SQLite database on this Mac. It has no accounts, cloud sync, hosted API, or automatic data upload.
+
+**Active-app and idle capture (v0.8.0, macOS only, default OFF):** when enabled, the capture loop records the frontmost app's bundle ID and a coarse idle state (`active` / `idle_candidate` / `away`) every 5 seconds using only `NSWorkspace.frontmostApplication` and `CGEventSource` event age. No Accessibility permission, Screen Recording, event tap, or window title is ever read or stored — `window_title` is always `NULL`. Data stays in the local SQLite DB; no network egress. Enable with `VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED=1`. See [docs/active-window-capture.md](docs/active-window-capture.md).
+
+Screenshots, keystrokes, browser contents, full URLs, terminal commands, and screen pixels are not captured.
 
 The AI trace import feature (in development) queries your **local Docker self-hosted Langfuse instance** only. No macOS activity, prompts, command bodies, or raw local evidence is sent to Langfuse Cloud. Local Langfuse traces may contain prompt/session/metadata from existing instrumentation; stricter redaction and retention limits are planned as a follow-up after the local import flow is validated.
 

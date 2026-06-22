@@ -1,5 +1,79 @@
 # Vire — Release Notes
 
+## v0.8.0 — Zero-permission active-app and idle capture loop (TASK-048)
+
+**Branch:** `feat/task-048-active-window-app-idle-capture`
+**PR:** #36
+
+### What changed
+
+Added a **zero-permission, opt-in capture loop** (macOS only) that samples the frontmost application's bundle ID and a coarse idle state every 5 seconds. Capture is **default OFF** and has no in-app UI in this release — it is controlled via the `active_window_capture_enabled` settings key or the `VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED` env var.
+
+**Privacy invariants — enforced at the code layer, not a runtime filter:**
+- APIs used: `NSWorkspace.frontmostApplication` (bundle ID + display name) and `CGEventSource.secondsSinceLastEventType(kCGAnyInputEventType)` (idle age). Both are zero-permission; no TCC grant is requested or required.
+- No `CGEventTap`, no Accessibility API (`AXIsProcessTrusted`, `AXUIElementCopyAttributeValue`), no window-list (`CGWindowListCopyWindowInfo`), no Screen Recording.
+- `window_title` is always `NULL`; `title_state` is always `absent_no_permission` on every evidence row.
+- Sampling gap health rows carry only `gap_seconds=N` — no app name or bundle ID in the detail field.
+- TASK-048 added no IPC command, no renderer change, no CSP change, and no network egress, and made no runtime-surface change to `tauri.conf.json`. (The v0.8.0 version bump and macOS DMG layout metadata in `tauri.conf.json` are packaging-only changes from TASK-049 — see the TASK-049 packaging note below.)
+
+**Enable switch:** only explicit affirmatives (`1`/`true`/`yes`/`on`) enable capture; all other values keep it OFF. The loop spawns a dedicated OS thread at startup, reads config on its first tick, and writes nothing while disabled.
+
+**Scope deferred to future tasks:** window titles (requires Screen Recording opt-in), Accessibility metadata (requires AX permission), in-app UI and toggle controls, IPC commands to read capture status.
+
+**New macOS-only Rust crates:** `objc2-app-kit 0.3.2`, `objc2-core-graphics 0.3.2` under `[target.'cfg(target_os = "macos")'.dependencies]`. Both carry zero RustSec advisories (OSV-scanner, Trivy verified).
+
+### Version and packaging metadata (TASK-049)
+
+This v0.8.0 entry also rolls up the version bump and macOS DMG install-window layout from TASK-049 (`feat/task-049-version-docs-macos-icon-cleanup`, PR #37) — documentation and packaging metadata only, with **no source, schema, IPC, CSP, capability, or dependency change**:
+
+- **Version:** `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` bumped from `0.1.0` to `0.8.0`, so the Tauri/Cargo metadata, the `cargo` self-version, and the in-app current-version string all agree.
+- **macOS DMG layout:** added `bundle.macOS.dmg` install-window metadata (`windowSize` 660×400, app icon at `x=180, y=170`, Applications-folder alias at `x=480, y=170`) so the drag-to-install DMG opens with a deliberate two-icon layout. This is cosmetic metadata consumed only by the DMG bundler at package time; it has no effect on the built `.app` runtime.
+
+### Configuration
+
+Settings-table key takes precedence over env var; env var takes precedence over compiled default.
+
+| Settings key | Env-var fallback | Default |
+|---|---|---|
+| `active_window_capture_enabled` | `VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED` | `false` (OFF) |
+| `active_window_sample_seconds` | `VIRE_ACTIVE_WINDOW_SAMPLE_SECONDS` | `5` |
+| `active_window_idle_candidate_seconds` | `VIRE_ACTIVE_WINDOW_IDLE_CANDIDATE_SECONDS` | `60` |
+| `active_window_idle_away_seconds` | `VIRE_ACTIVE_WINDOW_IDLE_AWAY_SECONDS` | `300` |
+
+`retention_days` and `title_mode` inherit from TASK-046 (`active_window_retention_days` / `active_window_title_mode`).
+
+### Compatibility and rollback
+
+No new table, column, or mandatory settings row. Writes only to the TASK-046 tables (`active_window_raw_evidence`, `active_window_evidence`, `active_window_capture_health`) which pre-exist and are unchanged. Prior builds ignore all active-window tables silently — no data loss.
+
+**Rollback:** revert the branch. The TASK-046 tables remain in place (inert to older builds). The optional `active_window_capture_enabled` settings key, if written, is silently ignored by any prior build. No destructive migration. Deployment size: **minor**. Rollback: **automated**.
+
+**Component compatibility matrix:**
+
+| Component | Notes |
+|---|---|
+| macOS | Ventura 13+ (unchanged) |
+| `objc2-app-kit` / `objc2-core-graphics` | macOS-only, `cfg`-gated; absent from other platform graphs |
+| SQLite DB (`vire.sqlite`) | No DDL change; reads existing TASK-046 tables |
+| IPC / CSP / renderer | Unchanged |
+| `tauri.conf.json` | No runtime-surface change from TASK-048; TASK-049 updates only the version string and macOS DMG layout metadata (packaging-only, no runtime effect) |
+
+### Tests
+
+**Rust** (`cargo test --lib`): **233 passed / 0 failed** (13 new capture tests + 220 prior)
+**Adversarial** (`cargo test --test adversarial`): **5 passed / 0 failed**
+
+New tests: zero-permission proof (structural absent-symbol check via split-token construction), idle threshold mapping (7 boundary values), null-title persistence, contiguous-sample coalescing, default-disabled write-nothing, scope verification (no new surface), no-GUI-session health row, gap bounding (detail carries only `gap_seconds=N`), retention safety, and three SW-4 regression cases (any-input sentinel pinned to `u32::MAX`, disable/re-enable gap cleared, transactional rollback preserves in-memory state).
+
+### Manual smoke steps
+
+1. **Default disabled:** launch with `VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED` unset — confirm no macOS permission prompt, no `active_window_raw_evidence` rows written, app fully functional.
+2. **Enabled:** launch with `VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED=1` — confirm no Accessibility or Screen Recording prompt; after 5–10 s confirm `active_window_raw_evidence` rows exist with `window_title NULL` and `source = nsworkspace`.
+
+(Human-only; requires `npm run tauri:dev` or packaged `.app` on physical Mac.)
+
+---
+
 ## v0.7.1 — Target-scoped Rust dependency advisory gate (TASK-047, TASK-043 Stream B)
 
 **Branch:** `feat/task-047-tauri-gtk-rustsec-cleanup`

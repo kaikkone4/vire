@@ -1,6 +1,6 @@
 [package]
 name = "vire"
-version = "0.1.0"
+version = "0.8.0"
 description = "Vire local time tracker"
 authors = ["Vire"]
 edition = "2021"
