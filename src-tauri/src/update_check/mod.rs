@@ -8,8 +8,9 @@
 //!   browser via `tauri-plugin-opener`. The renderer supplies no URL.
 //!
 //! HTTP client mirrors `langfuse/api.rs`: blocking + rustls, connect_timeout 5s, total timeout 10s,
-//! `redirect::Policy::none()`, fixed user-agent. No Authorization header, no body, no egress of any
-//! app/user/activity data. Every failure path maps to `Unknown { reason }` — fail-soft, no panic.
+//! `redirect::Policy::none()`, fixed user-agent. The command moves that bounded blocking work to
+//! Tauri's blocking pool. No Authorization header, no body, no egress of any app/user/activity data.
+//! Every failure path maps to `Unknown { reason }` — fail-soft, no panic.
 
 use std::time::Duration;
 
@@ -22,8 +23,7 @@ use tauri_plugin_opener::OpenerExt;
 const RELEASES_URL: &str = "https://github.com/kaikkonen4/vire/releases";
 
 /// GitHub latest-release endpoint for a public repo. No auth required.
-const GITHUB_API_LATEST: &str =
-    "https://api.github.com/repos/kaikkonen4/vire/releases/latest";
+const GITHUB_API_LATEST: &str = "https://api.github.com/repos/kaikkonen4/vire/releases/latest";
 
 /// The three states the update check can return. `Unknown` is fail-soft: the app stays fully
 /// usable and no error dialog is shown.
@@ -63,6 +63,55 @@ fn build_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| format!("failed to build HTTP client: {e}"))
 }
 
+/// Compare the running version with a GitHub release. Kept pure so all production parsing and
+/// comparison branches can be covered without live network access.
+fn compare_release(current: &str, release: GithubRelease) -> UpdateCheck {
+    // Strip a leading 'v' from the tag (e.g. "v0.9.0" → "0.9.0").
+    let tag = release.tag_name.trim_start_matches('v');
+
+    let current_ver = match semver::Version::parse(current) {
+        Ok(v) => v,
+        Err(e) => {
+            return UpdateCheck::Unknown {
+                reason: format!("could not parse running version '{current}': {e}"),
+            }
+        }
+    };
+
+    let latest_ver = match semver::Version::parse(tag) {
+        Ok(v) => v,
+        Err(e) => {
+            return UpdateCheck::Unknown {
+                reason: format!("could not parse release tag '{tag}': {e}"),
+            }
+        }
+    };
+
+    // "Update available" iff latest > running. Equal or lower (dev build ahead of last release) ⇒
+    // up to date, never "downgrade available".
+    if latest_ver > current_ver {
+        UpdateCheck::UpdateAvailable {
+            current: current.to_string(),
+            latest: tag.to_string(),
+            release_url: release.html_url,
+        }
+    } else {
+        UpdateCheck::UpToDate {
+            current: current.to_string(),
+        }
+    }
+}
+
+/// Parse the bounded GitHub response payload and run the production comparison logic.
+fn parse_release_payload(current: &str, payload: &[u8]) -> UpdateCheck {
+    match serde_json::from_slice::<GithubRelease>(payload) {
+        Ok(release) => compare_release(current, release),
+        Err(e) => UpdateCheck::Unknown {
+            reason: format!("JSON parse error: {e}"),
+        },
+    }
+}
+
 /// Perform the version check. Every error path returns `Unknown { reason }` — the caller never
 /// panics, never retries, and never surfaces an error dialog.
 pub fn run_check() -> UpdateCheck {
@@ -92,54 +141,28 @@ pub fn run_check() -> UpdateCheck {
         };
     }
 
-    let release: GithubRelease = match resp.json() {
-        Ok(r) => r,
+    let payload = match resp.bytes() {
+        Ok(body) => body,
         Err(e) => {
             return UpdateCheck::Unknown {
-                reason: format!("JSON parse error: {e}"),
+                reason: format!("response read error: {e}"),
             }
         }
     };
 
-    // Strip a leading 'v' from the tag (e.g. "v0.9.0" → "0.9.0").
-    let tag = release.tag_name.trim_start_matches('v');
-
-    let current_ver = match semver::Version::parse(&current) {
-        Ok(v) => v,
-        Err(e) => {
-            return UpdateCheck::Unknown {
-                reason: format!("could not parse running version '{current}': {e}"),
-            }
-        }
-    };
-
-    let latest_ver = match semver::Version::parse(tag) {
-        Ok(v) => v,
-        Err(e) => {
-            return UpdateCheck::Unknown {
-                reason: format!("could not parse release tag '{tag}': {e}"),
-            }
-        }
-    };
-
-    // "Update available" iff latest > running. Equal or lower (dev build ahead of last release) ⇒
-    // up to date, never "downgrade available".
-    if latest_ver > current_ver {
-        UpdateCheck::UpdateAvailable {
-            current,
-            latest: tag.to_string(),
-            release_url: release.html_url,
-        }
-    } else {
-        UpdateCheck::UpToDate { current }
-    }
+    parse_release_payload(&current, &payload)
 }
 
-/// IPC command: perform a single fail-soft update check. The network call runs synchronously on
-/// Tauri's blocking task pool; the renderer awaits the result. Never panics.
+/// IPC command: perform a single fail-soft update check. The bounded blocking request runs on
+/// Tauri's blocking task pool; the renderer asynchronously awaits the one-shot result. Never panics.
 #[command]
-pub fn check_for_update() -> UpdateCheck {
-    run_check()
+pub async fn check_for_update() -> UpdateCheck {
+    match tauri::async_runtime::spawn_blocking(run_check).await {
+        Ok(result) => result,
+        Err(e) => UpdateCheck::Unknown {
+            reason: format!("update check task failed: {e}"),
+        },
+    }
 }
 
 /// IPC command: open the GitHub Releases index in the OS default browser via `tauri-plugin-opener`.

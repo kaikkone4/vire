@@ -37,10 +37,7 @@ export function updateCheckResult(r: UpdateCheckResult): string {
   if (r.status === 'up_to_date') {
     status = `<span class="update-up-to-date">Vire ${esc(r.current)} is up to date.</span>`;
   } else if (r.status === 'update_available') {
-    status =
-      `<span class="update-available">Update available — v${esc(r.latest)}</span>` +
-      ` <button id="openReleasesSpecific" data-release-url="${esc(r.release_url)}">` +
-      `Open release page</button>`;
+    status = `<span class="update-available">Update available — v${esc(r.latest)}</span>`;
   } else {
     // unknown — quiet fail-soft copy; never implies the app is broken.
     status = `<span class="update-unknown">Couldn't check — try again later.</span>`;

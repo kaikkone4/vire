@@ -33,7 +33,7 @@ test('result: up_to_date renders current version and no update copy', () => {
   assert.ok(html.includes('id="checkForUpdates"'), 'check-again button present');
 });
 
-test('result: update_available renders latest version and open release button', () => {
+test('result: update_available renders latest version and the releases-index action', () => {
   const html = updateCheckResult({
     status: 'update_available',
     current: '0.8.0',
@@ -42,7 +42,7 @@ test('result: update_available renders latest version and open release button', 
   });
   assert.ok(html.includes('0.9.0'), 'latest version shown');
   assert.ok(html.includes('Update available'), 'update-available copy');
-  assert.ok(html.includes('id="openReleasesSpecific"'), 'specific release button present');
+  assert.ok(!html.includes('data-release-url'), 'API release URL is not attached to the DOM');
   assert.ok(html.includes('id="checkForUpdates"'), 'check-again button present');
   assert.ok(html.includes('id="openReleasesPage"'), 'open releases index button present');
 });
@@ -72,15 +72,14 @@ test('result: update_available escapes latest version', () => {
   assert.ok(!html.includes('<img'), 'img tag not unescaped in latest version');
 });
 
-test('result: update_available escapes release_url in data attribute', () => {
-  // The release_url is placed in a data-release-url attribute — escapeHtml neutralises quotes.
+test('result: update_available does not render release_url', () => {
   const html = updateCheckResult({
     status: 'update_available',
     current: '0.8.0',
     latest: '0.9.0',
     release_url: 'https://example.com/" onclick="evil()',
   });
-  assert.ok(!html.includes('" onclick="evil()'), 'attribute injection escaped');
+  assert.ok(!html.includes('example.com'), 'API release URL omitted');
 });
 
 // --- panel wrapper ---
