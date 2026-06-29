@@ -20,10 +20,10 @@ use tauri_plugin_opener::OpenerExt;
 
 /// The Releases index — a compile-time constant the renderer can never influence.
 /// Targets the index (not `/latest`), which needs no redirect.
-const RELEASES_URL: &str = "https://github.com/kaikkonen4/vire/releases";
+const RELEASES_URL: &str = "https://github.com/kaikkone4/vire/releases";
 
 /// GitHub latest-release endpoint for a public repo. No auth required.
-const GITHUB_API_LATEST: &str = "https://api.github.com/repos/kaikkonen4/vire/releases/latest";
+const GITHUB_API_LATEST: &str = "https://api.github.com/repos/kaikkone4/vire/releases/latest";
 
 /// The three states the update check can return. `Unknown` is fail-soft: the app stays fully
 /// usable and no error dialog is shown.

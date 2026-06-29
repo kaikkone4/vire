@@ -9,7 +9,7 @@
     "dialog:allow-save",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "https://github.com/kaikkonen4/vire/releases" }]
+      "allow": [{ "url": "https://github.com/kaikkone4/vire/releases" }]
     }
   ]
 }

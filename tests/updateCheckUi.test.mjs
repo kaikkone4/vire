@@ -38,7 +38,7 @@ test('result: update_available renders latest version and the releases-index act
     status: 'update_available',
     current: '0.8.0',
     latest: '0.9.0',
-    release_url: 'https://github.com/kaikkonen4/vire/releases/tag/v0.9.0',
+    release_url: 'https://github.com/kaikkone4/vire/releases/tag/v0.9.0',
   });
   assert.ok(html.includes('0.9.0'), 'latest version shown');
   assert.ok(html.includes('Update available'), 'update-available copy');
@@ -67,7 +67,7 @@ test('result: update_available escapes latest version', () => {
     status: 'update_available',
     current: '0.8.0',
     latest: '<img onerror=x>',
-    release_url: 'https://github.com/kaikkonen4/vire/releases/tag/safe',
+    release_url: 'https://github.com/kaikkone4/vire/releases/tag/safe',
   });
   assert.ok(!html.includes('<img'), 'img tag not unescaped in latest version');
 });

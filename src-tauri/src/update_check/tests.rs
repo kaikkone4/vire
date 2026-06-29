@@ -1,12 +1,12 @@
 //! Unit tests for the production U-lite payload parsing and version comparison (TASK-050).
 //! No network is used.
 
-use super::{parse_release_payload, UpdateCheck};
+use super::{parse_release_payload, UpdateCheck, GITHUB_API_LATEST, RELEASES_URL};
 
 fn payload(tag: &str) -> Vec<u8> {
     serde_json::json!({
         "tag_name": tag,
-        "html_url": "https://github.com/kaikkonen4/vire/releases/tag/v0.9.0"
+        "html_url": "https://github.com/kaikkone4/vire/releases/tag/v0.9.0"
     })
     .to_string()
     .into_bytes()
@@ -24,7 +24,7 @@ fn newer_release_is_update_available() {
             assert_eq!(latest, "0.9.0");
             assert_eq!(
                 release_url,
-                "https://github.com/kaikkonen4/vire/releases/tag/v0.9.0"
+                "https://github.com/kaikkone4/vire/releases/tag/v0.9.0"
             );
         }
         other => panic!("expected UpdateAvailable, got {:?}", other),
@@ -107,4 +107,50 @@ fn malformed_payload_yields_unknown() {
         }
         other => panic!("expected Unknown for malformed payload, got {:?}", other),
     }
+}
+
+// --- TASK-051 regression guard ---
+
+/// Both update-check endpoints must target the canonical repo owner `kaikkone4/vire`, never the
+/// typo'd owner that carries an extra `n`. The wrong owner 404s every check into fail-soft
+/// `Unknown` and 404s the Releases page — the exact regression this hotfix corrects.
+#[test]
+fn endpoints_target_canonical_repo_owner() {
+    // Build the forbidden owner at runtime so its literal never appears in the tree, keeping the
+    // repo grep-clean for the typo while still asserting its absence.
+    let typo_owner = format!("kaikkone{}4", 'n');
+    for url in [RELEASES_URL, GITHUB_API_LATEST] {
+        assert!(
+            url.contains("kaikkone4/vire"),
+            "missing canonical owner in {url}"
+        );
+        assert!(!url.contains(&typo_owner), "typo'd owner present in {url}");
+    }
+}
+
+/// The scoped `opener:allow-open-url` allowlist URL must stay byte-for-byte equal to `RELEASES_URL`
+/// so the capability and the constant can never drift to different owners again.
+#[test]
+fn opener_allowlist_url_equals_releases_url() {
+    let capabilities: serde_json::Value =
+        serde_json::from_str(include_str!("../../capabilities/default.json"))
+            .expect("capabilities/default.json is valid JSON");
+
+    let permissions = capabilities["permissions"]
+        .as_array()
+        .expect("permissions is an array");
+
+    let opener = permissions
+        .iter()
+        .find(|perm| perm["identifier"] == "opener:allow-open-url")
+        .expect("opener:allow-open-url permission is present");
+
+    let allow_url = opener["allow"][0]["url"]
+        .as_str()
+        .expect("opener allow[0].url is a string");
+
+    assert_eq!(
+        allow_url, RELEASES_URL,
+        "opener allowlist URL must equal RELEASES_URL"
+    );
 }
