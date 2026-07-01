@@ -1,16 +1,34 @@
 # Handoff — TASK-056 active-window capture Settings + privacy/status UI
 
 - **Change dir**: openspec/changes/task-056-active-window-settings-ui/
-- **Branch / PR**: feat/task-056-active-window-settings-ui · **draft PR #43** — https://github.com/kaikkone4/vire/pull/43
-  - Branch rebased clean onto `main` (base 6eaffc8); diff now = the 16 TASK-056 files + this session's doc
-    fixes (`README.md`, `docs/active-window-capture.md`, `tasks.md`, `docs.md`, this handoff) — **not yet
-    committed**, see below.
-- **Phase / gate**: SW-4 Code Review **PASS** + SW-5 Security **PASS** + **Documentation gate: docs updated,
-  no blockers** (see `docs.md`) → **ready for SW-6 Release Manager**
+- **Branch / PR**: feat/task-056-active-window-settings-ui · **PR #43 — ready for review (promoted from
+  draft this gate)** — https://github.com/kaikkone4/vire/pull/43
+  - Diff = the 16 original TASK-056 files + 4 doc/gate files committed this gate (`README.md`,
+    `docs/active-window-capture.md`, `qa.md`, `review.md`, `sec.md`, `docs.md` — plus `tasks.md`/
+    `handoff.md` updates), all in commit `97ee6eb`, pushed to origin. 20 files total vs `main`, verified
+    clean (`git diff main...HEAD --name-only`).
+- **Phase / gate**: SW-4 Code Review **PASS** + SW-5 Security **PASS** + Documentation gate **PASS** +
+  **SW-6 Release: PASS** (see `RELEASE.md`) → **release gate complete**
 - **Tier**: L2 (SEC-001/007/012; new IPC + truthful transparency copy)
 
 ## Last gate result
-**Documentation gate** (this session, see `docs.md`): verified default-OFF/macOS-only/no-titles claims,
+**SW-6 Release** (this session, see `RELEASE.md`): committed the Documentation gate's uncommitted doc
+fixes plus the SW-3/4/5 gate artifacts (`qa.md`, `review.md`, `sec.md`, `docs.md`) that existed
+untracked on the branch — commit `97ee6eb`, pushed. Wrote `RELEASE.md` with all three required
+declarations: **Deployment size = MINOR** (new additive Settings UI + 2 new IPC commands, no breaking
+change, no version-file bump in this PR — consistent with the project's pattern of separating feature
+merges from dedicated version-bump/publish tasks); **Rollback = partial-automated** (`git revert` of the
+merge commit, PR review cycle required, no schema/data cleanup needed since capture defaults OFF);
+**Component compatibility matrix** = unchanged from the `0.8.1` baseline (zero lockfile diff; Tauri
+2.2/`tauri` 2.11.2, Rust edition 2021, macOS 10.13+, `@tauri-apps/*` `^2.2.0`), plus the two new internal
+IPC commands documented as bundled-artifact (no independent frontend/backend version skew possible).
+Attempted the signed task-scoped tag `task-056/v0.8.1` — **blocked by SSH key passphrase** (non-
+interactive session), same failure mode as `task-053`/`task-054` precedent; no unsigned fallback tag
+created (confirmed no dangling tag object). Recorded **non-blocking**, per role policy — see
+`RELEASE.md` §Tag status for the exact command for Janne to run locally. **PR #43 promoted from draft
+to ready-for-review** this gate.
+
+Prior gate — **Documentation gate** (see `docs.md`): verified default-OFF/macOS-only/no-titles claims,
 status fields, and validation bounds are accurate against the shipped code. Fixed three stale/incomplete
 spots: `README.md`'s top summary line still said "no in-app UI in this release" (false — TASK-056 ships
 the Settings panel); `README.md` manual-verification step 2 asserted the literal *removed* sidebar string
@@ -35,7 +53,10 @@ fully covered — no gaps.
 ## Active blockers
 - **None.** (DEC-044 + FB-002 realization → ba-architect / arch-review.md remains non-blocking,
   unaffected.)
-- **Non-blocking**: this session's doc fixes are uncommitted — see note above.
+- **Non-blocking**: signed tag `task-056/v0.8.1` deferred — SSH key passphrase unavailable in this
+  non-interactive session (see `RELEASE.md` §Tag status for the command to run locally).
+- **Non-blocking**: physical-Mac smoke (`tasks.md` §Smoke; `README.md` steps 26–30) still not run in
+  any session to date — carried forward as human/UAT.
 
 ## SW-5 security result
 SW-5 **PASS**. Security artifact: `sec.md`.
@@ -68,12 +89,14 @@ SW-4 **PASS**. Review artifact: `review.md`.
   schema, dependency, capability, `tauri.conf.json`, or CSP change.
 
 ## Exact next action
-1. **Release Manager (SW-6)**: commit this session's doc fixes (`README.md`,
-   `docs/active-window-capture.md`, `openspec/changes/task-056-active-window-settings-ui/{tasks.md,docs.md,handoff.md}`)
-   alongside/before the release, then proceed with the release bundle.
-2. **Physical-Mac smoke** (tasks.md §Smoke; also now `README.md` §"Active-window capture Settings UI
-   (TASK-056)" steps 26–30) — still the mandated testable route; not yet run (no physical Mac in this
-   session) — carry forward as human/UAT, does not block SW-4/SW-5/docs gate.
+1. **Janne**: merge PR #43 (now ready-for-review) when convenient; then run the signed-tag command in
+   `RELEASE.md` §Tag status (`git tag -s task-056/v0.8.1 ...` on `97ee6eb`, then `git push origin
+   task-056/v0.8.1`).
+2. **Physical-Mac smoke** (tasks.md §Smoke; also `README.md` §"Active-window capture Settings UI
+   (TASK-056)" steps 26–30) — still the mandated testable route; not yet run (no physical Mac in any
+   session) — carry forward as human/UAT, does not block this release gate.
+3. **Future version-bump task** (pattern: TASK-049/052): roll this merge into the next published
+   `0.9.0` GitHub Release when ready.
 
 _This session (SW-3 re-gate): re-ran `cargo test --lib` (259 passed), `cargo test --lib active_window`
 (66 passed), `cargo fmt --check` (clean), `npm run build` (clean), `npm run test:frontend` (146/148,
