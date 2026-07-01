@@ -71,11 +71,31 @@ Building from source (below) is the alternative for developers, not the primary 
 2. Double-click the downloaded `.dmg` to mount it, then drag **only `Vire.app`** onto the
    `Applications` shortcut in the DMG window. Drag just the app — do **not** Select-All (⌘A) and
    drag the whole window (see the [drag-only note](#install-and-run) below for why).
-3. **First launch — the app is not code-signed or notarized.** macOS Gatekeeper will block a
-   double-click on first open. Instead, **right-click (or Control-click) `Vire.app` in
-   `/Applications` → Open**, then confirm **Open** in the dialog. This is only needed once; after
-   that the app launches normally. (Alternatively: *System Settings → Privacy & Security → Open
-   Anyway*.) Do not disable Gatekeeper or strip quarantine to work around this.
+3. **First launch — the app is not code-signed or notarized.** Try to open the installed app the
+   normal way first: double-click `Vire.app` in `/Applications`.
+
+   Because this build is unsigned **and** it was downloaded through a web browser (so macOS tags it
+   with the `com.apple.quarantine` attribute), Apple Silicon's Gatekeeper will most likely block that
+   first open with **"Vire is damaged and can't be opened. Move it to the Trash."** The app is **not**
+   actually damaged — this is Gatekeeper's policy verdict for an unsigned, quarantined app on Apple
+   Silicon, not file corruption. Note that **right-click → Open does _not_ clear this particular
+   dialog** (that gesture only bypasses the different *"unidentified developer"* warning).
+
+   **If you hit the "damaged" dialog, the one-time fix** is to strip the download-quarantine attribute,
+   then open the app again:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/Vire.app
+   ```
+
+   After this the app launches normally on every subsequent open.
+
+   > **Security caveat.** Stripping the quarantine attribute bypasses a Gatekeeper safety check *because
+   > Vire is not code-signed or notarized*. Only run this if you downloaded the DMG from the official
+   > [Vire releases page](https://github.com/kaikkone4/vire/releases) and trust it. A properly signed
+   > **and** notarized build — which opens on a normal double-click with no workaround — is tracked as
+   > **TASK-028** and is the real fix; this quarantine-removal step is the interim path for the current
+   > unsigned build.
 4. **No dev server is required at runtime** — the packaged app serves its frontend from inside the
    `.app`. Configure Langfuse from **Settings → AI evidence import** (see the packaged-app notes
    below).
