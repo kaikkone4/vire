@@ -195,3 +195,22 @@ export function captureBanner(view: CaptureSettingsView | null): string {
   }
   return `<section class="banner"><b>Active-window capture is on</b><p>The frontmost app and a coarse idle state are recorded locally on this Mac. Window titles, screenshots, keystrokes, URLs, and screen content are never captured. Manage it in Settings.</p></section>`;
 }
+
+// The always-visible left-sidebar capture status line (TASK-056). Replaces the hard-coded
+// "Manual Mode / Capture deferred — No automatic activity capture runs in v0.1" box, which asserted
+// on EVERY view that no capture runs and therefore contradicted the enabled state the Settings panel
+// this task ships lets a user reach. Driven by the same real setting as the banner/panel, so no view
+// ever carries an unconditional capture denial. `null` (setting not loaded / read failed) is a
+// neutral "see Settings" pointer, never a false claim either way.
+export function sidebarCaptureStatus(view: CaptureSettingsView | null): string {
+  if (view == null) {
+    return `<b>Active-window capture</b><p>Open Settings for capture status.</p>`;
+  }
+  if (!view.platform_supported) {
+    return `<b>Active-window capture</b><p>Available on macOS only.</p>`;
+  }
+  if (!view.capture_enabled) {
+    return `<b>Active-window capture: off</b><p>No active-window or idle data is being collected. Enable it in Settings.</p>`;
+  }
+  return `<b>Active-window capture: on</b><p>The frontmost app and a coarse idle state are recorded locally on this Mac.</p>`;
+}

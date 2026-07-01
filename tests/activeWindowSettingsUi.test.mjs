@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   CAPTURE_BOUNDS,
   validateCaptureInput,
@@ -8,6 +9,7 @@ import {
   privacyTable,
   capturePanel,
   captureBanner,
+  sidebarCaptureStatus,
 } from '../src/active-window-settings-ui.ts';
 
 // A valid baseline view (macOS, capture on, one healthy sample) reused across panel/status tests.
@@ -222,4 +224,52 @@ test('banner: non-macOS says macOS-only', () => {
 test('banner: null view is an explicit "unavailable", never a false claim', () => {
   const html = captureBanner(null);
   assert.match(html, /unavailable/);
+});
+
+// ---- always-visible sidebar status (TASK-056 SW-3 fix) -------------------------------------------
+// The left-sidebar status box renders on EVERY view. It must be driven by the real setting so it can
+// never assert "no automatic activity capture runs" once this task ships an enable toggle.
+
+const STALE_SIDEBAR_COPY = /Capture deferred|No automatic activity capture runs/i;
+
+test('sidebar: when capture is ON it says on and never denies capture', () => {
+  const html = sidebarCaptureStatus(view({ capture_enabled: true }));
+  assert.match(html, /Active-window capture: on/);
+  assert.match(html, /recorded locally/i);
+  assert.ok(!STALE_SIDEBAR_COPY.test(html));
+});
+
+test('sidebar: when OFF it says nothing is collected and can be enabled', () => {
+  const html = sidebarCaptureStatus(view({ capture_enabled: false }));
+  assert.match(html, /off/);
+  assert.match(html, /Enable it in Settings/i);
+});
+
+test('sidebar: non-macOS says macOS only', () => {
+  assert.match(sidebarCaptureStatus(view({ platform_supported: false })), /macOS only/);
+});
+
+test('sidebar: null view is a neutral Settings pointer, never a false denial', () => {
+  const html = sidebarCaptureStatus(null);
+  assert.match(html, /Active-window capture/);
+  assert.ok(!STALE_SIDEBAR_COPY.test(html));
+});
+
+test('sidebar: the stale unconditional capture-denial copy is gone in every state (regression guard)', () => {
+  for (const v of [
+    null,
+    view({ capture_enabled: true }),
+    view({ capture_enabled: false }),
+    view({ platform_supported: false }),
+  ]) {
+    assert.ok(!STALE_SIDEBAR_COPY.test(sidebarCaptureStatus(v)), 'stale capture-denial copy must not regress');
+  }
+});
+
+test('regression: main.ts shell() drives the sidebar box from captureView, not the stale literal', () => {
+  const mainSrc = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  // The unique rendered denial phrase — appears in no code comment, so a match means the stale
+  // always-on sidebar copy has regressed into markup.
+  assert.ok(!/No automatic activity capture runs/i.test(mainSrc), 'stale sidebar capture-denial copy must not exist in main.ts');
+  assert.match(mainSrc, /class="status">\$\{sidebarCaptureStatus\(captureView\)\}/, 'sidebar status must be driven by captureView');
 });

@@ -12,7 +12,7 @@ import { summaryCards } from './summary-cards';
 import { nextScrollTop } from './scroll';
 import { REPORT_RANGE_PRESETS, reportRange } from './report-ranges';
 import { type UpdateCheckResult, updateCheckPanel } from './update-check-ui';
-import { type CaptureSettingsInput, type CaptureSettingsView, capturePanel, captureBanner, validateCaptureInput } from './active-window-settings-ui';
+import { type CaptureSettingsInput, type CaptureSettingsView, capturePanel, captureBanner, sidebarCaptureStatus, validateCaptureInput } from './active-window-settings-ui';
 
 type View='Today'|'Projects'|'Manual Entry'|'Reports'|'Suggestions'|'Settings';
 type Project={id:string;name:string;notes?:string|null;archived:boolean};
@@ -55,7 +55,7 @@ async function call<T>(cmd:string,args:any={}):Promise<T>{try{return await invok
 async function load(){projects=await call('list_projects',{includeArchived:false}); allProjects=await call('list_projects',{includeArchived:true}); try{sourceHealth=await call<SourceHealth>('get_langfuse_source_health');}catch{sourceHealth=null;}}
 function sourceBanner(){if(!sourceHealth||!degradedHealth.includes(sourceHealth.health))return ''; return `<section class="banner danger-banner"><b>AI evidence source: ${esc(sourceHealth.health)}</b><p>${esc(sourceHealth.message)}</p></section>`;}
 async function loadRange(start=today(),end=today(),pid?:string){entries=await call('list_time_entries',{startDate:start,endDate:end,projectId:pid||null}); summaries=await call('get_summary',{startDate:start,endDate:end,projectId:pid||null});}
-function shell(content:string){const prevScroll=app.querySelector('main')?.scrollTop??0;const sameView=lastRenderedView===current;app.innerHTML=`<div class="window">${titlebar('Vire','v0.1 local')}<div class="shell"><aside><div class="brand"><div class="mark">V</div><div><strong>Vire</strong><small>Manual Mode</small></div></div><nav>${views.map(v=>`<button class="nav ${v===current?'active':''}" data-view="${esc(v)}">${esc(v)}</button>`).join('')}</nav><div class="status"><b>Manual Mode / Capture deferred</b><p>No automatic activity capture runs in v0.1.</p></div></aside><main>${content}</main></div></div>`;const m=app.querySelector('main');if(m)m.scrollTop=nextScrollTop(sameView,prevScroll);lastRenderedView=current;document.querySelectorAll<HTMLButtonElement>('.nav').forEach(b=>b.onclick=()=>{current=b.dataset.view as View;rerender();});}
+function shell(content:string){const prevScroll=app.querySelector('main')?.scrollTop??0;const sameView=lastRenderedView===current;app.innerHTML=`<div class="window">${titlebar('Vire','v0.1 local')}<div class="shell"><aside><div class="brand"><div class="mark">V</div><div><strong>Vire</strong><small>Manual Mode</small></div></div><nav>${views.map(v=>`<button class="nav ${v===current?'active':''}" data-view="${esc(v)}">${esc(v)}</button>`).join('')}</nav><div class="status">${sidebarCaptureStatus(captureView)}</div></aside><main>${content}</main></div></div>`;const m=app.querySelector('main');if(m)m.scrollTop=nextScrollTop(sameView,prevScroll);lastRenderedView=current;document.querySelectorAll<HTMLButtonElement>('.nav').forEach(b=>b.onclick=()=>{current=b.dataset.view as View;rerender();});}
 async function loadCaptureView(){try{captureView=await call<CaptureSettingsView>('get_active_window_capture_settings');}catch{captureView=null;}}
 // Truthful capture banner driven by the real setting (TASK-056). Replaces the hard-coded v0.1
 // "capture deferred" string so the app never asserts something false once capture is enabled (FB-002).
