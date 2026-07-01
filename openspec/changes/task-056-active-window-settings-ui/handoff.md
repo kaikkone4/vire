@@ -1,7 +1,9 @@
 # Handoff — TASK-056 active-window capture Settings + privacy/status UI
 
 - **Change dir**: openspec/changes/task-056-active-window-settings-ui/
-- **Branch / PR**: feat/task-056-active-window-settings-ui · PR #— (not yet opened — see next action)
+- **Branch / PR**: feat/task-056-active-window-settings-ui · **draft PR #43** — https://github.com/kaikkone4/vire/pull/43
+  - Branch rebased clean onto `main` (base 6eaffc8); diff = only the 16 TASK-056 files. The 5 inherited
+    TASK-053/054 release commits were dropped. Single impl commit (byte-identical to original) + this handoff commit.
 - **Phase / gate**: SW-2 A+B+C+D DONE → ready for **SW-3 QA gate**
 - **Tier**: L2 (SEC-001/007/012; new IPC + truthful transparency copy)
 
@@ -16,10 +18,10 @@ SW-2 C+D frontend (this session): `npm run build` (tsc+vite) green; new suite 25
 
 ## Exact next action
 1. **SW-3 QA gate** (sw-qa-engineer) over the whole SW-2 change.
-2. **PR is NOT yet open** — deferred by design. Branch inherits 5 task-053/054 release commits; per the
-   original handoff it must be **rebased onto main** before the full-task PR opens. That rebase +
-   `gh pr create --draft` is an outward-facing step left for Pi-Assistant to authorize/route.
-3. **Physical-Mac smoke** (tasks.md §Smoke) — the mandated testable route; run on the target Mac.
+2. **Physical-Mac smoke** (tasks.md §Smoke) — the mandated testable route; run on the target Mac.
+
+_Branch hygiene DONE (this session): rebased clean onto main + draft PR #43 opened. `test:frontend`
+re-run post-rebase = 142 tests, 140 pass, 2 fail (both pre-existing unrelated `pi-observe.security`)._
 
 ## What SW-2 C+D shipped (this session)
 - **C (frontend)** `src/active-window-settings-ui.ts` (NEW, pure builders): `capturePanel`,
