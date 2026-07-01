@@ -86,5 +86,3 @@ sha256 in `RELEASE.md` is unchanged.
 - **FB-054-1** (arch-review): BA to promote Developer ID signing + notarization (**TASK-028**) from
   deferred to required for user-facing releases, or formally accept the unsigned + quarantine-removal
   posture as the interim contract. Plan B is the honest interim; Plan A/TASK-028 remains the real fix.
-</content>
-</invoke>
