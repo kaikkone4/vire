@@ -34,8 +34,9 @@ sample-interval, idle-candidate, away, and retention knobs, plus a live capture 
 and the privacy table above. The panel reads and writes the same `settings` keys via the
 `get_active_window_capture_settings` / `set_active_window_capture_settings` IPC commands, so a change
 takes effect on the loop's next tick — no app restart. Inputs are validated to safe bounds
-(`sample_seconds ∈ [1,3600]`, `idle_candidate_seconds ≥ 1`, `idle_away_seconds > idle_candidate_seconds`,
-`retention_days ∈ [1,3650]`) and rejected with a clear message rather than silently clamped. Capture
+(`sample_seconds ∈ [1,3600]`, `idle_candidate_seconds ∈ [1,86400]`, `idle_away_seconds` greater than
+`idle_candidate_seconds` and ≤ `86400`, `retention_days ∈ [1,3650]`) and rejected with a clear message
+rather than silently clamped. Capture
 stays **OFF by default**; the UI never enables it without an explicit toggle. `title_mode` is shown
 read-only as *never captured* and is **not** user-togglable — storing window titles requires an
 Accessibility grant that this surface does not request.

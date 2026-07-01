@@ -7,29 +7,29 @@ schema change.** Check off as you go.
 
 ## A. Settings read/write IPC (backend)
 
-- [ ] Add `get_active_window_capture_settings(state) -> CmdResult<CaptureSettingsView>` in `lib.rs`:
+- [x] Add `get_active_window_capture_settings(state) -> CmdResult<CaptureSettingsView>` in `lib.rs`:
       resolve `active_window::config::CaptureConfig::from_settings(conn)` into the view; set
       `platform_supported = cfg!(target_os = "macos")` and `title_mode = "redacted"` (informational).
-- [ ] Add `set_active_window_capture_settings(state, input: CaptureSettingsInput) -> CmdResult<CaptureSettingsView>`:
+- [x] Add `set_active_window_capture_settings(state, input: CaptureSettingsInput) -> CmdResult<CaptureSettingsView>`:
       **validate** (design §1 bounds: `sample_seconds ∈ [1,3600]`, `idle_candidate_seconds ≥ 1`,
       `idle_away_seconds > idle_candidate_seconds`, `retention_days ∈ [1,3650]`) then upsert the five
       `settings` keys in one transaction via `INSERT … ON CONFLICT(key) DO UPDATE`; re-resolve + return the
       fresh view. Do **not** accept or write `title_mode`.
-- [ ] Register both commands in `generate_handler!` (`lib.rs:1205`). Optionally house the DTOs + validation
+- [x] Register both commands in `generate_handler!` (`lib.rs:1205`). Optionally house the DTOs + validation
       in a new `src-tauri/src/active_window/settings_api.rs` (declare `pub mod settings_api;` in
       `active_window/mod.rs`) to keep `lib.rs` tidy — no behavior change either way.
-- [ ] Tests: reject 0-interval, non-ordered away/idle, 0 retention, out-of-range → clear error, no row
+- [x] Tests: reject 0-interval, non-ordered away/idle, 0 retention, out-of-range → clear error, no row
       changed; valid `set` writes exactly the five keys and `get`/`CaptureConfig::from_settings` resolve
       them; enable→disable round-trips; `title_mode` untouched by `set`.
 
 ## B. Capture status / health projection (backend, read-only)
 
-- [ ] Add `active_window::store::capture_status_snapshot(conn, now_day, retention_from_day) -> CaptureStatusView`
+- [x] Add `active_window::store::capture_status_snapshot(conn, now_day, retention_from_day) -> CaptureStatusView`
       (design §2): `MAX(sample_ts)`, `samples_today` (raw WHERE day), `evidence_blocks_retained`
       (evidence WHERE day ≥ retention_from), `open_health` (`capture_health` WHERE `end_ts IS NULL`),
       `recent_health` (last N). Read-only; **no schema change, no write path, redaction gate untouched.**
-- [ ] Wire the snapshot into `get_active_window_capture_settings` (`status` field).
-- [ ] Tests: seeded fixture → correct counts / open-vs-recent health / last-sample; empty DB → zeros +
+- [x] Wire the snapshot into `get_active_window_capture_settings` (`status` field).
+- [x] Tests: seeded fixture → correct counts / open-vs-recent health / last-sample; empty DB → zeros +
       `None` last sample (not an error); structural check still holds (no prohibited column read/returned).
 
 ## C. Settings panel + truthful copy (frontend)
