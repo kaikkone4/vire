@@ -8,10 +8,11 @@ Vire can optionally sample the frontmost macOS application and a coarse idle sta
 
 | What is captured | What is never captured |
 |---|---|
-| Frontmost app bundle ID (e.g. `com.apple.Terminal`) | Window titles |
-| Coarse idle state (`active` / `idle_candidate` / `away`) | Accessibility tree, screen content |
+| Frontmost app bundle ID + display name (e.g. `com.apple.Terminal` / `Terminal`) | Window titles |
+| Coarse idle state (`active` / `idle_candidate` / `away`) | Accessibility tree, screen pixels |
 | Observation timestamp | Keystrokes, mouse content, clipboard |
-| | Prompts, command bodies, URLs, file paths |
+| | URLs, file paths, terminal command bodies |
+| | Prompts / responses, secrets |
 
 Evidence rows always carry `window_title = NULL` and `title_state = absent_no_permission`. This is a code-layer invariant — no path in this release writes a window title.
 
@@ -28,7 +29,16 @@ export VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED=1
 npm run tauri:dev
 ```
 
-In-app UI controls and toggle are not yet available — they are planned for a future task.
+In-app controls (TASK-056): **Settings → Active-window capture** provides the enable toggle and the
+sample-interval, idle-candidate, away, and retention knobs, plus a live capture status/health readout
+and the privacy table above. The panel reads and writes the same `settings` keys via the
+`get_active_window_capture_settings` / `set_active_window_capture_settings` IPC commands, so a change
+takes effect on the loop's next tick — no app restart. Inputs are validated to safe bounds
+(`sample_seconds ∈ [1,3600]`, `idle_candidate_seconds ≥ 1`, `idle_away_seconds > idle_candidate_seconds`,
+`retention_days ∈ [1,3650]`) and rejected with a clear message rather than silently clamped. Capture
+stays **OFF by default**; the UI never enables it without an explicit toggle. `title_mode` is shown
+read-only as *never captured* and is **not** user-togglable — storing window titles requires an
+Accessibility grant that this surface does not request.
 
 ## Configuration
 
@@ -67,7 +77,5 @@ These tables carry `window_title` and `title_state` columns (TASK-046 schema), b
 
 ## Not yet available
 
-- In-app UI controls and capture status display
-- IPC commands to read capture state from the frontend
-- Window title capture (requires Screen Recording opt-in; planned)
+- Window title capture (requires an Accessibility grant; planned)
 - Accessibility-based metadata (requires AX permission; planned)

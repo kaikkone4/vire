@@ -3,7 +3,7 @@
 
 use std::sync::Mutex;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::json;
 
 use super::config;
@@ -11,6 +11,7 @@ use super::model::{
     health_state, idle_state, source, title_state, CaptureHealthEvent, EvidenceBlock,
     RawObservation, RawObservationIn, TitleMode,
 };
+use super::settings_api::{self, CaptureSettingsInput};
 use super::store;
 
 // Serializes all tests that read or write process environment variables so that concurrent
@@ -48,6 +49,54 @@ fn conn() -> Connection {
     let c = Connection::open_in_memory().unwrap();
     crate::init_db(&c).unwrap();
     c
+}
+
+/// Clear every capture-related env var (restored on drop) so a resolve/default test is a pure
+/// function of the `settings` rows. Caller must also hold `ENV_LOCK`.
+fn remove_capture_env() -> Vec<EnvGuard> {
+    vec![
+        EnvGuard::remove("VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED"),
+        EnvGuard::remove("VIRE_ACTIVE_WINDOW_SAMPLE_SECONDS"),
+        EnvGuard::remove("VIRE_ACTIVE_WINDOW_IDLE_CANDIDATE_SECONDS"),
+        EnvGuard::remove("VIRE_ACTIVE_WINDOW_IDLE_AWAY_SECONDS"),
+        EnvGuard::remove("VIRE_ACTIVE_WINDOW_RETENTION_DAYS"),
+        EnvGuard::remove("VIRE_ACTIVE_WINDOW_TITLE_MODE"),
+    ]
+}
+
+fn setting_value(c: &Connection, key: &str) -> Option<String> {
+    c.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+        r.get::<_, String>(0)
+    })
+    .optional()
+    .unwrap()
+}
+
+fn health_event(
+    day: &str,
+    start_ts: &str,
+    end_ts: Option<&str>,
+    state: &str,
+    detail: Option<&str>,
+) -> CaptureHealthEvent {
+    CaptureHealthEvent {
+        day: day.into(),
+        start_ts: start_ts.into(),
+        end_ts: end_ts.map(Into::into),
+        state: state.into(),
+        detail: detail.map(Into::into),
+        source: source::NSWORKSPACE.into(),
+    }
+}
+
+fn valid_input() -> CaptureSettingsInput {
+    CaptureSettingsInput {
+        capture_enabled: true,
+        sample_seconds: 10,
+        idle_candidate_seconds: 60,
+        idle_away_seconds: 300,
+        retention_days: 30,
+    }
 }
 
 fn raw_obs(sample_ts: &str, day: &str, title: Option<&str>) -> RawObservation {
@@ -1195,5 +1244,359 @@ fn write_path_does_not_persist_title_under_redacted_mode() {
     assert!(
         stored.is_none(),
         "title must not reach the store under redacted mode; also never reaches a log"
+    );
+}
+
+// ----- TASK-056 B: capture_status_snapshot (read-only status/health projection) ----------------
+
+#[test]
+fn status_snapshot_empty_db_is_zero_counts_and_none() {
+    let c = conn();
+    let snap = store::capture_status_snapshot(&c, "2026-06-21", "2026-05-22").unwrap();
+    assert!(snap.last_sample_ts.is_none(), "empty DB has no last sample");
+    assert_eq!(snap.samples_today, 0);
+    assert_eq!(snap.evidence_blocks_retained, 0);
+    assert!(snap.open_health.is_empty());
+    assert!(snap.recent_health.is_empty());
+}
+
+#[test]
+fn status_snapshot_counts_samples_today_and_reports_max_sample_ts() {
+    let c = conn();
+    for ts in ["2026-06-21 09:00:00", "2026-06-21 09:05:00"] {
+        store::insert_raw_observation(
+            &c,
+            &raw_obs(ts, "2026-06-21", None),
+            TitleMode::Redacted,
+            ts,
+        )
+        .unwrap();
+    }
+    let earlier = "2026-06-20 09:00:00";
+    store::insert_raw_observation(
+        &c,
+        &raw_obs(earlier, "2026-06-20", None),
+        TitleMode::Redacted,
+        earlier,
+    )
+    .unwrap();
+
+    let snap = store::capture_status_snapshot(&c, "2026-06-21", "2026-05-22").unwrap();
+    assert_eq!(snap.samples_today, 2, "only today's raw rows count");
+    assert_eq!(
+        snap.last_sample_ts.as_deref(),
+        Some("2026-06-21 09:05:00"),
+        "last_sample_ts is MAX(sample_ts) across all days"
+    );
+}
+
+#[test]
+fn status_snapshot_counts_only_evidence_within_retention_window() {
+    let c = conn();
+    store::upsert_evidence_block(
+        &c,
+        &evidence_block("in-1", "2026-06-21", None),
+        TitleMode::Redacted,
+        "2026-06-21 09:30:00",
+    )
+    .unwrap();
+    store::upsert_evidence_block(
+        &c,
+        &evidence_block("in-2", "2026-05-22", None),
+        TitleMode::Redacted,
+        "2026-05-22 09:30:00",
+    )
+    .unwrap();
+    store::upsert_evidence_block(
+        &c,
+        &evidence_block("out-1", "2026-04-01", None),
+        TitleMode::Redacted,
+        "2026-04-01 09:30:00",
+    )
+    .unwrap();
+
+    let snap = store::capture_status_snapshot(&c, "2026-06-21", "2026-05-22").unwrap();
+    assert_eq!(
+        snap.evidence_blocks_retained, 2,
+        "only blocks with day >= retention_from_day count (boundary day is inclusive)"
+    );
+}
+
+#[test]
+fn status_snapshot_separates_open_and_recent_health() {
+    let c = conn();
+    store::record_capture_health(
+        &c,
+        &health_event(
+            "2026-06-21",
+            "2026-06-21 14:02:00",
+            None,
+            health_state::NO_GUI_SESSION,
+            Some("code=1"),
+        ),
+        "2026-06-21 14:02:00",
+    )
+    .unwrap();
+    store::record_capture_health(
+        &c,
+        &health_event(
+            "2026-06-21",
+            "2026-06-21 10:00:00",
+            Some("2026-06-21 10:01:00"),
+            health_state::SAMPLING_GAP,
+            None,
+        ),
+        "2026-06-21 10:00:00",
+    )
+    .unwrap();
+
+    let snap = store::capture_status_snapshot(&c, "2026-06-21", "2026-05-22").unwrap();
+    assert_eq!(
+        snap.open_health.len(),
+        1,
+        "only end_ts IS NULL rows are open"
+    );
+    assert_eq!(snap.open_health[0].state, health_state::NO_GUI_SESSION);
+    assert_eq!(snap.open_health[0].since_or_start_ts, "2026-06-21 14:02:00");
+    assert_eq!(snap.open_health[0].detail.as_deref(), Some("code=1"));
+    assert_eq!(
+        snap.recent_health.len(),
+        2,
+        "recent_health includes both open and closed markers"
+    );
+    assert_eq!(
+        snap.recent_health[0].state,
+        health_state::NO_GUI_SESSION,
+        "recent_health is newest-first"
+    );
+}
+
+#[test]
+fn status_snapshot_recent_health_is_bounded_and_newest_first() {
+    let c = conn();
+    for i in 0..(store::RECENT_HEALTH_LIMIT + 5) {
+        let ts = format!("2026-06-21 10:{i:02}:00");
+        store::record_capture_health(
+            &c,
+            &health_event(
+                "2026-06-21",
+                &ts,
+                Some(&ts),
+                health_state::SAMPLING_GAP,
+                None,
+            ),
+            &ts,
+        )
+        .unwrap();
+    }
+    let snap = store::capture_status_snapshot(&c, "2026-06-21", "2026-05-22").unwrap();
+    assert_eq!(
+        snap.recent_health.len() as i64,
+        store::RECENT_HEALTH_LIMIT,
+        "recent_health is capped at RECENT_HEALTH_LIMIT"
+    );
+    assert!(
+        snap.recent_health[0].since_or_start_ts > snap.recent_health[1].since_or_start_ts,
+        "recent_health is ordered newest-first"
+    );
+}
+
+// ----- TASK-056 A: settings_api (validated read/write seam) ------------------------------------
+
+#[test]
+fn settings_api_rejects_zero_sample_seconds() {
+    let c = conn();
+    let mut input = valid_input();
+    input.sample_seconds = 0;
+    let err = settings_api::apply(&c, &input, "2026-06-21 09:00:00").unwrap_err();
+    assert!(
+        err.to_lowercase().contains("sample interval"),
+        "clear error mentioning the field: {err}"
+    );
+    assert!(
+        setting_value(&c, "active_window_sample_seconds").is_none(),
+        "a rejected write persists no row"
+    );
+}
+
+#[test]
+fn settings_api_rejects_away_not_greater_than_idle_candidate() {
+    let c = conn();
+    let mut input = valid_input();
+    input.idle_candidate_seconds = 300;
+    input.idle_away_seconds = 300; // not strictly greater — the ordering invariant is violated
+    let err = settings_api::apply(&c, &input, "2026-06-21 09:00:00").unwrap_err();
+    assert!(
+        err.to_lowercase().contains("away"),
+        "clear ordering error: {err}"
+    );
+    assert!(setting_value(&c, "active_window_idle_away_seconds").is_none());
+}
+
+#[test]
+fn settings_api_rejects_zero_retention() {
+    let c = conn();
+    let mut input = valid_input();
+    input.retention_days = 0;
+    let err = settings_api::apply(&c, &input, "2026-06-21 09:00:00").unwrap_err();
+    assert!(
+        err.to_lowercase().contains("retention"),
+        "clear error: {err}"
+    );
+    assert!(setting_value(&c, "active_window_retention_days").is_none());
+}
+
+#[test]
+fn settings_api_rejects_out_of_range_values() {
+    let c = conn();
+    for mutate in [
+        |i: &mut CaptureSettingsInput| i.sample_seconds = 3601,
+        |i: &mut CaptureSettingsInput| i.idle_candidate_seconds = 86_401,
+        |i: &mut CaptureSettingsInput| i.idle_away_seconds = 86_401,
+        |i: &mut CaptureSettingsInput| i.retention_days = 3651,
+    ] {
+        let mut input = valid_input();
+        mutate(&mut input);
+        assert!(
+            settings_api::apply(&c, &input, "2026-06-21 09:00:00").is_err(),
+            "out-of-range value must be rejected"
+        );
+    }
+    // Nothing persisted by any rejected write.
+    assert!(setting_value(&c, "active_window_sample_seconds").is_none());
+}
+
+#[test]
+fn settings_api_rejected_write_leaves_prior_config_unchanged() {
+    let c = conn();
+    settings_api::apply(&c, &valid_input(), "2026-06-21 09:00:00").unwrap();
+    let before = setting_value(&c, "active_window_sample_seconds");
+    let mut bad = valid_input();
+    bad.sample_seconds = 0;
+    assert!(settings_api::apply(&c, &bad, "2026-06-21 09:00:00").is_err());
+    assert_eq!(
+        setting_value(&c, "active_window_sample_seconds"),
+        before,
+        "a rejected write changes no already-persisted row"
+    );
+}
+
+#[test]
+fn settings_api_valid_set_writes_five_keys_and_resolves() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env = remove_capture_env();
+    let c = conn();
+    let input = CaptureSettingsInput {
+        capture_enabled: true,
+        sample_seconds: 12,
+        idle_candidate_seconds: 45,
+        idle_away_seconds: 240,
+        retention_days: 14,
+    };
+    let view = settings_api::apply(&c, &input, "2026-06-21 09:00:00").unwrap();
+
+    assert_eq!(
+        setting_value(&c, "active_window_capture_enabled").as_deref(),
+        Some("true")
+    );
+    assert_eq!(
+        setting_value(&c, "active_window_sample_seconds").as_deref(),
+        Some("12")
+    );
+    assert_eq!(
+        setting_value(&c, "active_window_idle_candidate_seconds").as_deref(),
+        Some("45")
+    );
+    assert_eq!(
+        setting_value(&c, "active_window_idle_away_seconds").as_deref(),
+        Some("240")
+    );
+    assert_eq!(
+        setting_value(&c, "active_window_retention_days").as_deref(),
+        Some("14")
+    );
+
+    assert!(view.capture_enabled);
+    assert_eq!(view.sample_seconds, 12);
+    assert_eq!(view.idle_candidate_seconds, 45);
+    assert_eq!(view.idle_away_seconds, 240);
+    assert_eq!(view.retention_days, 14);
+
+    // The capture loop's own resolver sees exactly the same values.
+    let cfg = config::CaptureConfig::from_settings(&c).unwrap();
+    assert!(cfg.capture_enabled);
+    assert_eq!(cfg.sample_seconds, 12);
+    assert_eq!(cfg.idle_candidate_seconds, 45);
+    assert_eq!(cfg.away_seconds, 240);
+    assert_eq!(cfg.retention_days, 14);
+
+    // get() re-resolves identically.
+    let got = settings_api::resolve_view(&c, "2026-06-21 09:00:00").unwrap();
+    assert!(got.capture_enabled);
+    assert_eq!(got.sample_seconds, 12);
+}
+
+#[test]
+fn settings_api_enable_then_disable_round_trips() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env = remove_capture_env();
+    let c = conn();
+    let mut input = valid_input();
+    input.capture_enabled = true;
+    let v1 = settings_api::apply(&c, &input, "2026-06-21 09:00:00").unwrap();
+    assert!(v1.capture_enabled);
+    input.capture_enabled = false;
+    let v2 = settings_api::apply(&c, &input, "2026-06-21 09:00:00").unwrap();
+    assert!(!v2.capture_enabled);
+    assert_eq!(
+        setting_value(&c, "active_window_capture_enabled").as_deref(),
+        Some("false")
+    );
+}
+
+#[test]
+fn settings_api_set_never_writes_title_mode() {
+    let c = conn();
+    let view = settings_api::apply(&c, &valid_input(), "2026-06-21 09:00:00").unwrap();
+    assert!(
+        setting_value(&c, "active_window_title_mode").is_none(),
+        "set must never write title_mode (DEC-044)"
+    );
+    assert_eq!(
+        view.title_mode, "redacted",
+        "the view marker is always the fixed redacted value"
+    );
+}
+
+#[test]
+fn settings_api_default_view_is_capture_off_and_redacted() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env = remove_capture_env();
+    let c = conn();
+    let view = settings_api::resolve_view(&c, "2026-06-21 09:00:00").unwrap();
+    assert!(!view.capture_enabled, "capture defaults OFF");
+    assert_eq!(view.title_mode, "redacted");
+    assert_eq!(view.sample_seconds, config::DEFAULT_SAMPLE_SECONDS);
+    assert_eq!(view.retention_days, config::DEFAULT_RETENTION_DAYS);
+    assert_eq!(view.platform_supported, cfg!(target_os = "macos"));
+}
+
+#[test]
+fn settings_api_view_embeds_status_snapshot() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _env = remove_capture_env();
+    let c = conn();
+    store::insert_raw_observation(
+        &c,
+        &raw_obs("2026-06-21 09:00:00", "2026-06-21", None),
+        TitleMode::Redacted,
+        "2026-06-21 09:00:00",
+    )
+    .unwrap();
+    let view = settings_api::resolve_view(&c, "2026-06-21 09:00:00").unwrap();
+    assert_eq!(view.status.samples_today, 1);
+    assert_eq!(
+        view.status.last_sample_ts.as_deref(),
+        Some("2026-06-21 09:00:00")
     );
 }
