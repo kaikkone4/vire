@@ -36,11 +36,23 @@ The recorded sha256 was verified by a download round-trip: the asset was fetched
 
 1. **Asset present & downloadable** — the `v0.8.1` release page lists `Vire_0.8.1_aarch64.dmg`; downloading it yields the sha256 above. ✅ verified (asset uploaded, download round-trip matches).
 2. **Mount + drag** — double-click the DMG to mount, drag **only `Vire.app`** onto the `Applications` shortcut. (Human step — physical Mac.)
-3. **First launch (unsigned Gatekeeper)** — the app is not code-signed/notarized; on first open **right-click `Vire.app` → Open** and confirm. Do not disable Gatekeeper or strip quarantine. (Human step.)
+3. **First launch (unsigned Gatekeeper)** — the app is not code-signed/notarized. A browser-downloaded copy carries `com.apple.quarantine`, so on Apple Silicon Gatekeeper reports **"Vire is damaged and can't be opened"** — a policy verdict, not corruption, and **right-click → Open does not clear it**. Remedy: after copying to `/Applications`, run `xattr -dr com.apple.quarantine /Applications/Vire.app`, then open normally. This bypasses Gatekeeper because the build is unsigned; a signed + notarized build (TASK-028) is the real fix. (Human step. Corrected in TASK-054 — see below.)
 4. **Runs without a dev server** — launch the installed app with no `npm run tauri:dev` / Vite server running; the frontend loads from the bundled assets. (Human step.)
 5. **Check for updates → up to date** — **Settings → Check for updates** returns *up to date* on a `0.8.1` build. The update check reads only the release `tag_name` (asset-independent), so this verifies the version/update wiring end-to-end, not the attached asset. (Human step.)
 
 Steps 2–5 require a physical Mac (outstanding human UAT gate); step 1 is verified in-pipeline.
+
+### Fix the bricked v0.8.1 install path — corrected unsigned first-launch docs (TASK-054)
+
+The v0.8.1 DMG attached in TASK-053 was **not installable via the documented path** on Apple Silicon: a browser-downloaded (quarantined) unsigned app triggers Gatekeeper's **"Vire is damaged and can't be opened"** verdict, and the previously-documented remedy (**right-click → Open**; "do not strip quarantine") does **not** clear that specific dialog. The release was bricked by the docs, not by the binary.
+
+**This change is Plan B (unsigned + honest quarantine-removal docs), docs-only.** No source, schema, IPC, capability, `tauri.conf.json`, signing/notarization, auto-updater, release-feed, or CI change.
+
+- **README / RELEASE first-launch guidance corrected** to the working remedy — `xattr -dr com.apple.quarantine /Applications/Vire.app` — with a security caveat and a pointer to the signed + notarized fix (**TASK-028**) as the real solution. The ineffective right-click → Open and "do not strip quarantine" lines are removed for this failure mode.
+- **The shipped asset is unchanged and already pristine.** A fresh `npm run tauri:build` was verified structurally identical to the shipped `Vire_0.8.1_aarch64.dmg` (`sha256 e77d15cf…`): same ad-hoc/linker-signed `Vire.app` (Identifier `vire-3e8c42af…`, `CFBundleShortVersionString 0.8.1`), same DMG layout (Finder-visible items: `Vire.app` + `Applications`). This confirms the DMG was **not** hand re-packed — the visible `.VolumeIcon.icns` some viewers reported is a standard Tauri dot-file, hidden by Finder's default and shown only with "show all files" enabled; a pristine `tauri:build` cannot flag it invisible without manual re-packing (which is out of spec). **The asset was not re-uploaded and not yanked.**
+- **Verified locally:** the app's Mach-O carries a valid ad-hoc signature (bytes intact — "damaged" is a Gatekeeper quarantine policy, not corruption), and after `xattr -dr com.apple.quarantine` the binary execs (was not signature-killed) → the app opens by the documented path.
+
+The shipped-asset sha256 remains `e77d15cf2066a24ee344ea5ab65787c1551400799b766e8261e1e02e1e82e27f`.
 
 ## v0.8.0 — Zero-permission active-app and idle capture loop (TASK-048)
 
