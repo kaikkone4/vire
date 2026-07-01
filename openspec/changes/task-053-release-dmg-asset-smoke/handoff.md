@@ -3,33 +3,34 @@
 # Handoff — TASK-053 attach v0.8.1 DMG asset + release smoke checklist
 
 - **Change dir**: openspec/changes/task-053-release-dmg-asset-smoke/
-- **Branch / PR**: feat/task-053-release-dmg-asset-smoke / draft PR opened
-- **Phase / gate**: SW-2 dev/ops (DONE) — asset uploaded + docs landed
+- **Branch / PR**: feat/task-053-release-dmg-asset-smoke / PR #41 — **promoted ready-for-review**
+- **Phase / gate**: SW-4 PASS + SW-5 PASS + Docs PASS + **SW-6 Release PASS** (2026-07-01) — ready for Janne merge
 - **Tier**: L2
 
 ## Last gate result
-SW-1 arch-review PASS. SW-2 dev/ops complete (2026-07-01): DMG validated, uploaded to
-Release v0.8.1 (Janne-authorized), download round-trip verified, README + RELEASE.md updated.
+SW-6 Release PASS (see RELEASE.md): 3 declarations recorded (size: patch; rollback: automated;
+compat matrix). Live recheck of qa.md's asset/checksum evidence — no drift. PR #41 → ready.
+
+## Prior evidence
+SW-5/SW-4/SW-3/Docs all PASS — sec.md/review.md/qa.md/docs.md. Asset live, HTTP 200, sha256
+match (`e77d15cf…e82e27f`, 5,787,708 B). Evidence files + new RELEASE.md committed this gate
+(were untracked, not yet in PR #41 diff).
 
 ## Active blockers
-- None. Steps 2–5 of the RELEASE.md smoke checklist (mount/drag/first-launch/dev-server/
-  update-check) are human-only UAT on a physical Mac — outstanding, not a code blocker.
+None blocking merge. Carried forward, non-blocking:
+1. **Signed tag `task-053/v0.8.1` not created** — SSH key passphrase unavailable
+   non-interactively (`git tag -s` failed). No unsigned fallback created. Command for Janne in
+   `RELEASE.md` §Tag status. Same disposition as TASK-045/047/052 (doesn't block merge).
+2. Root RELEASE.md smoke steps 2–5 — human-only UAT, recommended before wide announcement.
 
 ## Exact next action
-Route to sw-qa-engineer (SW-3) to gate the docs/ops change, then sw-release-manager (SW-6)
-for the human smoke checklist. No further ops action required.
-
-## Required files (read these, not the whole tree)
-- this change dir: tasks.md, ops-review not required (single-surface); handoff (this file)
-- README.md — new "## Download & install (prebuilt)" section (README:63) + artifact example bump
-- RELEASE.md — v0.8.1 "DMG asset attached + release smoke checklist (TASK-053)" subsection
+SW-6 complete. Merge PR #41 when ready; Janne can run the deferred tag command + manual smoke
+pass (both in RELEASE.md) at his convenience.
 
 ## Notes carried forward
-- Asset LIVE on Release v0.8.1: Vire_0.8.1_aarch64.dmg, 5,787,708 B, state=uploaded,
-  sha256 e77d15cf2066a24ee344ea5ab65787c1551400799b766e8261e1e02e1e82e27f (download round-trip
-  matched local build byte-for-byte). Embedded CFBundleShortVersionString=0.8.1.
 - Download URL: github.com/kaikkone4/vire/releases/download/v0.8.1/Vire_0.8.1_aarch64.dmg
-- Exclusions honored: no auto-updater, no signing/notarization, no release-feed/CI, aarch64-only,
+- Exclusions honored: no auto-updater/signing/notarization/release-feed/CI; aarch64 only;
   Gatekeeper documented (right-click→Open), never bypassed.
-- Scope note: README "Current version: v0.8.0" header left unchanged (out of scope; only the
-  §Artifact-location example name was bumped per tasks.md task 3). Flag if a follow-up bump wanted.
+- Scope note: README "Current version: v0.8.0" header is pre-existing/out of scope.
+- Sec advisory (non-blocking, future dep-bump task like task-047): quinn-proto 0.11.14->0.11.15
+  (7.5, optional/unreachable) + glib 0.18.5 (6.9, Linux-only). Not TASK-053 scope (no lockfile).
