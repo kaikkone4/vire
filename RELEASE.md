@@ -16,6 +16,32 @@ This release makes the in-app update check **resolve to a real state for the fir
 
 **Out of scope (deferred):** binary/installer build, sign, notarization, and asset upload — the Release is notes-only. The latest-release endpoint, semver comparison, and "Open Releases" all function without attached assets; the in-app downloader/installer remains TASK-042 territory.
 
+### DMG asset attached + release smoke checklist (TASK-053)
+
+The prebuilt macOS DMG deferred above was attached to the published `v0.8.1` Release in TASK-053, so the release is now installable without building from source. No source, schema, IPC, capability, `tauri.conf.json`, or CI change — this is a distribution-surface + docs step only (still **no** auto-updater, signing/notarization, or release-feed automation).
+
+**Shipped artifact (aarch64 only):**
+
+| Field | Value |
+|---|---|
+| Asset name | `Vire_0.8.1_aarch64.dmg` |
+| Size | 5,787,708 bytes (5.5 MB) |
+| sha256 | `e77d15cf2066a24ee344ea5ab65787c1551400799b766e8261e1e02e1e82e27f` |
+| Embedded `CFBundleShortVersionString` | `0.8.1` |
+| Download | https://github.com/kaikkone4/vire/releases/download/v0.8.1/Vire_0.8.1_aarch64.dmg |
+
+The recorded sha256 was verified by a download round-trip: the asset was fetched from the release and its sha256 matched the local build byte-for-byte.
+
+**Release smoke checklist (v0.8.1):**
+
+1. **Asset present & downloadable** — the `v0.8.1` release page lists `Vire_0.8.1_aarch64.dmg`; downloading it yields the sha256 above. ✅ verified (asset uploaded, download round-trip matches).
+2. **Mount + drag** — double-click the DMG to mount, drag **only `Vire.app`** onto the `Applications` shortcut. (Human step — physical Mac.)
+3. **First launch (unsigned Gatekeeper)** — the app is not code-signed/notarized; on first open **right-click `Vire.app` → Open** and confirm. Do not disable Gatekeeper or strip quarantine. (Human step.)
+4. **Runs without a dev server** — launch the installed app with no `npm run tauri:dev` / Vite server running; the frontend loads from the bundled assets. (Human step.)
+5. **Check for updates → up to date** — **Settings → Check for updates** returns *up to date* on a `0.8.1` build. The update check reads only the release `tag_name` (asset-independent), so this verifies the version/update wiring end-to-end, not the attached asset. (Human step.)
+
+Steps 2–5 require a physical Mac (outstanding human UAT gate); step 1 is verified in-pipeline.
+
 ## v0.8.0 — Zero-permission active-app and idle capture loop (TASK-048)
 
 **Branch:** `feat/task-048-active-window-app-idle-capture`

@@ -60,6 +60,26 @@ The app also accepts the bare `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` name
 
 Do not merge these files. The root `.env` holds settings the Vire app queries Langfuse with; the Docker-stack `.env` holds secrets the Langfuse server containers need to start.
 
+## Download & install (prebuilt)
+
+The quickest way to run Vire is to install the prebuilt macOS app — no toolchain, no build step.
+Building from source (below) is the alternative for developers, not the primary install path.
+
+1. Open the [latest release](https://github.com/kaikkone4/vire/releases/latest) and download the
+   DMG asset **`Vire_0.8.1_aarch64.dmg`** (Apple Silicon / `aarch64` only — Intel Macs are not
+   supported by this build).
+2. Double-click the downloaded `.dmg` to mount it, then drag **only `Vire.app`** onto the
+   `Applications` shortcut in the DMG window. Drag just the app — do **not** Select-All (⌘A) and
+   drag the whole window (see the [drag-only note](#install-and-run) below for why).
+3. **First launch — the app is not code-signed or notarized.** macOS Gatekeeper will block a
+   double-click on first open. Instead, **right-click (or Control-click) `Vire.app` in
+   `/Applications` → Open**, then confirm **Open** in the dialog. This is only needed once; after
+   that the app launches normally. (Alternatively: *System Settings → Privacy & Security → Open
+   Anyway*.) Do not disable Gatekeeper or strip quarantine to work around this.
+4. **No dev server is required at runtime** — the packaged app serves its frontend from inside the
+   `.app`. Configure Langfuse from **Settings → AI evidence import** (see the packaged-app notes
+   below).
+
 ## Build and run the packaged app
 
 Vire ships as a self-contained macOS application bundle that runs **without** a Vite dev server or
@@ -78,7 +98,7 @@ npm run tauri:build
 | Artifact | Path |
 |---|---|
 | App bundle | `src-tauri/target/release/bundle/macos/Vire.app` |
-| Disk image (where the toolchain supports it) | `src-tauri/target/release/bundle/dmg/Vire_<version>_<arch>.dmg` (e.g. `Vire_0.8.0_aarch64.dmg`) |
+| Disk image (where the toolchain supports it) | `src-tauri/target/release/bundle/dmg/Vire_<version>_<arch>.dmg` (e.g. `Vire_0.8.1_aarch64.dmg`) |
 
 ### Install and run
 
