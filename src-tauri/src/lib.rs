@@ -902,6 +902,29 @@ fn test_langfuse_connection(state: State<AppState>) -> CmdResult<langfuse::TestC
     )
 }
 
+/// Resolve the current active-window capture settings + read-only status/health (TASK-056 A/B).
+/// Pure read over the existing `settings` keys and `active_window_*` tables — no capture change, no
+/// permission, no restart. Mirrors the `get_langfuse_settings` shape.
+#[tauri::command]
+fn get_active_window_capture_settings(
+    state: State<AppState>,
+) -> CmdResult<active_window::settings_api::CaptureSettingsView> {
+    let db = db_conn(&state)?;
+    active_window::settings_api::resolve_view(&db, &now()).map_err(|e| e.to_string())
+}
+
+/// Validate then persist the active-window capture knobs to the exact `settings` keys the capture
+/// loop already reads each tick (TASK-056 A). `title_mode` is never accepted; capture stays OFF by
+/// default and is enabled only by an explicit user toggle. Returns the fresh resolved view.
+#[tauri::command]
+fn set_active_window_capture_settings(
+    state: State<AppState>,
+    input: active_window::settings_api::CaptureSettingsInput,
+) -> CmdResult<active_window::settings_api::CaptureSettingsView> {
+    let db = db_conn(&state)?;
+    active_window::settings_api::apply(&db, &input, &now())
+}
+
 /// Read-only runtime-reconciliation surface (TASK-022). Ingests the local coarse session log,
 /// reconciles it against the importer's evidence read-only, persists the observer-owned
 /// `ai_runtime_sessions` rows, and returns coarse per-state counts only — no secrets, session
@@ -1230,6 +1253,8 @@ pub fn run() {
             set_env_mapping,
             clear_env_mapping,
             list_evidence_projects,
+            get_active_window_capture_settings,
+            set_active_window_capture_settings,
             list_time_entry_suggestions,
             accept_time_entry_suggestion,
             dismiss_time_entry_suggestion,

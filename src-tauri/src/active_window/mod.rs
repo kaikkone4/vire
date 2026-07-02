@@ -5,6 +5,7 @@
 pub mod capture;
 pub mod config;
 pub mod model;
+pub mod settings_api;
 pub mod store;
 
 #[cfg(test)]

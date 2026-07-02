@@ -4,7 +4,10 @@ Vire is a local-only macOS desktop app for project time tracking, AI usage evide
 
 Current version: v0.8.0. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
 
-**New in v0.8.0:** an opt-in zero-permission active-app and idle capture loop (default OFF; no in-app UI in this release — see [docs/active-window-capture.md](docs/active-window-capture.md)).
+**New in v0.8.0:** an opt-in zero-permission active-app and idle capture loop (default OFF). **Settings →
+Active-window capture** provides the enable toggle, sample-interval/idle/retention controls, a live capture
+status/health readout, and a Captured-vs-Never-captured privacy table — see
+[docs/active-window-capture.md](docs/active-window-capture.md).
 
 ## Run locally
 
@@ -284,7 +287,10 @@ The test suite covers project create/update/archive persistence and active filte
 ### Dev mode (quick sanity)
 
 1. Launch with `npm run tauri:dev` and confirm the sidebar includes Today, Projects, Manual Entry, Reports, Suggestions, and Settings.
-2. Confirm the Today/Settings capture status says `Manual Mode / Capture deferred` and there are no automatic capture controls.
+2. Confirm the sidebar's capture status reads **Active-window capture: off** (or **Available on macOS
+   only** on non-macOS) and the Today banner reads **Active-window capture is off** — capture is disabled
+   by default and no view claims data is being collected until it is explicitly enabled in Settings →
+   Active-window capture.
 3. Create a project, edit it, then archive it. Confirm archived projects disappear from active entry pickers but remain visible in all-project/report history.
 4. Add, edit, and delete a manual entry; deletion requires confirmation.
 5. Restart the app and confirm projects and entries persist.
@@ -372,6 +378,28 @@ context-dependent Suggestions notices. Step 25 is optional (requires a same-minu
     identical `HH:MM` start and end is available, accept it — confirm it stores as a non-zero span
     (at least 1 min) with no error. For the `23:59` edge case, confirm the stored entry spans
     `23:58 → 23:59`, not midnight.
+
+### Active-window capture Settings UI (TASK-056 — required before release)
+
+Physical-Mac smoke is the mandated testable route for this capability: capture is signing-independent,
+but toggle → sampling behavior must be observed live rather than assumed from unit tests alone.
+
+26. **Settings panel:** open Settings and confirm the **Active-window capture** panel shows the enable
+    toggle, sample-interval / idle-candidate / away / retention fields, a capture status/health readout,
+    and the Captured-vs-Never-captured privacy table. On non-macOS, confirm the controls are disabled with
+    an "available on macOS only" note.
+27. **Enable capture:** toggle it on and Save. Within the configured sample interval, confirm
+    `last_sample_ts` advances and `samples_today` increments in the status readout, and that the sidebar
+    and Today banner both switch to "on" copy. Confirm no TCC/Accessibility prompt appears and captured
+    rows keep `window_title = NULL`.
+28. **Change cadence:** edit the sample interval or idle thresholds and Save — confirm the new values take
+    effect on the loop's next tick with no app restart. Submit an invalid value (e.g. `sample_seconds = 0`,
+    or an away threshold not greater than the idle-candidate threshold) — confirm it is rejected with a
+    clear message and the previously saved configuration is unchanged.
+29. **Degraded state:** induce a gap (e.g. lock the screen) — confirm the status names the degraded state
+    (e.g. `no_gui_session`) with when it began, never a blank or zeroed box.
+30. **Disable capture:** confirm sampling stops (no new raw rows) and the sidebar, Today banner, and
+    Settings panel all read "off" again, consistently.
 
 ## Local Langfuse Docker stack
 
@@ -481,7 +509,7 @@ The full per-session review and approval UI is out of scope for this release (TA
 
 Vire stores data in a local SQLite database on this Mac. It has no accounts, cloud sync, hosted API, or automatic data upload.
 
-**Active-app and idle capture (v0.8.0, macOS only, default OFF):** when enabled, the capture loop records the frontmost app's bundle ID and a coarse idle state (`active` / `idle_candidate` / `away`) every 5 seconds using only `NSWorkspace.frontmostApplication` and `CGEventSource` event age. No Accessibility permission, Screen Recording, event tap, or window title is ever read or stored — `window_title` is always `NULL`. Data stays in the local SQLite DB; no network egress. Enable with `VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED=1`. See [docs/active-window-capture.md](docs/active-window-capture.md).
+**Active-app and idle capture (v0.8.0, macOS only, default OFF):** when enabled, the capture loop records the frontmost app's bundle ID and a coarse idle state (`active` / `idle_candidate` / `away`) every 5 seconds using only `NSWorkspace.frontmostApplication` and `CGEventSource` event age. No Accessibility permission, Screen Recording, event tap, or window title is ever read or stored — `window_title` is always `NULL`. Data stays in the local SQLite DB; no network egress. Enable with `VIRE_ACTIVE_WINDOW_CAPTURE_ENABLED=1`, or in-app at **Settings → Active-window capture**, which also exposes cadence/retention controls and a live status readout. See [docs/active-window-capture.md](docs/active-window-capture.md).
 
 Screenshots, keystrokes, browser contents, full URLs, terminal commands, and screen pixels are not captured.
 

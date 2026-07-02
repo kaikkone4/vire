@@ -160,3 +160,30 @@ pub struct PruneStats {
     pub evidence_deleted: usize,
     pub capture_health_deleted: usize,
 }
+
+/// A coarse capture-health state for the status readout (TASK-056 B). Carries only the controlled
+/// `state` code, its start/since timestamp, and the already-bounded coarse `detail` reason code —
+/// never a title, path, URL, command, or secret (structurally absent upstream).
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthMarker {
+    pub state: String,
+    pub since_or_start_ts: String,
+    pub detail: Option<String>,
+}
+
+/// Read-only capture status/health projection over the three existing `active_window_*` tables
+/// (TASK-056 B). All fields are aggregates or bounded coarse state/detail codes from allowlisted
+/// columns; no schema change and no write path produce it, and it can carry no prohibited value.
+#[derive(Debug, Clone, Serialize)]
+pub struct CaptureStatusView {
+    /// `MAX(sample_ts)` over raw evidence; `None` when nothing has been captured yet.
+    pub last_sample_ts: Option<String>,
+    /// Raw observations recorded for the current local day.
+    pub samples_today: i64,
+    /// Normalized evidence blocks whose `day` is within the retention window.
+    pub evidence_blocks_retained: i64,
+    /// Currently-open (`end_ts IS NULL`) degraded-capture markers — ongoing gaps.
+    pub open_health: Vec<HealthMarker>,
+    /// Most-recent capture-health markers (open or closed), newest first.
+    pub recent_health: Vec<HealthMarker>,
+}

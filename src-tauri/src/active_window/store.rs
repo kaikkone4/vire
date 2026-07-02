@@ -5,8 +5,8 @@
 use rusqlite::{params, Connection};
 
 use super::model::{
-    health_state, idle_state, source, title_state, CaptureHealthEvent, EvidenceBlock,
-    EvidenceBlockView, PruneStats, RawObservation, TitleMode,
+    health_state, idle_state, source, title_state, CaptureHealthEvent, CaptureStatusView,
+    EvidenceBlock, EvidenceBlockView, HealthMarker, PruneStats, RawObservation, TitleMode,
 };
 
 // ----- controlled vocabulary constants ---------------------------------------------------------
@@ -338,6 +338,80 @@ pub fn capture_health_in_range(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+// ----- status projection (read-only, TASK-056 B) -----------------------------------------------
+
+/// How many most-recent `capture_health` rows the status snapshot returns in `recent_health`.
+pub const RECENT_HEALTH_LIMIT: i64 = 10;
+
+/// Read-only capture status/health snapshot over the three existing tables. No schema change and no
+/// write path: pure `MAX`/`COUNT`/state-code reads over allowlisted columns, so the result can carry
+/// only counts, timestamps, and bounded coarse state/detail codes — never a title, path, URL,
+/// command, or secret. `now_day` and `retention_from_day` are `YYYY-MM-DD` day keys computed by the
+/// caller so the projection stays a pure function of `(rows, day bounds)` and is trivially testable.
+pub fn capture_status_snapshot(
+    conn: &Connection,
+    now_day: &str,
+    retention_from_day: &str,
+) -> rusqlite::Result<CaptureStatusView> {
+    let last_sample_ts: Option<String> = conn.query_row(
+        "SELECT MAX(sample_ts) FROM active_window_raw_evidence",
+        [],
+        |r| r.get::<_, Option<String>>(0),
+    )?;
+
+    let samples_today: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM active_window_raw_evidence WHERE day = ?1",
+        params![now_day],
+        |r| r.get(0),
+    )?;
+
+    let evidence_blocks_retained: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM active_window_evidence WHERE day >= ?1",
+        params![retention_from_day],
+        |r| r.get(0),
+    )?;
+
+    let open_health = {
+        let mut stmt = conn.prepare(
+            "SELECT state, start_ts, detail FROM active_window_capture_health
+              WHERE end_ts IS NULL
+              ORDER BY start_ts DESC, id DESC",
+        )?;
+        let rows = stmt
+            .query_map([], map_health_marker)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+
+    let recent_health = {
+        let mut stmt = conn.prepare(
+            "SELECT state, start_ts, detail FROM active_window_capture_health
+              ORDER BY start_ts DESC, id DESC
+              LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![RECENT_HEALTH_LIMIT], map_health_marker)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+
+    Ok(CaptureStatusView {
+        last_sample_ts,
+        samples_today,
+        evidence_blocks_retained,
+        open_health,
+        recent_health,
+    })
+}
+
+fn map_health_marker(row: &rusqlite::Row) -> rusqlite::Result<HealthMarker> {
+    Ok(HealthMarker {
+        state: row.get(0)?,
+        since_or_start_ts: row.get(1)?,
+        detail: row.get(2)?,
+    })
 }
 
 // ----- retention -------------------------------------------------------------------------------
