@@ -3,7 +3,7 @@
 ## v0.8.2 — Publish the TASK-056 Settings UI so an older build detects the update (TASK-057)
 
 **Branch:** `feat/task-057-publish-v082-release`
-**PR:** #<pending>
+**PR:** #44
 
 ### What changed
 

@@ -19,7 +19,7 @@ changed, nothing else.** `src-tauri/src/update_check/` untouched; no `tauri-plug
 12/0; `npm run build` OK; `cargo fmt --check` clean; `openspec validate … --strict` valid.
 
 ## Blockers / flags
-- Draft PR opened by SW-2 (see stdout for #). Gates (SW-3/4/5) + merge pending.
+- Draft PR **#44** opened by SW-2 (base `main`). Gates (SW-3/4/5) + merge pending.
 - Env hygiene (non-blocker): parked 3 stashes on entry — task-056 tracked handoff/review edits, and
   task-053/054 untracked gate-doc drift (`git stash list` top entries). Not part of this branch.
 - Flag for Janne (non-blocking): bump is patch `0.8.2` per directive; TASK-056 feature implied `0.9.0`
