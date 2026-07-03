@@ -2,7 +2,7 @@
 
 Vire is a local-only macOS desktop app for project time tracking, AI usage evidence, and billing review. It imports AI traces (pi, Claude Code) from a **local Docker self-hosted Langfuse stack** as the primary AI time/usage/cost evidence source and requires human approval before any billable or profitability total is computed.
 
-Current version: v0.8.0. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
+Current version: v0.8.2. Includes manual time entries, projects, reports (with Last 7/14/30/90 day quick-range presets), and CSV export; a local Docker Langfuse AI trace importer with configurable range, backfill, and diagnostics; and an AI time-entry suggestion engine that proposes time blocks from imported Langfuse evidence for human review and explicit acceptance — nothing is auto-posted. Accepted suggestions carry AI cost (where available), visible in Reports summary cards and in the CSV export as `cost_total`/`cost_currency` columns. The Suggestions view provides actionable notices for unmapped environments, untimed entries, and a disabled Langfuse source (TASK-034).
 
 **New in v0.8.0:** an opt-in zero-permission active-app and idle capture loop (default OFF). **Settings →
 Active-window capture** provides the enable toggle, sample-interval/idle/retention controls, a live capture
@@ -69,7 +69,7 @@ The quickest way to run Vire is to install the prebuilt macOS app — no toolcha
 Building from source (below) is the alternative for developers, not the primary install path.
 
 1. Open the [latest release](https://github.com/kaikkone4/vire/releases/latest) and download the
-   DMG asset **`Vire_0.8.1_aarch64.dmg`** (Apple Silicon / `aarch64` only — Intel Macs are not
+   DMG asset **`Vire_0.8.2_aarch64.dmg`** (Apple Silicon / `aarch64` only — Intel Macs are not
    supported by this build).
 2. Double-click the downloaded `.dmg` to mount it, then drag **only `Vire.app`** onto the
    `Applications` shortcut in the DMG window. Drag just the app — do **not** Select-All (⌘A) and
@@ -121,7 +121,7 @@ npm run tauri:build
 | Artifact | Path |
 |---|---|
 | App bundle | `src-tauri/target/release/bundle/macos/Vire.app` |
-| Disk image (where the toolchain supports it) | `src-tauri/target/release/bundle/dmg/Vire_<version>_<arch>.dmg` (e.g. `Vire_0.8.1_aarch64.dmg`) |
+| Disk image (where the toolchain supports it) | `src-tauri/target/release/bundle/dmg/Vire_<version>_<arch>.dmg` (e.g. `Vire_0.8.2_aarch64.dmg`) |
 
 ### Install and run
 
