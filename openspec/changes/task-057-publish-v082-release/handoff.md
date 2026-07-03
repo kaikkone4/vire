@@ -3,33 +3,32 @@
 # Handoff — TASK-057 publish Vire v0.8.2 release
 
 - **Change dir**: `openspec/changes/task-057-publish-v082-release/`
-- **Gate**: SW-2 **Part A DONE** (version bump landed on branch). Next = SW-3 QA.
-- **Tier**: L2 · **Split**: NO (one task; internal Part A/Part B boundary)
-- **Branch**: `feat/task-057-publish-v082-release`, cut from real `origin/main` `df79423` (incl. TASK-056).
+- **Branch / PR**: `feat/task-057-publish-v082-release` · PR #44 **ready for review**, base `main`
+- **Phase / gate**: SW-4 **PASS**, SW-5 **PASS**, Docs **complete**, **SW-6 Release Part A DONE**
+- **Tier**: L2 · Part A only; Part B belongs to SW-6 after merge
 
-## Part A done (SW-2)
-Bumped version triple `0.8.1→0.8.2`: `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`,
-`src-tauri/Cargo.lock` (`vire` line only — `cargo build --locked` confirms zero dep drift).
-Prepended `RELEASE.md` `## v0.8.2` (TASK-056 Settings UI + unsigned Plan-B/xattr notes; `v0.8.1`/`v0.8.0`
-intact). `README.md`: `Current version: v0.8.0→v0.8.2` + two DMG examples `0.8.1→0.8.2`. **5 files
-changed, nothing else.** `src-tauri/src/update_check/` untouched; no `tauri-plugin-updater`.
+## Last gate result
+SW-6 (this gate): task `RELEASE.md` written with all 3 declarations (patch / automated /
+compatibility matrix — no dep drift). Tag `task-057/v0.8.2` created and **signed** (SSH format,
+verified via `git cat-file -p`). PR #44 promoted draft → ready-for-review. Gate artifacts
+(qa/review/sec/docs/handoff) committed. No GitHub Release or DMG built — correctly deferred to
+Part B per task scope.
 
-## Verify (all green)
-`cargo build --locked` OK; triple all `0.8.2`; `cargo test update_check` 11/0; `updateCheckUi.test.mjs`
-12/0; `npm run build` OK; `cargo fmt --check` clean; `openspec validate … --strict` valid.
+## Active blockers
+None. PR #44 ready for Janne to merge.
 
-## Blockers / flags
-- Draft PR **#44** opened by SW-2 (base `main`). Gates (SW-3/4/5) + merge pending.
-- Env hygiene (non-blocker): parked 3 stashes on entry — task-056 tracked handoff/review edits, and
-  task-053/054 untracked gate-doc drift (`git stash list` top entries). Not part of this branch.
-- Flag for Janne (non-blocking): bump is patch `0.8.2` per directive; TASK-056 feature implied `0.9.0`
-  by strict SemVer. `0.8.2` valid pre-1.0 and meets the goal (any `>0.8.1` triggers UpdateAvailable).
-- feedback_to_ba: DEC-031 (release ordering); FB-054-1 (TASK-028 signing) open. (non-blocking)
+## Exact next action
+Janne merges PR #44 → route to SW-6 Part B: build `Vire_0.8.2_aarch64.dmg`, publish full
+non-draft/non-prerelease `v0.8.2` release on merged `main` (steps in this dir's `RELEASE.md`
+§Part B), live-smoke update check, backfill DMG name/size/sha256 into root `RELEASE.md`.
 
-## Part B (SW-6, AFTER merge — NOT done here)
-`git checkout main` (incl. `0.8.2`+`df79423`) → `npm run tauri:build` → `Vire_0.8.2_aarch64.dmg` →
-`gh release create v0.8.2 --target <sha> ... <dmg>` (full, server-side tag; unsigned Plan-B notes).
-Live verify: 0.8.1 build → UpdateAvailable(0.8.1→0.8.2); 0.8.2 build → UpToDate.
+## Required files
+- `RELEASE.md` (this dir) — 3 declarations + Part B instructions.
+- `review.md`, `qa.md`, `docs.md`, `sec.md` — gate evidence.
+- `README.md`, root `RELEASE.md` — install/release note wording.
+- `src-tauri/Cargo.toml`, `tauri.conf.json`, `Cargo.lock` — version triple (0.8.2, confirmed).
 
-## Next role
-**SW-3 QA Engineer** — gate Part A (`qa.md`).
+## Notes carried forward
+- Merge base `df79423` (TASK-056) confirmed ancestor of `HEAD`. Product diff (excl. openspec) is
+  exactly README, RELEASE, Cargo.toml, tauri.conf.json, Cargo.lock; `Cargo.lock` only bumps local
+  `vire` version — no dep drift. No update_check/updater/asset/schema/CSP/capability/npm changes.
