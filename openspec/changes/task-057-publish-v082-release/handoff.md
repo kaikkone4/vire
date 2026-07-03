@@ -15,7 +15,12 @@ verified via `git cat-file -p`). PR #44 promoted draft → ready-for-review. Gat
 Part B per task scope.
 
 ## Active blockers
-None. PR #44 ready for Janne to merge.
+None. DevOps CI-unblock applied (2026-07-03): required `dependency-advisories` gate was failing on
+two new SCORED quick-xml advisories (RUSTSEC-2026-0194/0195, DoS 7.5). No upstream fix exists (plist
+1.9.0 hard-pins quick-xml <0.40; latest tauri/plist). Fixed via documented targeted `[advisories].
+ignore` in `src-tauri/deny.toml` (group C) — unreachable in vire (own Info.plist only; no untrusted
+XML; no first-party quick-xml/plist use). Verified locally: cargo-deny 0.19.9 `advisories ok` exit 0;
+control run fails on exactly those 2 IDs. See `ops-review.md`. Pushed to PR #44; awaiting CI re-run.
 
 ## Exact next action
 Janne merges PR #44 → route to SW-6 Part B: build `Vire_0.8.2_aarch64.dmg`, publish full
@@ -23,6 +28,8 @@ non-draft/non-prerelease `v0.8.2` release on merged `main` (steps in this dir's 
 §Part B), live-smoke update check, backfill DMG name/size/sha256 into root `RELEASE.md`.
 
 ## Required files
+- `ops-review.md` (this dir) — CI-unblock rationale (quick-xml advisories) + local verification.
+- `src-tauri/deny.toml` — targeted `[advisories].ignore` group (C) for RUSTSEC-2026-0194/0195.
 - `RELEASE.md` (this dir) — 3 declarations + Part B instructions.
 - `review.md`, `qa.md`, `docs.md`, `sec.md` — gate evidence.
 - `README.md`, root `RELEASE.md` — install/release note wording.
