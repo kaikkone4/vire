@@ -67,6 +67,9 @@ ignore = [
     "RUSTSEC-2025-0080",  # unic-common        0.9.0 — unmaintained (rust-unic EOL); urlpattern -> tauri-utils
     "RUSTSEC-2025-0100",  # unic-ucd-ident     0.9.0 — unmaintained (rust-unic EOL); urlpattern -> tauri-utils
     "RUSTSEC-2025-0098",  # unic-ucd-version   0.9.0 — unmaintained (rust-unic EOL); urlpattern -> tauri-utils
+    # -- group (C): quick-xml XML-parsing DoS, SCORED 7.5 but NOT reachable in vire — see block below --
+    "RUSTSEC-2026-0194",  # quick-xml 0.39.4 — O(N^2) duplicate-attr DoS; plist -> tauri-utils (own Info.plist only)
+    "RUSTSEC-2026-0195",  # quick-xml 0.39.4 — unbounded ns-decl alloc DoS; plist -> tauri-utils (own Info.plist only)
 ]
 
 # ----------------------------------------------------------------------------------
@@ -90,6 +93,46 @@ ignore = [
 # tauri-build). No first-party vire code calls unic-* directly. Review trigger: re-evaluate if a
 # `urlpattern`/`tauri-utils` release drops the rust-unic dependency or if any of these advisories
 # is upgraded to a scored CVE.
+
+# ----------------------------------------------------------------------------------
+# ACCEPTED — APPLE-PRESENT, SCORED advisories (group C; quick-xml XML-parsing DoS)
+# ----------------------------------------------------------------------------------
+# Added TASK-057 (2026-07-03). UNLIKE group (B), these are SCORED CVSS 7.5 HIGH vulnerabilities
+# (not unmaintained-class). They are accepted here on a documented UNREACHABILITY basis, not
+# because they are low-severity in the abstract. Read the rationale before touching this block.
+#
+#   ID                  Crate (locked)     Class  CVSS  Fix          Apple reachability
+#   ------------------  -----------------  -----  ----  -----------  -----------------------------------
+#   RUSTSEC-2026-0194   quick-xml 0.39.4   DoS    7.5   >= 0.41.0    plist -> tauri-utils/-codegen/-build
+#   RUSTSEC-2026-0195   quick-xml 0.39.4   DoS    7.5   >= 0.41.0    plist -> tauri-utils/-codegen/-build
+#
+#   0194: O(N^2) duplicate-attribute scan in BytesStart::attributes() — a start tag with ~10^5
+#         attributes burns minutes of CPU (algorithmic-complexity DoS).
+#   0195: NsReader accumulates namespace declarations with no upper bound — a crafted start tag
+#         forces unbounded heap allocation (memory-exhaustion DoS).
+#
+# WHY ACCEPTED — reachability / trust boundary:
+#   * quick-xml enters the graph ONLY via `plist` (verified: `cargo tree -i quick-xml
+#     --target aarch64-apple-darwin` shows plist as the sole parent). `plist` is consumed
+#     exclusively by Tauri's `tauri-utils` / `tauri-codegen` / `tauri-build` for Apple
+#     property-list (Info.plist) handling — mostly build/codegen time, plus tauri-utils metadata.
+#   * In that usage the XML parsed is the application's OWN Info.plist: developer-authored and
+#     sealed inside the signed .app bundle at build time. It is never network-, user-, or
+#     attacker-supplied. Both advisories are remote DoS against services that ingest UNTRUSTED
+#     XML at scale (the 0195 PoC OOM-killed NLnet Labs Routinator's concurrent RRDP workers).
+#     vire is a single-user local macOS desktop app with no untrusted-XML ingestion path, so the
+#     CVSS-7.5 network-attacker vector is not reachable.
+#   * vire's first-party code calls neither quick-xml nor plist (grep-verified across src/,
+#     src-tauri/src/). Foreground-app bundle IDs in active_window come from AppKit APIs, not XML.
+#   * NO upstream fix is available: plist 1.9.0 is the latest plist release and hard-pins
+#     `quick-xml = "^0.39.2"` (< 0.40), so a quick-xml >= 0.41 bump is resolver-REJECTED
+#     (`cargo update -p quick-xml --precise 0.41.0` fails); no plist release consumes quick-xml
+#     >= 0.41; tauri 2.11.2 is already the latest 2.x. There is no dependency/lockfile move that
+#     clears these without an upstream plist release — hence acceptance, not upgrade.
+# Review trigger (ANY of): (i) plist ships a release built on quick-xml >= 0.41 — bump and DROP
+# these two IDs; (ii) vire (or a Tauri path it enables) begins parsing untrusted/remote XML —
+# reachability changes, re-evaluate immediately; (iii) either advisory is re-scored or superseded.
+# See openspec/changes/task-057-publish-v082-release/ops-review.md.
 
 # ----------------------------------------------------------------------------------
 # DEFERRED — LINUX-ONLY advisories (group A; NOT compiled into the shipped macOS .app)
